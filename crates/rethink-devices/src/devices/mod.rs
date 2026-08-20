@@ -84,6 +84,7 @@ register_devices! {
         dev_1wpu4cigcr__2 => { "1WPU4CIGCR__2" },
         pac_910604_ww => { "PAC_910604_WW" },
         st_b_e4h01y_apl => { "ST_B_E4H01Y_APL" },
+        rh90v9_ww => { "RH90V9_WW" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
