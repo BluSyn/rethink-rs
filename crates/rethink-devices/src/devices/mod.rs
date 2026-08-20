@@ -49,7 +49,8 @@ macro_rules! register_devices {
 register_devices! {
     t2 {
         pot_056905_ww => { "POT_056905_WW" },
-        rac_056905_ww => { "RAC_056905_WW" | "RAC_0B0001_WW" | "CST_570004_WW" },
+        rac_056905_ww => { "RAC_056905_WW" | "RAC_0B0001_WW" },
+        cst_570004_ww => { "CST_570004_WW" },
         win_056905_ww => { "WIN_056905_WW" },
         dev_2ref11eida__4 => { "2REF11EIDA__4" },
         dev_2ref11ebivpc4 => { "2REF11EBIVPC4" },

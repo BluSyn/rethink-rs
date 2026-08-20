@@ -97,7 +97,10 @@ mod tests {
         let rac_alias = t2_factory("RAC_0B0001_WW").unwrap();
         let cst = t2_factory("CST_570004_WW").unwrap();
         assert!(std::ptr::fn_addr_eq(rac, rac_alias));
-        assert!(std::ptr::fn_addr_eq(rac, cst));
+        assert!(
+            !std::ptr::fn_addr_eq(rac, cst),
+            "CST cassette is not a RAC wall-unit alias"
+        );
 
         let f = t2_factory("F_V__F___W.B_1QEUK").unwrap();
         let f_va = t2_factory("F_VA_F___W.B__QEUK").unwrap();

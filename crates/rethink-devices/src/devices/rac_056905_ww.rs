@@ -1,4 +1,5 @@
-//! RAC_056905_WW (aliases RAC_0B0001_WW, CST_570004_WW) — LG room air conditioner.
+//! RAC_056905_WW (alias RAC_0B0001_WW) — LG room air conditioner.
+//! Cassette CST_570004_WW has its own handler (different mode/fan/swing tables).
 
 use crate::ac_tables::{rac_air_temp, rac_pipe_temp};
 use crate::device_trait::DeviceHandler;
