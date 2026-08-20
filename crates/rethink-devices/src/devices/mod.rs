@@ -80,6 +80,7 @@ register_devices! {
         dhum_231006_ww => { "DHUM_231006_WW" },
         hum_056905_ww => { "HUM_056905_WW" },
         studio_hood => { "STUDIO_HOOD" },
+        hwwa9k_f2 => { "HWWA9K_F2" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
