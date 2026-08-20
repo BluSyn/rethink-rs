@@ -82,6 +82,7 @@ register_devices! {
         studio_hood => { "STUDIO_HOOD" },
         hwwa9k_f2 => { "HWWA9K_F2" },
         dev_1wpu4cigcr__2 => { "1WPU4CIGCR__2" },
+        pac_910604_ww => { "PAC_910604_WW" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
