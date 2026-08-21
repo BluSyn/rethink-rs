@@ -447,20 +447,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn writes_dump_exports_when_scratch_present() {
-        let dir = std::path::Path::new("/tmp/grok-goal-bd779ae3d33e/implementer");
-        if !dir.is_dir() {
-            return;
-        }
-        for (name, hex, file) in [
-            ("DHUM_056905_WW", DUMP_DHUM, "dump-dhum.txt"),
-            ("CST_570004_WW", DUMP_CST, "dump-cst.txt"),
-            ("RAC_056905_WW", DUMP_RAC, "dump-rac.txt"),
-        ] {
-            let (_c, text) = export_dump(name, hex);
-            std::fs::write(dir.join(file), text).expect("write dump export");
-        }
-    }
 }
