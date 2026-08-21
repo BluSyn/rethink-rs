@@ -378,12 +378,13 @@ mod tests {
         assert_eq!(named(&c, 0x3e8), "caps_marker_hum");
         assert!(text.contains("caps_humidity_min"));
         assert!(!text.contains("0x2e5 UNKNOWN"));
-        for u in c.iter().filter(|x| !x.known) {
-            assert!(
-                residual_note(u.t).is_some(),
-                "DHUM unknown 0x{:03x} has no residual note",
-                u.t
-            );
+        let unknown: Vec<u16> = c.iter().filter(|x| !x.known).map(|x| x.t).collect();
+        assert_eq!(
+            unknown,
+            vec![0x2c0, 0x2db, 0x2dc, 0x2dd, 0x2cf, 0x2f4, 0x2f5, 0x2f6, 0x350, 0x374]
+        );
+        for id in &unknown {
+            assert!(residual_note(*id).is_some(), "DHUM unknown 0x{id:03x} has no residual note");
         }
     }
 
@@ -404,12 +405,16 @@ mod tests {
         assert!(text.contains("caps_temp_min_half_c"));
         assert!(!text.contains("0x2c1 UNKNOWN"));
         assert!(!text.contains("0x2cb UNKNOWN"));
-        for u in c.iter().filter(|x| !x.known) {
-            assert!(
-                residual_note(u.t).is_some(),
-                "CST unknown 0x{:03x} has no residual note",
-                u.t
-            );
+        let unknown: Vec<u16> = c.iter().filter(|x| !x.known).map(|x| x.t).collect();
+        assert_eq!(
+            unknown,
+            vec![
+                0x2c0, 0x2c3, 0x2c4, 0x2dc, 0x2ee, 0x2ef, 0x2f3, 0x2ce, 0x2dd, 0x2c7, 0x2f5, 0x2db,
+                0x397, 0x397, 0x350, 0x2f4, 0x374
+            ]
+        );
+        for id in &unknown {
+            assert!(residual_note(*id).is_some(), "CST unknown 0x{id:03x} has no residual note");
         }
         assert!(text.contains("residual:"));
     }
@@ -428,12 +433,13 @@ mod tests {
         assert_eq!(named(&c, 0x2cd), "feature_bits_2cd");
         assert!(text.contains("filter_capability"));
         assert!(!text.contains("0x2e1 UNKNOWN"));
-        for u in c.iter().filter(|x| !x.known) {
-            assert!(
-                residual_note(u.t).is_some(),
-                "RAC unknown 0x{:03x} has no residual note",
-                u.t
-            );
+        let unknown: Vec<u16> = c.iter().filter(|x| !x.known).map(|x| x.t).collect();
+        assert_eq!(
+            unknown,
+            vec![0x2c0, 0x2c3, 0x2c4, 0x2db, 0x2dc, 0x374, 0x2c7, 0x2f5]
+        );
+        for id in &unknown {
+            assert!(residual_note(*id).is_some(), "RAC unknown 0x{id:03x} has no residual note");
         }
     }
 
@@ -445,6 +451,24 @@ mod tests {
                 "residual 0x{:03x} is also in KNOWN_TAGS",
                 r.id
             );
+        }
+    }
+
+    /// `TLV_DUMP_OUTDIR=<dir> cargo test -p rethink-util --lib tlv_catalog`
+    /// writes shipped classify/export text for the three user dumps.
+    #[test]
+    fn write_dump_exports_if_outdir_set() {
+        let Ok(dir) = std::env::var("TLV_DUMP_OUTDIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        for (model, hex, file) in [
+            ("DHUM_056905_WW", DUMP_DHUM, "dump-dhum.txt"),
+            ("CST_570004_WW", DUMP_CST, "dump-cst.txt"),
+            ("RAC_056905_WW", DUMP_RAC, "dump-rac.txt"),
+        ] {
+            let (_c, text) = export_dump(model, hex);
+            std::fs::write(dir.join(file), &text).unwrap_or_else(|e| panic!("write {file}: {e}"));
         }
     }
 }
