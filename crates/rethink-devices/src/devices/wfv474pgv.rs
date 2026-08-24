@@ -138,11 +138,6 @@ fn remote_for(id: &str) -> Arc<Mutex<RemoteParams>> {
         .clone()
 }
 
-#[cfg(test)]
-fn clear_saved_remote() {
-    saved_remote().lock().clear();
-}
-
 fn lower_op(mode: &str) -> Option<u8> {
     match mode {
         "Bake" => Some(0x15),
@@ -758,16 +753,42 @@ pub fn create(
 mod tests {
     use super::*;
     use crate::device_trait::DeviceHandler;
-    use crate::test_support::{make_t2, meta, prop, DEVICE_ID};
+    use crate::test_support::meta;
     use rethink_core::{hex_decode, hex_encode, wrap_aabb, MockThinq2Device, Thinq2Device};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Process-global `saved_remote` is keyed by appliance id (TS
+    /// `savedRemoteParams`). Node tests are serial and can `Map.clear()`;
+    /// `cargo test` is parallel, so each case must use a unique thinq id
+    /// and must not wipe the map.
+    fn next_id() -> String {
+        static N: AtomicU64 = AtomicU64::new(1);
+        format!("wfv474pgv-{}", N.fetch_add(1, Ordering::Relaxed))
+    }
 
     fn make() -> (
         Arc<rethink_core::MockHaConnection>,
         Arc<rethink_core::MockThinq2Device>,
         Arc<Device>,
     ) {
-        clear_saved_remote();
-        make_t2("WFV474PGV", Device::new)
+        let id = next_id();
+        let ha = rethink_core::MockHaConnection::new();
+        let m = meta("WFV474PGV");
+        let thinq = MockThinq2Device::new(id, m.clone());
+        let ha_dyn: Arc<dyn HaConnection> = ha.clone();
+        let tq_dyn: Arc<dyn Thinq2Device> = thinq.clone();
+        let dev = Device::new(ha_dyn, tq_dyn, m);
+        (ha, thinq, dev)
+    }
+
+    fn only_dev(ha: &rethink_core::MockHaConnection) -> rethink_core::ha::MockDeviceInfo {
+        let devices = ha.devices();
+        assert_eq!(devices.len(), 1, "expected one HA device, got {}", devices.len());
+        devices.into_values().next().unwrap()
+    }
+
+    fn prop(ha: &rethink_core::MockHaConnection, name: &str) -> Option<String> {
+        only_dev(ha).properties.get(name).map(|p| p.as_string())
     }
 
     fn inner_hex(packet: &[u8]) -> String {
@@ -813,7 +834,7 @@ mod tests {
     #[test]
     fn publishes_status_controls_and_diagnostics() {
         let (ha, _, _) = make();
-        let device = ha.device(DEVICE_ID).unwrap();
+        let device = only_dev(&ha);
         let comps = &device.config.as_ref().unwrap().components;
         assert_eq!(comps["cooktop_status"]["platform"], "binary_sensor");
         assert_eq!(comps["cooktop_status"]["payload_on"], "ON");
@@ -1198,7 +1219,7 @@ mod tests {
         assert_eq!(prop(&ha, "upper_oven_remote_start").as_deref(), Some("ON"));
 
         let ha_dyn: Arc<dyn HaConnection> = ha.clone();
-        let thinq2 = MockThinq2Device::new(DEVICE_ID, meta("WFV474PGV"));
+        let thinq2 = MockThinq2Device::new(thinq.id(), meta("WFV474PGV"));
         let tq_dyn: Arc<dyn Thinq2Device> = thinq2;
         let _dev2 = Device::new(ha_dyn, tq_dyn, meta("WFV474PGV"));
         assert_eq!(prop(&ha, "upper_remote_temperature").as_deref(), Some("425"));
