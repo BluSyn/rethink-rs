@@ -31,6 +31,14 @@ pub trait Thinq1Device: Send + Sync {
     /// Status reports are binary frames (e.g. 28-byte washer state).
     fn on_data(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>);
     fn emit_data(&self, buf: &[u8]);
+    /// Optional HTTP diagmon reports (energyMonInfo, …). Default is a no-op so
+    /// existing adapters compile; mocks and live wiring can override.
+    fn on_diagmon(&self, handler: Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>) {
+        let _ = handler;
+    }
+    fn emit_diagmon(&self, diag_mon_type: &str, decoded: serde_json::Value) {
+        let _ = (diag_mon_type, decoded);
+    }
 }
 
 /// Mock ThinQ2 device for unit tests.
@@ -107,6 +115,7 @@ pub struct MockThinq1Device {
     meta: Metadata,
     sent: Mutex<Vec<serde_json::Value>>,
     handlers: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
+    diagmon_handlers: Mutex<Vec<Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>>>,
 }
 
 impl MockThinq1Device {
@@ -116,6 +125,7 @@ impl MockThinq1Device {
             meta,
             sent: Mutex::new(Vec::new()),
             handlers: Mutex::new(Vec::new()),
+            diagmon_handlers: Mutex::new(Vec::new()),
         })
     }
 
@@ -149,6 +159,17 @@ impl Thinq1Device for MockThinq1Device {
         let guard = self.handlers.lock();
         for h in guard.iter() {
             h(buf);
+        }
+    }
+
+    fn on_diagmon(&self, handler: Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>) {
+        self.diagmon_handlers.lock().push(handler);
+    }
+
+    fn emit_diagmon(&self, diag_mon_type: &str, decoded: serde_json::Value) {
+        let guard = self.diagmon_handlers.lock();
+        for h in guard.iter() {
+            h(diag_mon_type, &decoded);
         }
     }
 }

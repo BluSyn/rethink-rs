@@ -91,5 +91,6 @@ register_devices! {
     }
     t1 {
         wtdn3 => { "WTDN3" },
+        f3l2cnv4w_wifi => { "F3L2CNV4W_WIFI" },
     }
 }
