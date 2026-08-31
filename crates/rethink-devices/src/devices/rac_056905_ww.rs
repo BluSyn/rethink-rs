@@ -20,9 +20,11 @@ struct Inner {
     power_state_prev: Option<bool>,
     mode_change_hooks: Vec<PowerModeChangeHook>,
     mode_prev: Option<String>,
-    air_clean: bool,
-    jet_mode: bool,
-    energy_save: bool,
+    /// `None` until a live TLV is seen. Reconnect must not write OFF for an
+    /// unknown initial value (upstream master `211a0bc`).
+    air_clean: Option<bool>,
+    jet_mode: Option<bool>,
+    energy_save: Option<bool>,
     filter_used_time: u32,
     filter_life_time: u32,
     filter_changed_date: u32,
@@ -48,9 +50,9 @@ impl Device {
                 power_state_prev: None,
                 mode_change_hooks: Vec::new(),
                 mode_prev: None,
-                air_clean: false,
-                jet_mode: false,
-                energy_save: false,
+                air_clean: None,
+                jet_mode: None,
+                energy_save: None,
                 filter_used_time: 0,
                 filter_life_time: 0,
                 filter_changed_date: 0,
@@ -950,7 +952,7 @@ impl Device {
         let mut f = FieldDefinition::new(name, "").with_id(id);
         f.write_xform = Some(Box::new(move |val| {
             let on = val == "ON";
-            this_w.inner.lock().jet_mode = on;
+            this_w.inner.lock().jet_mode = Some(on);
             if !on {
                 return Some(0i64.into());
             }
@@ -980,7 +982,7 @@ impl Device {
             if !((jet_cool && mode == Some(0)) || (jet_heat && mode == Some(4))) {
                 return false;
             }
-            this_rc.inner.lock().jet_mode = matches!(val, PropertyValue::Str(s) if s == "ON");
+            this_rc.inner.lock().jet_mode = Some(matches!(val, PropertyValue::Str(s) if s == "ON"));
             true
         }));
         f.write_callback = Some(Box::new(move |_val| {
@@ -994,7 +996,9 @@ impl Device {
         let this = self.clone();
         let prop_name = format!("{name}-");
         self.inner.lock().mode_change_hooks.push(Box::new(move || {
-            let on = this.inner.lock().jet_mode;
+            let Some(on) = this.inner.lock().jet_mode else {
+                return;
+            };
             this.core
                 .set_property(&prop_name, if on { "ON" } else { "OFF" });
         }));
@@ -1160,9 +1164,9 @@ impl Device {
             }
             let on = matches!(val, PropertyValue::Str(s) if s == "ON");
             match field_r.as_str() {
-                "air_clean" => this_r.inner.lock().air_clean = on,
-                "jet_mode" => this_r.inner.lock().jet_mode = on,
-                "energy_save" => this_r.inner.lock().energy_save = on,
+                "air_clean" => this_r.inner.lock().air_clean = Some(on),
+                "jet_mode" => this_r.inner.lock().jet_mode = Some(on),
+                "energy_save" => this_r.inner.lock().energy_save = Some(on),
                 _ => {}
             }
             true
@@ -1170,9 +1174,9 @@ impl Device {
         f.write_callback = Some(Box::new(move |val| {
             let on = val == 1;
             match field_w.as_str() {
-                "air_clean" => this_w.inner.lock().air_clean = on,
-                "jet_mode" => this_w.inner.lock().jet_mode = on,
-                "energy_save" => this_w.inner.lock().energy_save = on,
+                "air_clean" => this_w.inner.lock().air_clean = Some(on),
+                "jet_mode" => this_w.inner.lock().jet_mode = Some(on),
+                "energy_save" => this_w.inner.lock().energy_save = Some(on),
                 _ => {}
             }
             this_w.get_power_tlv() != Some(0)
@@ -1192,7 +1196,10 @@ impl Device {
                     "air_clean" => this.inner.lock().air_clean,
                     "jet_mode" => this.inner.lock().jet_mode,
                     "energy_save" => this.inner.lock().energy_save,
-                    _ => false,
+                    _ => None,
+                };
+                let Some(on) = on else {
+                    return;
                 };
                 this.core
                     .set_property(&prop_name, if on { "ON" } else { "OFF" });
@@ -1206,7 +1213,10 @@ impl Device {
                     "air_clean" => this.inner.lock().air_clean,
                     "jet_mode" => this.inner.lock().jet_mode,
                     "energy_save" => this.inner.lock().energy_save,
-                    _ => false,
+                    _ => None,
+                };
+                let Some(on) = on else {
+                    return;
                 };
                 this.core
                     .set_property(&prop_name, if on { "ON" } else { "OFF" });
@@ -1498,6 +1508,44 @@ mod tests {
         assert_eq!(
             ha.get_property(DEVICE_ID, "climate", "swing_mode_state"),
             Some("off".into())
+        );
+    }
+
+    #[test]
+    fn unknown_jet_airclean_energysave_not_written_on_mode_or_power_change() {
+        // Master 211a0bc: reconnect must not write OFF for switches whose live
+        // value has never been received.
+        let (_, thinq, dev) = build_ready();
+        {
+            let mut inner = dev.inner.lock();
+            inner.jet_mode = None;
+            inner.air_clean = None;
+            inner.energy_save = None;
+        }
+        thinq.reset_recorder();
+        {
+            let hooks = std::mem::take(&mut dev.inner.lock().mode_change_hooks);
+            for h in &hooks {
+                h();
+            }
+            dev.inner.lock().mode_change_hooks = hooks;
+        }
+        {
+            let hooks = std::mem::take(&mut dev.inner.lock().power_change_hooks);
+            for h in &hooks {
+                h();
+            }
+            dev.inner.lock().power_change_hooks = hooks;
+        }
+        assert!(
+            thinq.outbox().is_empty(),
+            "reconnect must not write unknown jet/airclean/energysave; got {}",
+            thinq
+                .outbox()
+                .iter()
+                .map(|p| hex_encode(p))
+                .collect::<Vec<_>>()
+                .join(",")
         );
     }
 }
