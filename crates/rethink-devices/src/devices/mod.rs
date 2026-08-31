@@ -90,6 +90,7 @@ register_devices! {
         wfv474pgv => { "WFV474PGV" },
         wmvem1825 => { "WMVEM1825" },
         wlrel6323s => { "WLREL6323S" },
+        y_vb_y___w_b32qeuk => { "Y_VB_Y___W.B32QEUK" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
