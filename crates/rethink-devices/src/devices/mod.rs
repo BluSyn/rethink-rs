@@ -88,6 +88,7 @@ register_devices! {
         st_b_e4h01y_apl => { "ST_B_E4H01Y_APL" },
         rh90v9_ww => { "RH90V9_WW" },
         wfv474pgv => { "WFV474PGV" },
+        wmvem1825 => { "WMVEM1825" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
