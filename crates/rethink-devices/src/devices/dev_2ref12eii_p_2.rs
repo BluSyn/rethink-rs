@@ -4,7 +4,10 @@
 //!   fridge C = 7 - raw, freezer C = -(raw + 15).
 
 use crate::device_trait::DeviceHandler;
-use crate::fridge_common::{freezer_range, fridge_range, unpack_status, TemperatureUnit};
+use crate::fridge_common::{
+    freezer_range, fridge_range, status_at, TemperatureUnit, ST_ANY_DOOR_OPEN, ST_EXPRESS_FREEZE,
+    ST_FRESH_AIR_FILTER, ST_FREEZER_SETPOINT, ST_FRIDGE_SETPOINT, ST_WATER_FILTER,
+};
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::ha::{HaConnection, PropertyValue};
 use rethink_core::metadata::Metadata;
@@ -147,13 +150,12 @@ impl Device {
     }
 
     fn process_status(&self, cur: &[u8]) {
-        let s = unpack_status(cur);
-        let fridge_raw = *s.get("fridgeSetpoint").unwrap_or(&0);
-        let freezer_raw = *s.get("freezerSetpoint").unwrap_or(&0);
-        let express = *s.get("expressFreeze").unwrap_or(&0);
-        let pure = *s.get("freshAirFilter").unwrap_or(&0);
-        let water = *s.get("waterFilter").unwrap_or(&0);
-        let door = *s.get("anyDoorOpen").unwrap_or(&0);
+        let fridge_raw = status_at(cur, ST_FRIDGE_SETPOINT);
+        let freezer_raw = status_at(cur, ST_FREEZER_SETPOINT);
+        let express = status_at(cur, ST_EXPRESS_FREEZE);
+        let pure = status_at(cur, ST_FRESH_AIR_FILTER);
+        let water = status_at(cur, ST_WATER_FILTER);
+        let door = status_at(cur, ST_ANY_DOOR_OPEN);
 
         let fridge_temp = 7i64 - fridge_raw as i64;
         let freezer_temp = -((freezer_raw as i64) + 15);
@@ -162,10 +164,7 @@ impl Device {
             .publish_property("fridge_setpoint", PropertyValue::Int(fridge_temp));
         self.core
             .publish_property("freezer_setpoint", PropertyValue::Int(freezer_temp));
-        self.core.publish_property(
-            "express_freeze",
-            if express == 0x02 { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("express_freeze", express == 0x02);
         self.core
             .publish_property("pure_option", pure_raw_to_name(pure).into());
         self.core.publish_door_with_trigger(door == 0x01);
@@ -198,14 +197,14 @@ impl Device {
     /// Live-capture F017 template from PR #96 (43 bytes).
     /// Hex: `f017ffffffffffffffffffffffffffffffffffffffffff000000ffff00ffffffff00ffffffffffffffffff`
     /// Zeros at indices 23–25, 28, 33 (not shifted by one).
-    const F017_BASE_HEX: &'static str =
-        "f017ffffffffffffffffffffffffffffffffffffffffff000000ffff00ffffffff00ffffffffffffffffff";
+    const F017_BASE: [u8; 43] = [
+        0xf0, 0x17, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0xff,
+        0xff, 0xff, 0xff, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ];
 
     fn base_f017() -> [u8; 43] {
-        let v = rethink_util::hex::decode(Self::F017_BASE_HEX).expect("F017 base hex");
-        let mut b = [0u8; 43];
-        b.copy_from_slice(&v);
-        b
+        Self::F017_BASE
     }
 }
 

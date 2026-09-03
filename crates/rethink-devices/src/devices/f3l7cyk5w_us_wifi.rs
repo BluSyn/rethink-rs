@@ -166,8 +166,7 @@ impl Device {
         let is_off = phase == PHASE_OFF;
         let idle = is_off || phase == PHASE_COMPLETE;
 
-        self.core
-            .publish_property("power", if is_off { "OFF" } else { "ON" }.into());
+        self.core.publish_on_off("power", !is_off);
         self.core.publish_property(
             "status",
             status_map().get(&phase).copied().unwrap_or("Running").into(),
@@ -239,75 +238,16 @@ impl Device {
         );
 
         let flags = rec[FLAGS_OFFSET];
-        self.core.publish_property(
-            "child_lock",
-            if flags & FLAG_CHILD_LOCK != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "delay_wash",
-            if flags & FLAG_DELAY_ACTIVE != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "steam",
-            if flags & FLAG_STEAM != 0 { "ON" } else { "OFF" }.into(),
-        );
-        self.core.publish_property(
-            "pre_wash",
-            if flags & FLAG_PRE_WASH != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "rinse_spin",
-            if flags & FLAG_RINSE_SPIN != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "extra_rinse",
-            if flags & FLAG_EXTRA_RINSE != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core.publish_on_off("child_lock", flags & FLAG_CHILD_LOCK != 0);
+        self.core.publish_on_off("delay_wash", flags & FLAG_DELAY_ACTIVE != 0);
+        self.core.publish_on_off("steam", flags & FLAG_STEAM != 0);
+        self.core.publish_on_off("pre_wash", flags & FLAG_PRE_WASH != 0);
+        self.core.publish_on_off("rinse_spin", flags & FLAG_RINSE_SPIN != 0);
+        self.core.publish_on_off("extra_rinse", flags & FLAG_EXTRA_RINSE != 0);
 
         let opt2 = rec[OPT2_OFFSET];
-        self.core.publish_property(
-            "cold_wash",
-            if opt2 & OPT2_COLD_WASH != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "door_lock",
-            if opt2 & OPT2_DOOR_LOCKED != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core.publish_on_off("cold_wash", opt2 & OPT2_COLD_WASH != 0);
+        self.core.publish_on_off("door_lock", opt2 & OPT2_DOOR_LOCKED != 0);
         self.core
             .publish_property("load_level", (rec[LOAD_LEVEL_OFFSET] as i64).into());
         self.core

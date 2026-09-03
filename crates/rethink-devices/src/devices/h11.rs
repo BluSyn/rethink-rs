@@ -261,8 +261,7 @@ impl Device {
         let is_power_off = state_code == 4 || process_code == 0x63;
 
         self.core.publish_property("state", state_str.into());
-        self.core
-            .publish_property("power", if is_power_off { "OFF" } else { "ON" }.into());
+        self.core.publish_on_off("power", !is_power_off);
 
         let base_course = data[5];
         let smart_course = data[20];
@@ -297,18 +296,9 @@ impl Device {
             }
             .into(),
         );
-        self.core.publish_property(
-            "high_temp_dry",
-            if data[12] & 0x04 != 0 { "ON" } else { "OFF" }.into(),
-        );
-        self.core.publish_property(
-            "sterilize",
-            if data[12] & 0x08 != 0 { "ON" } else { "OFF" }.into(),
-        );
-        self.core.publish_property(
-            "remote_start",
-            if data[15] & 0x02 != 0 { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("high_temp_dry", data[12] & 0x04 != 0);
+        self.core.publish_on_off("sterilize", data[12] & 0x08 != 0);
+        self.core.publish_on_off("remote_start", data[15] & 0x02 != 0);
 
         let mut s = self.settings.lock();
         s.rinse_level = data[13];
@@ -319,14 +309,8 @@ impl Device {
             .publish_property("salt_level", (s.salt_level as i64).into());
         s.auto_dry = data[11] & 0x10 != 0;
         s.clean_reminder = data[11] & 0x40 != 0;
-        self.core.publish_property(
-            "auto_dry",
-            if s.auto_dry { "ON" } else { "OFF" }.into(),
-        );
-        self.core.publish_property(
-            "clean_reminder",
-            if s.clean_reminder { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("auto_dry", s.auto_dry);
+        self.core.publish_on_off("clean_reminder", s.clean_reminder);
         s.buzzer_level = if data[15] & 0x80 != 0 {
             "HIGH".into()
         } else if data[15] & 0x40 != 0 {
@@ -346,10 +330,7 @@ impl Device {
         self.core
             .publish_property("remote_start_mode", s.remote_start_mode.clone().into());
         s.end_alarm_sound = data[16] & 0x04 != 0;
-        self.core.publish_property(
-            "end_alarm_sound",
-            if s.end_alarm_sound { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("end_alarm_sound", s.end_alarm_sound);
         s.brightness = data[19] & 0x40 != 0;
         self.core.publish_property(
             "brightness",

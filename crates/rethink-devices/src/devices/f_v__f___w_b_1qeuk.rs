@@ -66,14 +66,8 @@ impl Device {
                     .into(),
             );
             self.core.publish_property("cycles", cycles.into());
-            self.core.publish_property(
-                "remote_start",
-                if lock_status & 2 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "door_lock",
-                if lock_status & 0x40 == 0 { "ON" } else { "OFF" }.into(),
-            );
+            self.core.publish_on_off("remote_start", lock_status & 2 != 0);
+            self.core.publish_on_off("door_lock", lock_status & 0x40 == 0);
             self.core
                 .publish_property("initial_time", time_initial.into());
             self.core

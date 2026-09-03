@@ -65,8 +65,7 @@ impl Device {
         let temp = buf[s + 9];
         let drying = buf[s + 11];
 
-        self.core
-            .publish_property("power", if status > 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("power", status > 0);
         pub_error_status(&self.core, error, status);
         self.core.publish_property(
             "course",
@@ -77,24 +76,8 @@ impl Device {
             "drying_mode",
             drying_mode(drying as u32).unwrap_or("unknown").into(),
         );
-        self.core.publish_property(
-            "remote_start",
-            if buf[s + 15] & 0x40 != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "door_lock",
-            if buf[s + 19] & 0x40 == 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core.publish_on_off("remote_start", buf[s + 15] & 0x40 != 0);
+        self.core.publish_on_off("door_lock", buf[s + 19] & 0x40 == 0);
         self.core.publish_property("initial_time", initial.into());
         self.core.publish_property("remaining_time", remaining.into());
         if buf.len() > s + 29 {

@@ -374,7 +374,7 @@ impl Device {
     }
 
     fn intercept_key_value(&self, k: u16, v: u32) -> bool {
-        let waiting_caps = *self.core.waiting_caps.lock();
+        let waiting_caps = self.core.waiting_caps.load(std::sync::atomic::Ordering::Relaxed);
         if waiting_caps && CAPS_ONLY_TAGS.contains(&k) {
             self.core.set_raw(k, v);
             return true;
@@ -549,8 +549,12 @@ mod tests {
     fn humidity_and_power_roundtrip() {
         let (ha, thinq, dev) = make();
         // 0x336 is treated as caps-only while waiting_caps; clear that gate.
-        *dev.core.waiting_caps.lock() = false;
-        *dev.core.waiting_values.lock() = false;
+        dev.core
+            .waiting_caps
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        dev.core
+            .waiting_values
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         dev.process_key_value(0x1f7, 1);
         dev.process_key_value(0x253, 45);
         dev.process_key_value(0x336, 55);

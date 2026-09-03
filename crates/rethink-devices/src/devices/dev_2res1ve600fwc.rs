@@ -1,7 +1,10 @@
 //! 2RES1VE600FWC fridge — STATUS_LENGTH = 12, custom temp encoding.
 
 use crate::device_trait::DeviceHandler;
-use crate::fridge_common::{pack_status, status_get, unpack_status, Status, TemperatureUnit};
+use crate::fridge_common::{
+    pack_status, status_at, Status, TemperatureUnit, CMD_F017, ST_ANY_DOOR_OPEN, ST_EXPRESS_FREEZE,
+    ST_FREEZER_SETPOINT, ST_FRIDGE_SETPOINT, ST_TEMP_UNIT,
+};
 use rethink_util::sync::Mutex;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::ha::{HaConnection, PropertyValue};
@@ -103,44 +106,29 @@ impl Device {
     }
 
     fn process_status(&self, cur: &[u8]) {
-        let s = unpack_status(cur);
-        let unit = if status_get(&s, "tempUnit") != 0 {
+        let unit = if status_at(cur, ST_TEMP_UNIT) != 0 {
             TemperatureUnit::C
         } else {
             TemperatureUnit::F
         };
         self.set_temperature_unit(unit);
-        self.core.publish_property(
-            "door",
-            if status_get(&s, "anyDoorOpen") == 1 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core
+            .publish_on_off("door", status_at(cur, ST_ANY_DOOR_OPEN) == 1);
         self.core.publish_property(
             "fridge_setpoint",
             PropertyValue::Int(
-                convert_fridge_temperature(unit, status_get(&s, "fridgeSetpoint") as i32) as i64,
+                convert_fridge_temperature(unit, status_at(cur, ST_FRIDGE_SETPOINT) as i32) as i64,
             ),
         );
         self.core.publish_property(
             "freezer_setpoint",
             PropertyValue::Int(convert_from_freezer_temperature(
                 unit,
-                status_get(&s, "freezerSetpoint"),
+                status_at(cur, ST_FREEZER_SETPOINT),
             ) as i64),
         );
-        self.core.publish_property(
-            "express_freeze",
-            if status_get(&s, "expressFreeze") == 2 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core
+            .publish_on_off("express_freeze", status_at(cur, ST_EXPRESS_FREEZE) == 2);
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -153,7 +141,8 @@ impl Device {
     }
 
     fn send_setting(&self, setting: &Status) {
-        let mut payload = rethink_util::hex::decode("F017").unwrap();
+        let mut payload = Vec::with_capacity(2 + STATUS_LENGTH);
+        payload.extend_from_slice(&CMD_F017);
         payload.extend_from_slice(&pack_status(setting, STATUS_LENGTH));
         self.core.send(&payload);
     }

@@ -132,8 +132,7 @@ impl Device {
         let phase = rec[PHASE_OFFSET];
         let is_off = phase == PHASE_OFF;
 
-        self.core
-            .publish_property("power", if is_off { "OFF" } else { "ON" }.into());
+        self.core.publish_on_off("power", !is_off);
         self.core.publish_property(
             "status",
             status_map().get(&phase).copied().unwrap_or("Running").into(),
@@ -182,62 +181,14 @@ impl Device {
         );
 
         let flags = rec[FLAGS_OFFSET];
-        self.core.publish_property(
-            "child_lock",
-            if flags & FLAG_CHILD_LOCK != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "reduce_static",
-            if flags & FLAG_REDUCE_STATIC != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "damp_dry_signal",
-            if flags & FLAG_DAMP_DRY_SIGNAL != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core.publish_on_off("child_lock", flags & FLAG_CHILD_LOCK != 0);
+        self.core.publish_on_off("reduce_static", flags & FLAG_REDUCE_STATIC != 0);
+        self.core.publish_on_off("damp_dry_signal", flags & FLAG_DAMP_DRY_SIGNAL != 0);
 
         let opt2 = rec[OPT2_OFFSET];
-        self.core.publish_property(
-            "energy_saver",
-            if opt2 & OPT2_ENERGY_SAVER != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "turbo_steam",
-            if opt2 & OPT2_TURBO_STEAM != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "wrinkle_care",
-            if opt2 & OPT2_WRINKLE_CARE != 0 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core.publish_on_off("energy_saver", opt2 & OPT2_ENERGY_SAVER != 0);
+        self.core.publish_on_off("turbo_steam", opt2 & OPT2_TURBO_STEAM != 0);
+        self.core.publish_on_off("wrinkle_care", opt2 & OPT2_WRINKLE_CARE != 0);
     }
 
     fn process_aabb(&self, buf: &[u8]) {

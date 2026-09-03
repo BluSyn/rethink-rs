@@ -8,10 +8,10 @@
 use crate::device_trait::DeviceHandler;
 use crate::fridge_common::{
     convert_freezer_temperature, convert_fridge_temperature, freezer_range, fridge_range,
-    pack_status, status_get, unpack_status, Status, TemperatureUnit,
+    pack_status, status_at, Status, TemperatureUnit, CMD_F017, ST_ANY_DOOR_OPEN, ST_EXPRESS_COOL,
+    ST_EXPRESS_FREEZE, ST_FREEZER_SETPOINT, ST_FRIDGE_SETPOINT, ST_TEMP_UNIT,
 };
 use rethink_core::device_base::{default_config, AabbDeviceCore};
-use rethink_core::hex_decode;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use rethink_util::sync::Mutex;
 use serde_json::{json, Map};
@@ -158,48 +158,29 @@ impl Device {
     }
 
     fn process_status(&self, cur_status: &[u8]) {
-        let s = unpack_status(cur_status);
-        let unit = if status_get(&s, "tempUnit") != 0 {
+        let unit = if status_at(cur_status, ST_TEMP_UNIT) != 0 {
             TemperatureUnit::C
         } else {
             TemperatureUnit::F
         };
         self.set_temperature_unit(unit);
         let unit = self.temperature_unit.lock().unwrap_or(TemperatureUnit::C);
-        self.core.publish_property(
-            "door",
-            if status_get(&s, "anyDoorOpen") == 1 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core
+            .publish_on_off("door", status_at(cur_status, ST_ANY_DOOR_OPEN) == 1);
         self.core.publish_property(
             "fridge_setpoint",
-            convert_fridge_temperature(unit, status_get(&s, "fridgeSetpoint") as i32).into(),
+            convert_fridge_temperature(unit, status_at(cur_status, ST_FRIDGE_SETPOINT) as i32).into(),
         );
         self.core.publish_property(
             "freezer_setpoint",
-            convert_freezer_temperature(unit, status_get(&s, "freezerSetpoint") as i32).into(),
+            convert_freezer_temperature(unit, status_at(cur_status, ST_FREEZER_SETPOINT) as i32)
+                .into(),
         );
-        self.core.publish_property(
-            "express_cool",
-            if status_get(&s, "expressCool") == 1 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
+        self.core
+            .publish_on_off("express_cool", status_at(cur_status, ST_EXPRESS_COOL) == 1);
+        self.core.publish_on_off(
             "express_freeze",
-            if status_get(&s, "expressFreeze") == 2 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
+            status_at(cur_status, ST_EXPRESS_FREEZE) == 2,
         );
 
         let drawer_raw = cur_status.get(95).copied();
@@ -216,7 +197,8 @@ impl Device {
     }
 
     fn send_setting(&self, setting: &Status) {
-        let mut pkt = hex_decode("F017");
+        let mut pkt = Vec::with_capacity(2 + STATUS_LENGTH);
+        pkt.extend_from_slice(&CMD_F017);
         pkt.extend(pack_status(setting, STATUS_LENGTH));
         self.core.send(&pkt);
     }

@@ -628,15 +628,15 @@ impl Device {
         self.core.publish_property("washer/laundry_texture", (block[43] as i64).into());
         self.core.publish_property("shared/init_lcd", init_lcd_themes(block[48]).into());
         let washer_state = block[23];
-        self.core.publish_property("washer/power", if washer_state != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("washer/power", washer_state != 0);
         self.core.publish_property("washer/state", washer_states(washer_state).into());
         self.core.publish_property("washer/error", washer_errors(block[21]).into());
         self.core.publish_property("washer/buzzer", device_buzzer(block[31]).into());
-        self.core.publish_property("washer/add_garment", if block[39] & 0x80 != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("washer/child_lock", if block[39] & 0x20 != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("washer/remote_start", if block[39] & 0x10 != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("washer/door_lock", if block[40] & 0x01 != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("washer/remote_maintain", if block[42] & 0x04 != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("washer/add_garment", block[39] & 0x80 != 0);
+        self.core.publish_on_off("washer/child_lock", block[39] & 0x20 != 0);
+        self.core.publish_on_off("washer/remote_start", block[39] & 0x10 != 0);
+        self.core.publish_on_off("washer/door_lock", block[40] & 0x01 != 0);
+        self.core.publish_on_off("washer/remote_maintain", block[42] & 0x04 != 0);
         self.core.publish_property("dryer/dry_level", dryer_dry_levels(block[54]).into());
         self.core.publish_property("dryer/temp", dryer_temp(block[56]).into());
         self.core.publish_property("dryer/time_dry", dryer_time_dry(block[57]).into());
@@ -645,14 +645,14 @@ impl Device {
         self.core.publish_property("dryer/remaining_time", be_u16(block, 62).into());
         self.core.publish_property("dryer/initial_time", be_u16(block, 64).into());
         let dryer_state = block[66];
-        self.core.publish_property("dryer/power", if dryer_state != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("dryer/power", dryer_state != 0);
         self.core.publish_property("dryer/state", dryer_states(dryer_state).into());
         self.core.publish_property("dryer/error", dryer_errors(block[68]).into());
         self.core.publish_property("dryer/buzzer", device_buzzer(block[72]).into());
         self.core.publish_property("dryer/duct_clogging", dryer_duct_clogging(block[75]).into());
-        self.core.publish_property("dryer/remote_start", if block[79] & 0x40 != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("dryer/child_lock", if block[79] & 0x10 != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("dryer/remote_maintain", if block[80] & 0x02 != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("dryer/remote_start", block[79] & 0x40 != 0);
+        self.core.publish_on_off("dryer/child_lock", block[79] & 0x10 != 0);
+        self.core.publish_on_off("dryer/remote_maintain", block[80] & 0x02 != 0);
     }
 
     fn process_state_resync(&self, body: &[u8]) {

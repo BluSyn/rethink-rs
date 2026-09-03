@@ -64,10 +64,7 @@ impl Device {
             // Only authoritative during Off (0) and Ready (1)
             if last <= 1 {
                 // HA lock: OFF=Locked, ON=Unlocked
-                self.core.publish_property(
-                    "door_lock",
-                    if buf[2] != 0 { "OFF" } else { "ON" }.into(),
-                );
+                self.core.publish_on_off("door_lock", buf[2] == 0);
             }
             return;
         }
@@ -97,8 +94,7 @@ impl Device {
         let pre_state = buf[23];
         let tub_clean = buf[25];
 
-        self.core
-            .publish_property("power", if status > 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("power", status > 0);
         pub_error_status(&self.core, error_code, status);
         self.core.publish_property(
             "course",
@@ -117,23 +113,12 @@ impl Device {
             "delay_remaining",
             (delay_h as i64 * 60 + delay_m as i64).into(),
         );
-        self.core.publish_property(
-            "remote_start",
-            if lock_status & 2 != 0 { "ON" } else { "OFF" }.into(),
-        );
-        self.core
-            .publish_property("steam", if steam != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property(
-            "wrinkle_care",
-            if wrinkle_care != 0 { "ON" } else { "OFF" }.into(),
-        );
-        self.core
-            .publish_property("active", if active != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("remote_start", lock_status & 2 != 0);
+        self.core.publish_on_off("steam", steam != 0);
+        self.core.publish_on_off("wrinkle_care", wrinkle_care != 0);
+        self.core.publish_on_off("active", active != 0);
         // HA lock device_class: OFF=Locked, ON=Unlocked for child_lock mapping from TS
-        self.core.publish_property(
-            "child_lock",
-            if child_lock != 0 { "OFF" } else { "ON" }.into(),
-        );
+        self.core.publish_on_off("child_lock", child_lock == 0);
         self.core.publish_property(
             "pre_state",
             state_name(pre_state as usize).into(),

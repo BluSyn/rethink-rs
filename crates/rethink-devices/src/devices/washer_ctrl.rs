@@ -21,24 +21,28 @@ pub fn request_fridge_status(core: &AabbDeviceCore) {
     core.send(FRIDGE_STATUS_QUERY);
 }
 
+const POWER_ON: &[u8] = &[0xf0, 0x2a, 0x01, 0x00];
+const POWER_OFF: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x00];
+const PAUSE: &[u8] = &[0xf0, 0x24, 0x04, 0x01, 0x00];
+const START: &[u8] = &[0xf0, 0x24, 0x05, 0x01, 0x00];
+
 pub fn set_power_start_pause(core: &AabbDeviceCore, prop: &str, mqtt_value: &str) {
     if prop == "power" {
         if mqtt_value == "ON" {
-            core.send(&hex_decode("F02A0100"));
+            core.send(POWER_ON);
         } else if mqtt_value == "OFF" {
-            core.send(&hex_decode("F024010100"));
+            core.send(POWER_OFF);
         }
     }
     if prop == "pause" {
-        core.send(&hex_decode("F024040100"));
+        core.send(PAUSE);
     }
     if prop == "start" {
-        let payload = if mqtt_value.is_empty() {
-            hex_decode("F024050100")
+        if mqtt_value.is_empty() {
+            core.send(START);
         } else {
-            hex_decode(mqtt_value)
-        };
-        core.send(&payload);
+            core.send(&hex_decode(mqtt_value));
+        }
     }
 }
 

@@ -677,15 +677,28 @@ impl Device {
     }
 
     fn publish_property(&self, prop: &str, value: PropertyValue) {
-        let s = value.as_string();
         {
             let mut cache = self.publish_cache.lock();
-            if cache.get(prop) == Some(&s) {
-                return;
+            if let Some(prev) = cache.get(prop) {
+                if value.eq_str(prev) {
+                    return;
+                }
             }
-            cache.insert(prop.to_string(), s);
+            cache.insert(prop.to_string(), value.as_string());
         }
         self.ha.publish_property(&self.id, prop, value);
+    }
+
+    fn publish_on_off(&self, prop: &str, on: bool) {
+        let s = if on { "ON" } else { "OFF" };
+        {
+            let mut cache = self.publish_cache.lock();
+            if cache.get(prop).map(|c| c.as_str() == s).unwrap_or(false) {
+                return;
+            }
+            cache.insert(prop.to_string(), s.to_string());
+        }
+        self.ha.publish_property(&self.id, prop, s.into());
     }
 
     fn process_data(&self, buf: &[u8]) {
@@ -715,9 +728,9 @@ impl Device {
         let rinse_count = rinse_option & 0x0f;
         let extra_rinse_count = (rinse_option >> 4) & 0x0f;
 
-        self.publish_property("power", if state > 0 { "ON".into() } else { "OFF".into() });
+        self.publish_on_off("power", state > 0);
         self.publish_property("error_message", named(ERRORS, error).into());
-        self.publish_property("error", if error != 0 { "ON".into() } else { "OFF".into() });
+        self.publish_on_off("error", error != 0);
         self.publish_property("status", named(STATES, state).into());
         self.publish_property(
             "controls_available",
@@ -750,15 +763,15 @@ impl Device {
             "extra_rinse_count",
             named(RINSE_COUNT, extra_rinse_count).into(),
         );
-        self.publish_property("child_lock", if option1 & 0x01 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("steam", if option1 & 0x04 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("prewash", if option1 & 0x08 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("turbowash", if option1 & 0x80 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("extra_rinse", if option1 & 0x40 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("fresh_care", if option2 & 0x01 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("coldwash", if option2 & 0x10 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("remote_start", if option2 & 0x80 != 0 { "ON" } else { "OFF" }.into());
-        self.publish_property("initial_bit", if option3 & INITIAL_BIT != 0 { "ON" } else { "OFF" }.into());
+        self.publish_on_off("child_lock", option1 & 0x01 != 0);
+        self.publish_on_off("steam", option1 & 0x04 != 0);
+        self.publish_on_off("prewash", option1 & 0x08 != 0);
+        self.publish_on_off("turbowash", option1 & 0x80 != 0);
+        self.publish_on_off("extra_rinse", option1 & 0x40 != 0);
+        self.publish_on_off("fresh_care", option2 & 0x01 != 0);
+        self.publish_on_off("coldwash", option2 & 0x10 != 0);
+        self.publish_on_off("remote_start", option2 & 0x80 != 0);
+        self.publish_on_off("initial_bit", option3 & INITIAL_BIT != 0);
         self.publish_property("option3_raw", i64::from(option3).into());
         self.publish_property("tub_clean_count", i64::from(tcl_count).into());
         self.publish_property("load_level", i64::from(load_level).into());

@@ -419,8 +419,7 @@ impl Device {
         *self.last_phase.lock() = Some(phase);
 
         let running = phase != 0x00;
-        self.core
-            .publish_property("power", if running { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("power", running);
         self.core.publish_property("status", status.into());
         self.core.publish_property("course", course_s.into());
         self.core
@@ -438,14 +437,8 @@ impl Device {
         self.core.publish_property("option_a", option_a.into());
         self.core.publish_property("option_b", option_b.into());
         // Flag bits (aligned with other LG laundry layouts where known).
-        self.core.publish_property(
-            "child_lock",
-            if flags & 0x01 != 0 { "ON" } else { "OFF" }.into(),
-        );
-        self.core.publish_property(
-            "damp_dry_signal",
-            if flags & 0x08 != 0 { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("child_lock", flags & 0x01 != 0);
+        self.core.publish_on_off("damp_dry_signal", flags & 0x08 != 0);
 
         if phase == 0x04 && prev_phase != Some(0x04) {
             self.core.ha.fire_notification_event(

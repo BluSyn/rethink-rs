@@ -117,14 +117,8 @@ impl Device {
                 PropertyValue::Num(setpoint_freezer)
             },
         );
-        self.core.publish_property(
-            "express_freeze",
-            if express_freeze_on { "ON" } else { "OFF" }.into(),
-        );
-        self.core.publish_property(
-            "shabbat_mode",
-            if shabbat_on { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("express_freeze", express_freeze_on);
+        self.core.publish_on_off("shabbat_mode", shabbat_on);
     }
 
     fn process_aabb(&self, buf: &[u8]) {

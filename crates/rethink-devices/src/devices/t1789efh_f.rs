@@ -103,8 +103,7 @@ impl Device {
         let phase = rec[2];
         let mins = rec[4];
         let status = status_map().get(&phase).copied().unwrap_or("unknown");
-        self.core
-            .publish_property("power", if phase != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("power", phase != 0);
         self.core.publish_property("status", status.into());
         self.core
             .publish_property("remaining_time", (mins as i64).into());

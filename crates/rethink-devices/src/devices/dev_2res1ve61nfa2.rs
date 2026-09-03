@@ -54,52 +54,30 @@ impl Device {
     }
 
     fn process_status(&self, cur: &[u8]) {
-        let s = unpack_status(cur);
-        let unit = if status_get(&s, "tempUnit") != 0 {
+        let unit = if status_at(cur, ST_TEMP_UNIT) != 0 {
             TemperatureUnit::C
         } else {
             TemperatureUnit::F
         };
         self.set_temperature_unit(unit);
-        self.core.publish_property(
-            "door",
-            if status_get(&s, "anyDoorOpen") == 1 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core
+            .publish_on_off("door", status_at(cur, ST_ANY_DOOR_OPEN) == 1);
         self.core.publish_property(
             "fridge_setpoint",
             PropertyValue::Int(
-                convert_fridge_temperature(unit, status_get(&s, "fridgeSetpoint") as i32) as i64,
+                convert_fridge_temperature(unit, status_at(cur, ST_FRIDGE_SETPOINT) as i32) as i64,
             ),
         );
         self.core.publish_property(
             "freezer_setpoint",
             PropertyValue::Int(
-                convert_freezer_temperature(unit, status_get(&s, "freezerSetpoint") as i32) as i64,
+                convert_freezer_temperature(unit, status_at(cur, ST_FREEZER_SETPOINT) as i32) as i64,
             ),
         );
-        self.core.publish_property(
-            "express_cool",
-            if status_get(&s, "expressCool") == 1 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
-        self.core.publish_property(
-            "express_freeze",
-            if status_get(&s, "expressFreeze") == 2 {
-                "ON"
-            } else {
-                "OFF"
-            }
-            .into(),
-        );
+        self.core
+            .publish_on_off("express_cool", status_at(cur, ST_EXPRESS_COOL) == 1);
+        self.core
+            .publish_on_off("express_freeze", status_at(cur, ST_EXPRESS_FREEZE) == 2);
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -112,7 +90,8 @@ impl Device {
     }
 
     fn send_setting(&self, setting: &Status) {
-        let mut payload = rethink_util::hex::decode("F017").unwrap();
+        let mut payload = Vec::with_capacity(2 + STATUS_LENGTH);
+        payload.extend_from_slice(&CMD_F017);
         payload.extend_from_slice(&pack_status(setting, STATUS_LENGTH));
         self.core.send(&payload);
     }

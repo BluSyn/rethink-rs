@@ -68,14 +68,32 @@ pub const STATUS_FIELDS: &[&str] = &[
     "monDataNumber",
 ];
 
+/// Offsets into packed fridge status; must match [`STATUS_FIELDS`].
+pub const ST_MON_STATUS: usize = 0;
+pub const ST_FRIDGE_SETPOINT: usize = 1;
+pub const ST_FREEZER_SETPOINT: usize = 2;
+pub const ST_EXPRESS_FREEZE: usize = 3;
+pub const ST_FRESH_AIR_FILTER: usize = 4;
+pub const ST_WATER_FILTER: usize = 6;
+pub const ST_ANY_DOOR_OPEN: usize = 7;
+pub const ST_TEMP_UNIT: usize = 8;
+pub const ST_EXPRESS_COOL: usize = 16;
+
+/// AABB fridge write prefix (`F0 17`).
+pub const CMD_F017: [u8; 2] = [0xf0, 0x17];
+
 pub type Status = HashMap<&'static str, u8>;
 
+#[inline]
+pub fn status_at(buf: &[u8], index: usize) -> u8 {
+    buf.get(index).copied().unwrap_or(0)
+}
+
 pub fn unpack_status(buf: &[u8]) -> Status {
-    let mut rv = Status::new();
-    for (index, key) in STATUS_FIELDS.iter().enumerate() {
-        if buf.len() > index {
-            rv.insert(*key, buf[index]);
-        }
+    let n = buf.len().min(STATUS_FIELDS.len());
+    let mut rv = Status::with_capacity(n);
+    for (index, key) in STATUS_FIELDS.iter().enumerate().take(n) {
+        rv.insert(*key, buf[index]);
     }
     rv
 }
@@ -137,5 +155,21 @@ mod tests {
         assert_eq!(status_get(&back, "freezerSetpoint"), 6);
         assert_eq!(status_get(&back, "anyDoorOpen"), 1);
         assert_eq!(status_get(&back, "missing"), 0);
+    }
+
+    #[test]
+    fn status_offsets_match_field_names() {
+        assert_eq!(STATUS_FIELDS[ST_FRIDGE_SETPOINT], "fridgeSetpoint");
+        assert_eq!(STATUS_FIELDS[ST_FREEZER_SETPOINT], "freezerSetpoint");
+        assert_eq!(STATUS_FIELDS[ST_EXPRESS_FREEZE], "expressFreeze");
+        assert_eq!(STATUS_FIELDS[ST_FRESH_AIR_FILTER], "freshAirFilter");
+        assert_eq!(STATUS_FIELDS[ST_WATER_FILTER], "waterFilter");
+        assert_eq!(STATUS_FIELDS[ST_ANY_DOOR_OPEN], "anyDoorOpen");
+        assert_eq!(STATUS_FIELDS[ST_TEMP_UNIT], "tempUnit");
+        assert_eq!(STATUS_FIELDS[ST_EXPRESS_COOL], "expressCool");
+        let buf = [0u8; 20];
+        assert_eq!(status_at(&buf, ST_TEMP_UNIT), 0);
+        assert_eq!(status_at(&[], ST_TEMP_UNIT), 0);
+        assert_eq!(&CMD_F017, &[0xf0, 0x17]);
     }
 }

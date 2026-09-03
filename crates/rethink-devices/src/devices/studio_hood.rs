@@ -77,16 +77,10 @@ impl Device {
         let light = cur[5];
         *self.fan_speed.lock() = fan;
         *self.light_level.lock() = light;
-        self.core.publish_property(
-            "fan_power",
-            if fan > 0 { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("fan_power", fan > 0);
         self.core
             .publish_property("fan_speed", PropertyValue::Int(fan as i64));
-        self.core.publish_property(
-            "light_power",
-            if light > 0 { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("light_power", light > 0);
         self.core
             .publish_property("light_level", PropertyValue::Int(light as i64));
     }

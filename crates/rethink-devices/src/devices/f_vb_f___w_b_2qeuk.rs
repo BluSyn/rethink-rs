@@ -66,8 +66,7 @@ impl Device {
             let detergent = buf[73] as usize;
             let softener = buf[74] as usize;
 
-            self.core
-                .publish_property("power", if status > 0 { "ON" } else { "OFF" }.into());
+            self.core.publish_on_off("power", status > 0);
             pub_error_status(&self.core, error, status);
             self.core.publish_property(
                 "course",
@@ -81,18 +80,9 @@ impl Device {
                     .into(),
             );
             self.core.publish_property("cycles", cycles.into());
-            self.core.publish_property(
-                "remote_start",
-                if lock_status & 2 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "door_lock",
-                if lock_status & 0x40 == 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "child_lock",
-                if lock_status & 0x80 != 0 { "ON" } else { "OFF" }.into(),
-            );
+            self.core.publish_on_off("remote_start", lock_status & 2 != 0);
+            self.core.publish_on_off("door_lock", lock_status & 0x40 == 0);
+            self.core.publish_on_off("child_lock", lock_status & 0x80 != 0);
             self.core
                 .publish_property("initial_time", time_initial.into());
             self.core
@@ -107,26 +97,11 @@ impl Device {
                 "softener",
                 DOSES.get(softener).copied().unwrap_or("unknown").into(),
             );
-            self.core.publish_property(
-                "extra_rinse",
-                if extra_rinse >= 2 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "turbowash",
-                if options & 0x01 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "eco_hybrid",
-                if options & 0x08 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "prewash",
-                if options & 0x40 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "steam",
-                if options & 0x80 != 0 { "ON" } else { "OFF" }.into(),
-            );
+            self.core.publish_on_off("extra_rinse", extra_rinse >= 2);
+            self.core.publish_on_off("turbowash", options & 0x01 != 0);
+            self.core.publish_on_off("eco_hybrid", options & 0x08 != 0);
+            self.core.publish_on_off("prewash", options & 0x40 != 0);
+            self.core.publish_on_off("steam", options & 0x80 != 0);
         }
     }
 

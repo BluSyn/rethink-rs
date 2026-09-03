@@ -182,12 +182,8 @@ impl Device {
             map_status().get(&phase).copied().unwrap_or("unknown").into(),
         );
         self.core.publish_property("remaining_time", mins.into());
-        self.core
-            .publish_property("power", if phase != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property(
-            "drum_running",
-            if rec[17] == 0xa9 { "ON" } else { "OFF" }.into(),
-        );
+        self.core.publish_on_off("power", phase != 0);
+        self.core.publish_on_off("drum_running", rec[17] == 0xa9);
         self.core.publish_property(
             "cycle",
             map_cycles()

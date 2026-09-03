@@ -214,15 +214,28 @@ impl Device {
     }
 
     fn publish_property(&self, prop: &str, value: PropertyValue) {
-        let s = value.as_string();
         {
             let mut cache = self.publish_cache.lock();
-            if cache.get(prop) == Some(&s) {
-                return;
+            if let Some(prev) = cache.get(prop) {
+                if value.eq_str(prev) {
+                    return;
+                }
             }
-            cache.insert(prop.to_string(), s);
+            cache.insert(prop.to_string(), value.as_string());
         }
         self.ha.publish_property(&self.id, prop, value);
+    }
+
+    fn publish_on_off(&self, prop: &str, on: bool) {
+        let s = if on { "ON" } else { "OFF" };
+        {
+            let mut cache = self.publish_cache.lock();
+            if cache.get(prop).map(|c| c.as_str() == s).unwrap_or(false) {
+                return;
+            }
+            cache.insert(prop.to_string(), s.to_string());
+        }
+        self.ha.publish_property(&self.id, prop, s.into());
     }
 
     fn process_data(&self, buf: &[u8]) {
@@ -241,20 +254,14 @@ impl Device {
         let custom_course = buf[20] as u32;
         let cycles = buf[21] as i64;
 
-        self.publish_property(
-            "power",
-            if status > 0 { "ON".into() } else { "OFF".into() },
-        );
+        self.publish_on_off("power", status > 0);
 
         let err_msg = ERRORS
             .get(error)
             .and_then(|e| *e)
             .unwrap_or("unknown");
         self.publish_property("error_message", err_msg.into());
-        self.publish_property(
-            "error",
-            if error != 0 { "ON".into() } else { "OFF".into() },
-        );
+        self.publish_on_off("error", error != 0);
 
         let st = STATES
             .get(status)
@@ -285,23 +292,9 @@ impl Device {
         self.publish_property("drying_mode", dry.into());
 
         self.publish_property("cycles", PropertyValue::Int(cycles));
-        self.publish_property(
-            "remote_start",
-            if lock_status & 2 != 0 {
-                "ON".into()
-            } else {
-                "OFF".into()
-            },
-        );
+        self.publish_on_off("remote_start", lock_status & 2 != 0);
         // inverted logic, off=locked
-        self.publish_property(
-            "door_lock",
-            if lock_status & 0x40 == 0 {
-                "ON".into()
-            } else {
-                "OFF".into()
-            },
-        );
+        self.publish_on_off("door_lock", lock_status & 0x40 == 0);
         self.publish_property("initial_time", PropertyValue::Int(time_initial));
         self.publish_property("remaining_time", PropertyValue::Int(time_remain));
     }

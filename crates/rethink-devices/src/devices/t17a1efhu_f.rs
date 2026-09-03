@@ -101,8 +101,7 @@ impl Device {
         let mins = rec[4];
         let running = phase != 0x00 && phase != 0x08;
         let status = status_map().get(&phase).copied().unwrap_or("unknown");
-        self.core
-            .publish_property("power", if running { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("power", running);
         self.core.publish_property("status", status.into());
         self.core.publish_property(
             "remaining_time",

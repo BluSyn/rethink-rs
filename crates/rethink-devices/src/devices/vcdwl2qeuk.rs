@@ -125,8 +125,8 @@ impl Device {
     }
 
     fn publish_persistent(&self, rec: &[u8]) {
-        self.core.publish_property("child_lock", if rec[FLAGS_BYTE] & FLAG_CHILD_LOCK != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("remote_start", if rec[FLAGS_BYTE] & FLAG_REMOTE_START != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("child_lock", rec[FLAGS_BYTE] & FLAG_CHILD_LOCK != 0);
+        self.core.publish_on_off("remote_start", rec[FLAGS_BYTE] & FLAG_REMOTE_START != 0);
         self.core.publish_property("tub_clean_count", (rec[TUB_CLEAN_OFFSET] as i64).into());
     }
 
@@ -157,13 +157,13 @@ impl Device {
         self.core.publish_property("remaining_time", (rec[13] as i64).into());
         self.core.publish_property("initial_time", (rec[15] as i64).into());
         self.core.publish_property("energy", (rec[16] as i64 * 256 + rec[17] as i64).into());
-        self.core.publish_property("detergent_dispenser", if rec[DISP_DETERGENT_EN] == DISP_ON { "ON" } else { "OFF" }.into());
-        self.core.publish_property("softener_dispenser", if rec[DISP_SOFTENER_EN] == DISP_ON { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("detergent_dispenser", rec[DISP_DETERGENT_EN] == DISP_ON);
+        self.core.publish_on_off("softener_dispenser", rec[DISP_SOFTENER_EN] == DISP_ON);
         self.core.publish_property("detergent_dose", (rec[DISP_DETERGENT_ML] as i64).into());
         self.core.publish_property("softener_dose", (rec[DISP_SOFTENER_ML] as i64).into());
-        self.core.publish_property("prewash", if rec[OPT_BYTE_A] & OPT_PREWASH != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("turbowash", if rec[OPT_BYTE_A] & OPT_TURBOWASH != 0 { "ON" } else { "OFF" }.into());
-        self.core.publish_property("steam", if rec[OPT_BYTE_B] & OPT_STEAM != 0 { "ON" } else { "OFF" }.into());
+        self.core.publish_on_off("prewash", rec[OPT_BYTE_A] & OPT_PREWASH != 0);
+        self.core.publish_on_off("turbowash", rec[OPT_BYTE_A] & OPT_TURBOWASH != 0);
+        self.core.publish_on_off("steam", rec[OPT_BYTE_B] & OPT_STEAM != 0);
         self.publish_persistent(rec);
     }
 

@@ -69,18 +69,9 @@ impl Device {
             );
             pub_temp_spin(&self.core, temp, spin);
             self.core.publish_property("cycles", cycles.into());
-            self.core.publish_property(
-                "remote_start",
-                if lock_status & 2 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "door_lock",
-                if lock_status & 0x40 == 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "child_lock",
-                if lock_status & 0x80 == 0 { "ON" } else { "OFF" }.into(),
-            );
+            self.core.publish_on_off("remote_start", lock_status & 2 != 0);
+            self.core.publish_on_off("door_lock", lock_status & 0x40 == 0);
+            self.core.publish_on_off("child_lock", lock_status & 0x80 == 0);
             self.core
                 .publish_property("initial_time", time_initial.into());
             self.core
@@ -88,26 +79,11 @@ impl Device {
             self.core
                 .publish_property("reserve_time", time_reserve_hour.into());
             self.core.publish_property("energy", energy.into());
-            self.core.publish_property(
-                "extra_rinse",
-                if extra_rinse >= 2 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "turbowash",
-                if options & 0x01 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "prewash",
-                if options & 0x40 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "steam",
-                if options & 0x80 != 0 { "ON" } else { "OFF" }.into(),
-            );
-            self.core.publish_property(
-                "intensive_wash",
-                if wash_intensity >= 4 { "ON" } else { "OFF" }.into(),
-            );
+            self.core.publish_on_off("extra_rinse", extra_rinse >= 2);
+            self.core.publish_on_off("turbowash", options & 0x01 != 0);
+            self.core.publish_on_off("prewash", options & 0x40 != 0);
+            self.core.publish_on_off("steam", options & 0x80 != 0);
+            self.core.publish_on_off("intensive_wash", wash_intensity >= 4);
         }
     }
 

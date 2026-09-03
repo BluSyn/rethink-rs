@@ -517,7 +517,7 @@ impl Device {
     }
 
     fn intercept_key_value(&self, k: u16, v: u32) -> bool {
-        let waiting_caps = *self.core.waiting_caps.lock();
+        let waiting_caps = self.core.waiting_caps.load(std::sync::atomic::Ordering::Relaxed);
         if waiting_caps && CAPS_ONLY_TAGS.contains(&k) {
             self.core.set_raw(k, v);
             return true;
