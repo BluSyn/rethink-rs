@@ -121,18 +121,93 @@ pub enum PropertyValue {
     Int(i64),
 }
 
+/// Write `n` in decimal into `buf`. Returns the occupied suffix.
+pub fn write_i64(n: i64, buf: &mut [u8; 20]) -> &[u8] {
+    if n == 0 {
+        buf[19] = b'0';
+        return &buf[19..20];
+    }
+    let neg = n < 0;
+    let mut v = if n == i64::MIN {
+        1u64 << 63
+    } else if neg {
+        (-n) as u64
+    } else {
+        n as u64
+    };
+    let mut i = 20;
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    if neg {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    &buf[i..]
+}
+
+fn ascii_digits_to_string(digits: &[u8]) -> String {
+    std::str::from_utf8(digits)
+        .expect("write_i64 emits ASCII")
+        .to_owned()
+}
+
+fn property_payload_bytes(value: &PropertyValue) -> Vec<u8> {
+    match value {
+        PropertyValue::Str(s) => s.as_bytes().to_vec(),
+        PropertyValue::Int(i) => {
+            let mut buf = [0u8; 20];
+            write_i64(*i, &mut buf).to_vec()
+        }
+        PropertyValue::Num(n) => {
+            if *n == (*n as i64) as f64 {
+                let mut buf = [0u8; 20];
+                write_i64(*n as i64, &mut buf).to_vec()
+            } else {
+                n.to_string().into_bytes()
+            }
+        }
+    }
+}
+
 impl PropertyValue {
     pub fn as_string(&self) -> String {
         match self {
             PropertyValue::Str(s) => s.clone(),
             PropertyValue::Num(n) => {
                 if *n == (*n as i64) as f64 {
-                    format!("{}", *n as i64)
+                    let mut buf = [0u8; 20];
+                    ascii_digits_to_string(write_i64(*n as i64, &mut buf))
                 } else {
                     n.to_string()
                 }
             }
-            PropertyValue::Int(i) => i.to_string(),
+            PropertyValue::Int(i) => {
+                let mut buf = [0u8; 20];
+                ascii_digits_to_string(write_i64(*i, &mut buf))
+            }
+        }
+    }
+
+    /// Compare against a previously published string without allocating on
+    /// the common Int / ON-OFF paths.
+    pub fn eq_str(&self, cached: &str) -> bool {
+        match self {
+            PropertyValue::Str(s) => s == cached,
+            PropertyValue::Int(i) => {
+                let mut buf = [0u8; 20];
+                write_i64(*i, &mut buf) == cached.as_bytes()
+            }
+            PropertyValue::Num(n) => {
+                if *n == (*n as i64) as f64 {
+                    let mut buf = [0u8; 20];
+                    write_i64(*n as i64, &mut buf) == cached.as_bytes()
+                } else {
+                    n.to_string() == cached
+                }
+            }
         }
     }
 
@@ -229,7 +304,12 @@ impl MockHaConnection {
         dev.properties.get(&topic).cloned()
     }
 
-    pub fn lookup_topic(&self, dev: &MockDeviceInfo, component: &str, topic_id: &str) -> Option<String> {
+    pub fn lookup_topic(
+        &self,
+        dev: &MockDeviceInfo,
+        component: &str,
+        topic_id: &str,
+    ) -> Option<String> {
         let comp = dev.config.as_ref()?.components.get(component)?;
         let key = format!("{topic_id}_topic");
         let topic = comp.get(&key)?.as_str()?;
@@ -292,8 +372,9 @@ impl HaConnection for MockHaConnection {
 pub struct HaMqttSink {
     pub config: HaConfig,
     pub published_availability: Mutex<HashSet<String>>,
-    /// Callback to publish raw MQTT: (topic, payload, retain)
-    pub publish_fn: Mutex<Option<Box<dyn Fn(&str, &[u8], bool) + Send + Sync>>>,
+    /// Callback to publish raw MQTT: (topic, payload, retain).
+    /// Stored as `Arc` so `do_publish` can invoke it without holding the mutex.
+    pub publish_fn: Mutex<Option<Arc<dyn Fn(String, Vec<u8>, bool) + Send + Sync>>>,
     pub set_handlers: Mutex<Vec<Box<dyn Fn(&str, &str, &str) + Send + Sync>>>,
     pub discovery_handlers: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
     pub connected: Mutex<bool>,
@@ -313,13 +394,14 @@ impl HaMqttSink {
 
     pub fn set_publish_fn<F>(&self, f: F)
     where
-        F: Fn(&str, &[u8], bool) + Send + Sync + 'static,
+        F: Fn(String, Vec<u8>, bool) + Send + Sync + 'static,
     {
-        *self.publish_fn.lock() = Some(Box::new(f));
+        *self.publish_fn.lock() = Some(Arc::new(f));
     }
 
-    fn do_publish(&self, topic: &str, payload: &[u8], retain: bool) {
-        if let Some(f) = self.publish_fn.lock().as_ref() {
+    fn do_publish(&self, topic: String, payload: Vec<u8>, retain: bool) {
+        let f = self.publish_fn.lock().clone();
+        if let Some(f) = f {
             f(topic, payload, retain);
         } else {
             // Once is enough — startup race if devices connect before HA client installs publish_fn.
@@ -379,9 +461,11 @@ impl HaMqttSink {
         }
         if retain && msg == "online" {
             if let Some(id) = rest.strip_suffix("/availability") {
-                if !id.is_empty() && !id.contains('/') && !self.published_availability.lock().contains(id)
+                if !id.is_empty()
+                    && !id.contains('/')
+                    && !self.published_availability.lock().contains(id)
                 {
-                    self.do_publish(topic, b"offline", true);
+                    self.do_publish(topic.to_string(), b"offline".to_vec(), true);
                 }
             }
         }
@@ -430,7 +514,11 @@ mod ha_mqtt_sink_tests {
         sink.handle_message("rethink/dev1/upper/remote_temperature/set", b"350", false);
         assert_eq!(
             got.lock().clone(),
-            Some(("dev1".into(), "upper/remote_temperature".into(), "350".into()))
+            Some((
+                "dev1".into(),
+                "upper/remote_temperature".into(),
+                "350".into()
+            ))
         );
     }
 
@@ -440,13 +528,27 @@ mod ha_mqtt_sink_tests {
         let pubs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let p = pubs.clone();
         sink.set_publish_fn(move |topic, _, _| {
-            p.lock().push(topic.to_string());
+            p.lock().push(topic);
         });
         // Nested availability is not the device root; must not force offline.
         sink.handle_message("rethink/dev1/extra/availability", b"online", true);
         assert!(pubs.lock().is_empty());
         sink.handle_message("rethink/dev1/availability", b"online", true);
         assert_eq!(pubs.lock().as_slice(), ["rethink/dev1/availability"]);
+    }
+
+    #[test]
+    fn property_value_eq_str_matches_as_string() {
+        for i in [0i64, 1, -1, 19, -20, 350, i64::MIN, i64::MAX] {
+            let v = PropertyValue::Int(i);
+            let s = v.as_string();
+            assert!(v.eq_str(&s), "int {i} as_string={s}");
+            assert!(!v.eq_str("nope"));
+        }
+        assert!(PropertyValue::from("ON").eq_str("ON"));
+        assert!(!PropertyValue::from("ON").eq_str("OFF"));
+        assert_eq!(write_i64(0, &mut [0u8; 20]), b"0");
+        assert_eq!(write_i64(-20, &mut [0u8; 20]), b"-20");
     }
 
     #[test]
@@ -480,6 +582,23 @@ mod ha_mqtt_sink_tests {
     }
 
     #[test]
+    fn publish_property_int_uses_stack_digits() {
+        let sink = HaMqttSink::new(test_cfg());
+        let got: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let g = got.clone();
+        sink.set_publish_fn(move |topic, payload, retain| {
+            assert_eq!(topic, "rethink/dev1/setpoint");
+            assert!(retain);
+            *g.lock() = Some(payload);
+        });
+        use crate::ha::HaConnection;
+        sink.publish_property("dev1", "setpoint", 350i64.into());
+        assert_eq!(got.lock().as_deref(), Some(b"350".as_slice()));
+        sink.publish_property("dev1", "setpoint", (-20i64).into());
+        assert_eq!(got.lock().as_deref(), Some(b"-20".as_slice()));
+    }
+
+    #[test]
     fn notification_entities_and_events_publish() {
         use crate::ha::{
             notification_event, problem_binary_sensor, DeviceDiscovery, DeviceInfo, HaConnection,
@@ -492,8 +611,8 @@ mod ha_mqtt_sink_tests {
         let p = pubs.clone();
         sink.set_publish_fn(move |topic, payload, retain| {
             p.lock().unwrap().push((
-                topic.to_string(),
-                String::from_utf8_lossy(payload).into_owned(),
+                topic,
+                String::from_utf8_lossy(&payload).into_owned(),
                 retain,
             ));
         });
@@ -501,7 +620,12 @@ mod ha_mqtt_sink_tests {
         let mut components = HashMap::new();
         let (k, v) = problem_binary_sensor("bucket_full", "Bucket full");
         components.insert(k, v);
-        let (k, v) = notification_event("cycle_complete", "Cycle complete", &["cycle_complete"], None);
+        let (k, v) = notification_event(
+            "cycle_complete",
+            "Cycle complete",
+            &["cycle_complete"],
+            None,
+        );
         components.insert(k, v);
 
         let config = DeviceDiscovery {
@@ -585,7 +709,7 @@ impl HaConnection for HaMqttSink {
 
         let body = serde_json::to_vec(&payload).unwrap_or_default();
         // Retain so HA recovers after broker/HA restart without waiting for birth.
-        self.do_publish(&discovery_topic, &body, true);
+        self.do_publish(discovery_topic, body, true);
     }
 
     fn publish_property(&self, id: &str, property: &str, value: PropertyValue) {
@@ -593,13 +717,12 @@ impl HaConnection for HaMqttSink {
             self.published_availability.lock().insert(id.to_string());
         }
         let topic = format!("{}/{}/{}", self.config.rethink_prefix, id, property);
-        let payload = value.as_string();
-        self.do_publish(&topic, payload.as_bytes(), true);
+        self.do_publish(topic, property_payload_bytes(&value), true);
     }
 
     fn publish_event(&self, id: &str, topic_suffix: &str, payload: &str) {
         let topic = format!("{}/{}/{}", self.config.rethink_prefix, id, topic_suffix);
-        self.do_publish(&topic, payload.as_bytes(), false);
+        self.do_publish(topic, payload.as_bytes().to_vec(), false);
     }
 
     fn is_connected(&self) -> bool {
@@ -609,7 +732,11 @@ impl HaConnection for HaMqttSink {
 
 fn recursive_replace(val: &Value, replacements: &[(&str, &str)]) -> Value {
     match val {
-        Value::Array(a) => Value::Array(a.iter().map(|v| recursive_replace(v, replacements)).collect()),
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .map(|v| recursive_replace(v, replacements))
+                .collect(),
+        ),
         Value::Object(o) => {
             let mut m = serde_json::Map::new();
             for (k, v) in o {

@@ -51,13 +51,9 @@ pub async fn start_ha_client(sink: Arc<HaMqttSink>) -> Result<()> {
     });
 
     sink.set_publish_fn(move |topic, payload, retain| {
-        if pub_tx
-            .send((topic.to_string(), payload.to_vec(), retain))
-            .is_err()
-        {
+        if pub_tx.send((topic, payload, retain)).is_err() {
             tracing::warn!(
                 target: "rethink_ha",
-                %topic,
                 "HA MQTT publisher channel closed; dropping publish"
             );
         }
@@ -106,10 +102,7 @@ pub async fn start_ha_client(sink: Arc<HaMqttSink>) -> Result<()> {
                 Ok(_) => {}
                 Err(e) => {
                     *sink2.connected.lock() = false;
-                    rethink_core::logging::log(
-                        "status",
-                        &[&format!("HA mqtt error: {e}")],
-                    );
+                    rethink_core::logging::log("status", &[&format!("HA mqtt error: {e}")]);
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }

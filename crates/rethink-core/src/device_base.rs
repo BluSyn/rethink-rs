@@ -3,12 +3,31 @@
 use crate::ha::{DeviceDiscovery, DeviceInfo, HaConnection, OriginInfo, PropertyValue};
 use crate::metadata::Metadata;
 use crate::thinq::Thinq2Device;
-use rethink_util::sync::Mutex;
 use rethink_util::crc16::crc16;
+use rethink_util::sync::Mutex;
 use rethink_util::tlv::{self, Tlv};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// ThinQ TLV types are 10-bit (`0..=1023`). Direct slots beat HashMap on the
+/// per-tag hot path (`process_key_value` / `get_raw`).
+const TLV_ID_SLOTS: usize = 1024;
+
+#[inline]
+fn tlv_slot(id: u16) -> Option<usize> {
+    let i = id as usize;
+    (i < TLV_ID_SLOTS).then_some(i)
+}
+
+fn tlv_u32_slots() -> Vec<Option<u32>> {
+    vec![None; TLV_ID_SLOTS]
+}
+
+fn tlv_field_slots() -> Vec<Option<Arc<FieldDefinition>>> {
+    vec![None; TLV_ID_SLOTS]
+}
 
 /// Base HA device.
 pub struct HaDeviceState {
@@ -81,7 +100,11 @@ impl AabbDeviceCore {
     }
 
     pub fn publish_on_off(&self, prop: &str, on: bool) {
-        self.publish_property(prop, if on { "ON" } else { "OFF" }.into());
+        let s = if on { "ON" } else { "OFF" };
+        if self.cache_is_current(prop, s) {
+            return;
+        }
+        self.ha.publish_property(&self.id, prop, s.into());
     }
 
     pub fn publish_flag(&self, prop: &str, bits: u8, mask: u8) {
@@ -94,25 +117,31 @@ impl AabbDeviceCore {
     }
 
     pub fn publish_property(&self, prop: &str, value: PropertyValue) {
-        let s = value.as_string();
         {
             let mut cache = self.publish_cache.lock();
-            if cache.get(prop) == Some(&s) {
-                return;
+            if let Some(prev) = cache.get(prop) {
+                if value.eq_str(prev) {
+                    return;
+                }
             }
-            cache.insert(prop.to_string(), s);
+            cache.insert(prop.to_string(), value.as_string());
         }
         self.ha.publish_property(&self.id, prop, value);
     }
 
+    /// True if `s` is already the cached value. On miss, stores `s` for next time.
+    fn cache_is_current(&self, prop: &str, s: &str) -> bool {
+        let mut cache = self.publish_cache.lock();
+        if cache.get(prop).map(|c| c.as_str() == s).unwrap_or(false) {
+            return true;
+        }
+        cache.insert(prop.to_string(), s.to_string());
+        false
+    }
+
     /// Publish fridge/freezer door binary state (automate on binary_sensor state).
     pub fn publish_door_with_trigger(&self, open: bool) {
-        let val = if open { "ON" } else { "OFF" };
-        let prev = self.publish_cache.lock().get("door").cloned();
-        if prev.as_deref() == Some(val) {
-            return;
-        }
-        self.publish_property("door", val.into());
+        self.publish_on_off("door", open);
     }
 
     pub fn set_config(&self, config: DeviceDiscovery) {
@@ -193,15 +222,15 @@ pub struct TlvDeviceCore {
     pub ha: Arc<dyn HaConnection>,
     pub thinq: Arc<dyn Thinq2Device>,
     pub config: Mutex<Option<DeviceDiscovery>>,
-    pub fields_by_id: Mutex<HashMap<u16, Arc<FieldDefinition>>>,
+    pub fields_by_id: Mutex<Vec<Option<Arc<FieldDefinition>>>>,
     pub fields_by_ha: Mutex<HashMap<String, Arc<FieldDefinition>>>,
-    pub raw_clip_state: Mutex<HashMap<u16, u32>>,
+    pub raw_clip_state: Mutex<Vec<Option<u32>>>,
     /// Last published HA string per field key (skip identical MQTT retains).
     pub publish_cache: Mutex<HashMap<String, String>>,
     /// true while waiting for caps
-    pub waiting_caps: Mutex<bool>,
+    pub waiting_caps: AtomicBool,
     /// true while waiting for initial values
-    pub waiting_values: Mutex<bool>,
+    pub waiting_values: AtomicBool,
     /// Hooks for subclasses
     pub on_caps: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub on_values: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -221,12 +250,12 @@ impl TlvDeviceCore {
             ha,
             thinq: thinq.clone(),
             config: Mutex::new(None),
-            fields_by_id: Mutex::new(HashMap::new()),
+            fields_by_id: Mutex::new(tlv_field_slots()),
             fields_by_ha: Mutex::new(HashMap::new()),
-            raw_clip_state: Mutex::new(HashMap::new()),
+            raw_clip_state: Mutex::new(tlv_u32_slots()),
             publish_cache: Mutex::new(HashMap::new()),
-            waiting_caps: Mutex::new(true),
-            waiting_values: Mutex::new(false),
+            waiting_caps: AtomicBool::new(true),
+            waiting_values: AtomicBool::new(false),
             on_caps: Mutex::new(None),
             on_values: Mutex::new(None),
             is_caps_response: Mutex::new(None),
@@ -254,7 +283,9 @@ impl TlvDeviceCore {
         let full_name = options.ha_key.clone();
         let options = Arc::new(options);
         if let Some(id) = options.id {
-            self.fields_by_id.lock().insert(id, options.clone());
+            if let Some(i) = tlv_slot(id) {
+                self.fields_by_id.lock()[i] = Some(options.clone());
+            }
         }
         self.fields_by_ha
             .lock()
@@ -303,11 +334,22 @@ impl TlvDeviceCore {
         let b3 = header.get(3).copied().unwrap_or(2);
         let b4 = header.get(4).copied().unwrap_or(1);
         let tlv_array = tlv::build(tlv_els);
-        let mut buf = vec![0x04, 0x00, 0x00, 0x00, 0x65, b2, b3, b4, tlv_array.len() as u8];
-        buf.extend_from_slice(&tlv_array);
-        let result = crc16(&buf);
-        let mut out = vec![b0, b1];
-        out.extend_from_slice(&buf);
+        let mut out = Vec::with_capacity(2 + 9 + tlv_array.len() + 2);
+        out.extend_from_slice(&[
+            b0,
+            b1,
+            0x04,
+            0x00,
+            0x00,
+            0x00,
+            0x65,
+            b2,
+            b3,
+            b4,
+            tlv_array.len() as u8,
+        ]);
+        out.extend_from_slice(&tlv_array);
+        let result = crc16(&out[2..]);
         out.push((result >> 8) as u8);
         out.push((result & 0xff) as u8);
         self.thinq.send_packet(&out);
@@ -385,7 +427,12 @@ impl TlvDeviceCore {
             && buf.len() > 12
         {
             if let Some(h) = self.on_priv_cmd_resp.lock().as_ref() {
-                h(buf[0] == 0x02, buf[1], buf[12], &buf[13..buf.len().saturating_sub(2)]);
+                h(
+                    buf[0] == 0x02,
+                    buf[1],
+                    buf[12],
+                    &buf[13..buf.len().saturating_sub(2)],
+                );
             }
         }
     }
@@ -395,12 +442,14 @@ impl TlvDeviceCore {
             self.process_key_value(el.t, el.v);
         }
 
-        let is_caps = self
-            .is_caps_response
-            .lock()
-            .as_ref()
-            .map(|f| f(tlv_array))
-            .unwrap_or(false);
+        let mut waiting_caps = self.waiting_caps.load(Ordering::Relaxed);
+        let is_caps = waiting_caps
+            && self
+                .is_caps_response
+                .lock()
+                .as_ref()
+                .map(|f| f(tlv_array))
+                .unwrap_or(false);
         let is_vals = self
             .is_values_response
             .lock()
@@ -408,19 +457,18 @@ impl TlvDeviceCore {
             .map(|f| f(tlv_array))
             .unwrap_or(false);
 
-        if *self.waiting_caps.lock() && is_caps {
-            *self.waiting_caps.lock() = false;
+        if waiting_caps && is_caps {
+            self.waiting_caps.store(false, Ordering::Relaxed);
+            waiting_caps = false;
             if let Some(h) = self.on_caps.lock().as_ref() {
                 h();
             }
             self.query();
-            *self.waiting_values.lock() = true;
+            self.waiting_values.store(true, Ordering::Relaxed);
         }
 
-        if !*self.waiting_caps.lock() && is_vals {
-            if *self.waiting_values.lock() {
-                *self.waiting_values.lock() = false;
-            }
+        if !waiting_caps && is_vals {
+            self.waiting_values.store(false, Ordering::Relaxed);
             if let Some(h) = self.on_values.lock().as_ref() {
                 h();
             }
@@ -433,11 +481,13 @@ impl TlvDeviceCore {
                 return;
             }
         }
-        self.raw_clip_state.lock().insert(k, v);
+        if let Some(i) = tlv_slot(k) {
+            self.raw_clip_state.lock()[i] = Some(v);
+        }
         if let Some(h) = self.on_key_value_extra.lock().as_ref() {
             h(k, v);
         }
-        let def = self.fields_by_id.lock().get(&k).cloned();
+        let def = tlv_slot(k).and_then(|i| self.fields_by_id.lock()[i].clone());
         let Some(def) = def else { return };
 
         let mut processed = PropertyValue::Int(v as i64);
@@ -453,13 +503,14 @@ impl TlvDeviceCore {
             .map(|cb| cb(&processed))
             .unwrap_or(true);
         if do_read && def.readable {
-            let s = processed.as_string();
             {
                 let mut cache = self.publish_cache.lock();
-                if cache.get(&def.ha_key) == Some(&s) {
-                    return;
+                if let Some(prev) = cache.get(&def.ha_key) {
+                    if processed.eq_str(prev) {
+                        return;
+                    }
                 }
-                cache.insert(def.ha_key.clone(), s);
+                cache.insert(def.ha_key.clone(), processed.as_string());
             }
             self.ha.publish_property(&self.id, &def.ha_key, processed);
         }
@@ -501,7 +552,9 @@ impl TlvDeviceCore {
             .unwrap_or(true);
         if do_write {
             if let Some(id) = def.id {
-                self.raw_clip_state.lock().insert(id, num);
+                if let Some(i) = tlv_slot(id) {
+                    self.raw_clip_state.lock()[i] = Some(num);
+                }
                 let mut attach = Vec::new();
                 if let Some(ref a) = def.write_attach_static {
                     attach = a.clone();
@@ -514,7 +567,10 @@ impl TlvDeviceCore {
                 let state = self.raw_clip_state.lock();
                 let tlv_array: Vec<Tlv> = write_fields
                     .iter()
-                    .map(|&fid| Tlv::new(fid, *state.get(&fid).unwrap_or(&0)))
+                    .map(|&fid| {
+                        let v = tlv_slot(fid).and_then(|i| state[i]).unwrap_or(0);
+                        Tlv::new(fid, v)
+                    })
                     .collect();
                 drop(state);
                 self.send(&[1, 1, 2, 1, 1], &tlv_array);
@@ -532,11 +588,13 @@ impl TlvDeviceCore {
     }
 
     pub fn get_raw(&self, id: u16) -> Option<u32> {
-        self.raw_clip_state.lock().get(&id).copied()
+        tlv_slot(id).and_then(|i| self.raw_clip_state.lock()[i])
     }
 
     pub fn set_raw(&self, id: u16, v: u32) {
-        self.raw_clip_state.lock().insert(id, v);
+        if let Some(i) = tlv_slot(id) {
+            self.raw_clip_state.lock()[i] = Some(v);
+        }
     }
 }
 
@@ -567,11 +625,7 @@ pub fn unwrap_aabb(buf: &[u8]) -> Option<&[u8]> {
     }
 }
 
-fn republish_config(
-    ha: &dyn HaConnection,
-    id: &str,
-    config: &Mutex<Option<DeviceDiscovery>>,
-) {
+fn republish_config(ha: &dyn HaConnection, id: &str, config: &Mutex<Option<DeviceDiscovery>>) {
     if let Some(cfg) = config.lock().clone() {
         ha.publish_property(id, "availability", "online".into());
         ha.publish_config(id, &cfg);
@@ -642,12 +696,39 @@ mod tests {
     impl HaConnection for CountingHa {
         fn publish_config(&self, _id: &str, _config: &DeviceDiscovery) {}
         fn publish_property(&self, _id: &str, property: &str, value: PropertyValue) {
-            self.pubs.lock().push((property.to_string(), value.as_string()));
+            self.pubs
+                .lock()
+                .push((property.to_string(), value.as_string()));
         }
         fn publish_event(&self, _id: &str, _topic_suffix: &str, _payload: &str) {}
         fn is_connected(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn aabb_publish_on_off_skips_identical() {
+        let ha = Arc::new(CountingHa {
+            pubs: Mutex::new(Vec::new()),
+        });
+        let thinq = crate::MockThinq2Device::new("id", crate::Metadata::new("M", "M", "1"));
+        let core = AabbDeviceCore::new(ha.clone(), thinq);
+        core.publish_on_off("door", true);
+        core.publish_on_off("door", true);
+        core.publish_on_off("door", false);
+        core.publish_property("fridge_setpoint", 3i64.into());
+        core.publish_property("fridge_setpoint", 3i64.into());
+        core.publish_property("fridge_setpoint", 4i64.into());
+        let pubs = ha.pubs.lock().clone();
+        assert_eq!(
+            pubs,
+            vec![
+                ("door".into(), "ON".into()),
+                ("door".into(), "OFF".into()),
+                ("fridge_setpoint".into(), "3".into()),
+                ("fridge_setpoint".into(), "4".into()),
+            ]
+        );
     }
 
     #[test]
@@ -681,5 +762,23 @@ mod tests {
         assert_eq!(empty_name.ha_key, "climate-");
         let named = FieldDefinition::new("climate", "mode");
         assert_eq!(named.ha_key, "climate-mode");
+    }
+
+    #[test]
+    fn tlv_raw_slots_cover_10bit_ids_only() {
+        let ha = Arc::new(CountingHa {
+            pubs: Mutex::new(Vec::new()),
+        });
+        let thinq = crate::MockThinq2Device::new("id", crate::Metadata::new("M", "M", "1"));
+        let core = TlvDeviceCore::new(ha, thinq);
+        assert_eq!(core.get_raw(0x1f7), None);
+        core.set_raw(0x1f7, 42);
+        assert_eq!(core.get_raw(0x1f7), Some(42));
+        core.set_raw(0x3ff, 7);
+        assert_eq!(core.get_raw(0x3ff), Some(7));
+        // 10-bit type space; wider ids are not stored.
+        core.set_raw(0x400, 1);
+        assert_eq!(core.get_raw(0x400), None);
+        assert_eq!(core.get_raw(0xffff), None);
     }
 }
