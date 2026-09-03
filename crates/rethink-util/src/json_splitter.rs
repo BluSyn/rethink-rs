@@ -58,8 +58,7 @@ impl Splitter {
                     return Err(JsonSplitError::TooManyClosing);
                 }
                 if self.depth == 0 {
-                    let s = String::from_utf8_lossy(&self.buf);
-                    let val: Value = serde_json::from_str(&s)
+                    let val: Value = serde_json::from_slice(&self.buf)
                         .map_err(|e| JsonSplitError::Parse(e.to_string()))?;
                     self.buf.clear();
                     result = Some(val);

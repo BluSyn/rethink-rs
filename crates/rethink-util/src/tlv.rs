@@ -21,26 +21,22 @@ pub struct TlvSpan {
     pub byte_end: usize,
 }
 
-/// Parse a TLV sequence. Truncation is tolerated (returns what was successfully parsed).
-pub fn parse(buf: &[u8]) -> Vec<Tlv> {
-    parse_with_spans(buf).into_iter().map(|s| s.tlv).collect()
-}
-
-/// Parse TLV and record each element's byte span within `buf`.
-pub fn parse_with_spans(buf: &[u8]) -> Vec<TlvSpan> {
-    let mut out = Vec::new();
+/// Walk a TLV sequence. Truncation stops iteration (no error).
+///
+/// `visit` receives `(tlv, byte_start, byte_end)`.
+fn for_each_tlv(buf: &[u8], mut visit: impl FnMut(Tlv, usize, usize)) {
     let mut i = 0usize;
     while i < buf.len() {
         if i + 2 > buf.len() {
-            return out;
+            return;
         }
         let start = i;
-        let t = ((u16::from(buf[i]) << 2) + u16::from(buf[i + 1] >> 6)) as u16;
+        let t = (u16::from(buf[i]) << 2) + u16::from(buf[i + 1] >> 6);
         let l = (buf[i + 1] >> 4) & 3;
         let mut v = u32::from(buf[i + 1] & 15);
 
         if i + 2 + l as usize > buf.len() {
-            return out;
+            return;
         }
 
         if l > 0 {
@@ -50,23 +46,44 @@ pub fn parse_with_spans(buf: &[u8]) -> Vec<TlvSpan> {
             }
         }
         let end = i + 2 + l as usize;
-        out.push(TlvSpan {
-            tlv: Tlv {
+        visit(
+            Tlv {
                 t,
                 l: Some(l),
                 v,
             },
-            byte_start: start,
-            byte_end: end,
-        });
+            start,
+            end,
+        );
         i = end;
     }
+}
+
+/// Parse a TLV sequence. Truncation is tolerated (returns what was successfully parsed).
+pub fn parse(buf: &[u8]) -> Vec<Tlv> {
+    // l=0 encodings are 2 bytes; this is an upper bound, not a guess.
+    let mut out = Vec::with_capacity(buf.len() / 2);
+    for_each_tlv(buf, |tlv, _, _| out.push(tlv));
+    out
+}
+
+/// Parse TLV and record each element's byte span within `buf`.
+pub fn parse_with_spans(buf: &[u8]) -> Vec<TlvSpan> {
+    let mut out = Vec::with_capacity(buf.len() / 2);
+    for_each_tlv(buf, |tlv, byte_start, byte_end| {
+        out.push(TlvSpan {
+            tlv,
+            byte_start,
+            byte_end,
+        });
+    });
     out
 }
 
 /// Build a TLV byte sequence from elements.
 pub fn build(elements: &[Tlv]) -> Vec<u8> {
-    let mut out = Vec::new();
+    // Max encoding is 2 header bytes + 3 value bytes.
+    let mut out = Vec::with_capacity(elements.len().saturating_mul(5));
     for el in elements {
         let t0 = ((el.t >> 2) & 255) as u8;
         out.push(t0);
@@ -195,5 +212,37 @@ mod tests {
     #[test]
     fn parse_tolerates_1_byte_truncation() {
         assert!(parse(&[0x7e]).is_empty());
+    }
+
+    #[test]
+    fn parse_empty_and_many_l0() {
+        assert!(parse(&[]).is_empty());
+        assert!(parse_with_spans(&[]).is_empty());
+        // 32 consecutive l=0 elements (2 bytes each).
+        let mut seq = Vec::new();
+        for i in 0..32u16 {
+            seq.push(Tlv::new(0x100 + i, (i % 15) as u32));
+        }
+        let bytes = build(&seq);
+        let back = parse(&bytes);
+        assert_eq!(back.len(), 32);
+        for (i, t) in seq.iter().enumerate() {
+            assert_eq!(back[i].t, t.t);
+            assert_eq!(back[i].v, t.v);
+        }
+        let spans = parse_with_spans(&bytes);
+        assert_eq!(spans.len(), 32);
+        assert_eq!(spans[0].byte_start, 0);
+        assert_eq!(spans[31].byte_end, bytes.len());
+    }
+
+    #[test]
+    fn parse_stops_before_truncated_tail_keeping_prefix() {
+        let mut bytes = build(&[Tlv::new(0x1f7, 1), Tlv::new(0x1fd, 0x1234)]);
+        bytes.pop(); // chop last value byte of the l=2 element
+        let out = parse(&bytes);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].t, 0x1f7);
+        assert_eq!(out[0].v, 1);
     }
 }

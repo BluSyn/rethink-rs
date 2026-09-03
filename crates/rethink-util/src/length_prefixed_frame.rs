@@ -35,6 +35,9 @@ pub fn make_str(input: &str) -> Vec<u8> {
 /// Incremental splitter for length-prefixed frames.
 pub struct Splitter {
     accum: Vec<u8>,
+    /// First unread byte in `accum`. Consumed frames advance this instead of
+    /// `drain`ing (O(n) memmove per frame).
+    pos: usize,
     failed: bool,
     max_payload_length: usize,
 }
@@ -49,9 +52,25 @@ impl Splitter {
     pub fn new(max_payload_length: usize) -> Self {
         Self {
             accum: Vec::new(),
+            pos: 0,
             failed: false,
             max_payload_length,
         }
+    }
+
+    fn compact(&mut self) {
+        if self.pos == 0 {
+            return;
+        }
+        if self.pos == self.accum.len() {
+            self.accum.clear();
+            self.pos = 0;
+            return;
+        }
+        self.accum.copy_within(self.pos.., 0);
+        let remain = self.accum.len() - self.pos;
+        self.accum.truncate(remain);
+        self.pos = 0;
     }
 
     /// Feed bytes; returns complete payloads delivered so far (may be empty).
@@ -63,41 +82,44 @@ impl Splitter {
         let mut out = Vec::new();
 
         loop {
-            if self.accum.len() < 4 {
+            let rest = &self.accum[self.pos..];
+            if rest.len() < 4 {
                 break;
             }
-            let payload_len = i32::from_be_bytes([
-                self.accum[0],
-                self.accum[1],
-                self.accum[2],
-                self.accum[3],
-            ]);
+            let payload_len = i32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
             if payload_len < 0 {
                 self.failed = true;
                 self.accum.clear();
+                self.pos = 0;
                 return Err(FrameError::NegativeLength);
             }
             let payload_len = payload_len as usize;
             if payload_len > self.max_payload_length {
                 self.failed = true;
                 self.accum.clear();
+                self.pos = 0;
                 return Err(FrameError::PayloadExceeded);
             }
-            if self.accum.len() >= 4 + payload_len {
-                out.push(self.accum[4..4 + payload_len].to_vec());
-                self.accum.drain(..4 + payload_len);
+            if rest.len() >= 4 + payload_len {
+                out.push(rest[4..4 + payload_len].to_vec());
+                self.pos += 4 + payload_len;
             } else {
                 break;
             }
+        }
+        // Slide leftover bytes to the front once per feed, not per frame.
+        if self.pos > 0 {
+            self.compact();
         }
         Ok(out)
     }
 
     /// Signal end of stream; errors if residual bytes remain.
     pub fn end(&mut self) -> Result<(), FrameError> {
-        if !self.failed && !self.accum.is_empty() {
+        if !self.failed && (self.pos < self.accum.len()) {
             self.failed = true;
             self.accum.clear();
+            self.pos = 0;
             return Err(FrameError::Truncated);
         }
         Ok(())
@@ -182,6 +204,31 @@ mod tests {
     fn reports_truncated_at_end() {
         let mut split = Splitter::default();
         split.feed(&[0x00, 0x00, 0x00, 0x05, 0x01, 0x02]).unwrap();
+        assert_eq!(split.end().unwrap_err(), FrameError::Truncated);
+    }
+
+    #[test]
+    fn many_small_frames_in_one_chunk() {
+        let mut framed = Vec::new();
+        for i in 0..64u8 {
+            framed.extend_from_slice(&make(&[i]));
+        }
+        let mut split = Splitter::default();
+        let out = split.feed(&framed).unwrap();
+        assert_eq!(out.len(), 64);
+        for i in 0..64u8 {
+            assert_eq!(out[i as usize], vec![i]);
+        }
+        split.end().unwrap();
+    }
+
+    #[test]
+    fn leftover_after_complete_frame_is_not_truncated_until_end() {
+        let mut split = Splitter::default();
+        let mut chunk = make(b"ok");
+        chunk.extend_from_slice(&[0x00, 0x00]); // incomplete next length
+        let out = split.feed(&chunk).unwrap();
+        assert_eq!(out, vec![b"ok".to_vec()]);
         assert_eq!(split.end().unwrap_err(), FrameError::Truncated);
     }
 }

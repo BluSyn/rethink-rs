@@ -25,12 +25,13 @@ pub fn encode_upper(data: impl AsRef<[u8]>) -> String {
 }
 
 fn encode_with(data: &[u8], alphabet: &[u8; 16]) -> String {
-    let mut out = String::with_capacity(data.len() * 2);
-    for &b in data {
-        out.push(alphabet[(b >> 4) as usize] as char);
-        out.push(alphabet[(b & 0x0f) as usize] as char);
+    let mut out = vec![0u8; data.len() * 2];
+    for (i, &b) in data.iter().enumerate() {
+        out[i * 2] = alphabet[(b >> 4) as usize];
+        out[i * 2 + 1] = alphabet[(b & 0x0f) as usize];
     }
-    out
+    // Alphabet is ASCII hex digits only.
+    String::from_utf8(out).expect("hex alphabet is ASCII")
 }
 
 fn nibble(c: u8) -> Option<u8> {
@@ -43,7 +44,7 @@ fn nibble(c: u8) -> Option<u8> {
 }
 
 /// Decode a hex string (even length, no `0x` prefix). Whitespace is not allowed
-/// (callers that accept mixed input should strip first).
+/// (callers that accept mixed input should strip first, or use [`decode_ignore_ws`]).
 pub fn decode(s: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
     let bytes = s.as_ref();
     if bytes.len() % 2 != 0 {
@@ -56,6 +57,29 @@ pub fn decode(s: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
         let lo = nibble(bytes[i + 1]).ok_or(DecodeError)?;
         out.push((hi << 4) | lo);
         i += 2;
+    }
+    Ok(out)
+}
+
+/// Decode hex, skipping ASCII whitespace. Odd nibble count after stripping is an error.
+pub fn decode_ignore_ws(s: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
+    let bytes = s.as_ref();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut hi: Option<u8> = None;
+    for &c in bytes {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        let n = nibble(c).ok_or(DecodeError)?;
+        if let Some(h) = hi {
+            out.push((h << 4) | n);
+            hi = None;
+        } else {
+            hi = Some(n);
+        }
+    }
+    if hi.is_some() {
+        return Err(DecodeError);
     }
     Ok(out)
 }
@@ -77,5 +101,24 @@ mod tests {
     fn rejects_odd_and_non_hex() {
         assert!(decode("abc").is_err());
         assert!(decode("zz").is_err());
+        assert!(decode_ignore_ws("abc").is_err());
+        assert!(decode_ignore_ws("zz").is_err());
+        assert!(decode_ignore_ws("a b c").is_err()); // odd nibble count after strip
+    }
+
+    #[test]
+    fn decode_ignore_ws_skips_ascii_whitespace() {
+        let data = [0x00u8, 0x0f, 0xa0, 0xff];
+        assert_eq!(decode_ignore_ws("00 0f\na0\tff").unwrap(), data);
+        assert_eq!(decode_ignore_ws("000FA0FF").unwrap(), data);
+        assert_eq!(decode_ignore_ws("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode("00 0f").unwrap_err(), DecodeError);
+    }
+
+    #[test]
+    fn encode_empty() {
+        assert_eq!(encode(&[]), "");
+        assert_eq!(encode_upper(&[]), "");
+        assert_eq!(decode("").unwrap(), Vec::<u8>::new());
     }
 }
