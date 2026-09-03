@@ -5,8 +5,9 @@ use crate::devmgr::{ConnectedDevice, DeviceManager, Platform, SendToDevice};
 use crate::mqtt_broker::{Broker, PublishPacket};
 use base64::Engine;
 use chrono::{Datelike, Timelike};
-use rethink_util::sync::Mutex;
 use rethink_core::metadata::Metadata;
+use rethink_util::sync::Mutex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,15 +54,11 @@ impl DeviceAcceptor {
             if !packet.topic.contains("clip/") {
                 return;
             }
-            let mut payload_bytes = packet.payload.clone();
+            let mut payload_bytes = packet.payload.as_slice();
             if payload_bytes.last() == Some(&0) {
-                payload_bytes.pop();
+                payload_bytes = &payload_bytes[..payload_bytes.len() - 1];
             }
-            let text = match String::from_utf8(payload_bytes) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            let payload: serde_json::Value = match serde_json::from_str(&text) {
+            let payload: serde_json::Value = match serde_json::from_slice(payload_bytes) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("clip parse error: {e}");
@@ -80,28 +77,14 @@ impl DeviceAcceptor {
     }
 
     fn handle_mqtt(&self, topic: &str, payload: &serde_json::Value, client_id: u64) {
-        let topic = if let Some(idx) = topic.find("/clip") {
-            format!("clip{}", &topic[idx + 5..])
-        } else if let Some(idx) = topic.find("clip/") {
-            topic[idx..].to_string()
-        } else {
-            topic.to_string()
-        };
+        let topic = clip_relative_topic(topic);
 
-        let did = payload
-            .get("did")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let cmd = payload
-            .get("cmd")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let did = payload.get("did").and_then(|v| v.as_str()).unwrap_or("");
+        let cmd = payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
 
-        if topic == format!("clip/message/devices/{did}") {
+        if topic_ends_with_device("clip/message/devices/", &topic, did) {
             if cmd == "completeProvisioning_ack" {
-                self.complete_provisioning(&did, payload, client_id);
+                self.complete_provisioning(did, payload, client_id);
             }
             if cmd == "device_packet" {
                 let meta = self.broker.client_meta(client_id);
@@ -110,12 +93,12 @@ impl DeviceAcceptor {
                     .as_ref()
                     .and_then(|d| d.get("did"))
                     .and_then(|v| v.as_str())
-                    == Some(did.as_str())
+                    == Some(did)
                 {
                     if let Some(dev) = self.devices.lock().get(&client_id).cloned() {
                         // Heal: reconnect race may have removed this id from DeviceManager
                         // while the MQTT session + acceptor still hold the device.
-                        if self.manager.get(&did).is_none() {
+                        if self.manager.get(did).is_none() {
                             eprintln!(
                                 "device {did}: re-accepting into manager (was orphaned from UI/HA)"
                             );
@@ -134,7 +117,7 @@ impl DeviceAcceptor {
             }
         }
 
-        if topic == format!("clip/provisioning/devices/{did}")
+        if topic_ends_with_device("clip/provisioning/devices/", &topic, did)
             && (cmd == "preDeploy" || cmd == "deploy")
         {
             let mut meta = self.broker.client_meta(client_id);
@@ -260,13 +243,8 @@ impl DeviceAcceptor {
             );
         });
 
-        let dev = ConnectedDevice::new(
-            device_id.to_string(),
-            Platform::Thinq2,
-            meta,
-            emit,
-            send_to,
-        );
+        let dev =
+            ConnectedDevice::new(device_id.to_string(), Platform::Thinq2, meta, emit, send_to);
         *device_slot.lock() = Some(dev.clone());
 
         let mut cm = self.broker.client_meta(client_id);
@@ -326,5 +304,52 @@ impl DeviceAcceptor {
             self.clients_by_id.lock().remove(&dev.id);
             dev.notify_close();
         }
+    }
+}
+
+/// Normalize broker topics to `clip/...` without allocating when already relative.
+fn clip_relative_topic(topic: &str) -> Cow<'_, str> {
+    if let Some(idx) = topic.find("/clip") {
+        Cow::Owned(format!("clip{}", &topic[idx + 5..]))
+    } else if let Some(idx) = topic.find("clip/") {
+        Cow::Borrowed(&topic[idx..])
+    } else {
+        Cow::Borrowed(topic)
+    }
+}
+
+fn topic_ends_with_device(prefix: &str, topic: &str, did: &str) -> bool {
+    topic.strip_prefix(prefix).is_some_and(|rest| rest == did)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_relative_topic_strips_broker_prefix() {
+        assert_eq!(
+            clip_relative_topic("v1/clip/message/devices/abc").as_ref(),
+            "clip/message/devices/abc"
+        );
+        assert_eq!(
+            clip_relative_topic("clip/message/devices/abc").as_ref(),
+            "clip/message/devices/abc"
+        );
+        assert!(topic_ends_with_device(
+            "clip/message/devices/",
+            "clip/message/devices/abc",
+            "abc"
+        ));
+        assert!(!topic_ends_with_device(
+            "clip/message/devices/",
+            "clip/message/devices/abc",
+            "ab"
+        ));
+        assert!(topic_ends_with_device(
+            "clip/provisioning/devices/",
+            "clip/provisioning/devices/dev1",
+            "dev1"
+        ));
     }
 }
