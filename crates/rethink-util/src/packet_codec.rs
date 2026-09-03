@@ -111,8 +111,11 @@ impl std::error::Error for EncodeError {}
 
 /// AABB checksum: sum of every byte preceding checksum+BB, mod 256, xor 0x55.
 pub fn aabb_checksum(packet_without_checksum: &[u8]) -> u8 {
-    let sum: u32 = packet_without_checksum.iter().map(|&b| u32::from(b)).sum();
-    ((sum & 0xff) as u8) ^ 0x55
+    let mut sum = 0u8;
+    for &b in packet_without_checksum {
+        sum = sum.wrapping_add(b);
+    }
+    sum ^ 0x55
 }
 
 pub fn encode_packet(input: &EncodeInput) -> Result<(String, Vec<u8>), EncodeError> {
@@ -129,8 +132,11 @@ fn encode_tlv(input: &TlvEncodeInput) -> Result<Vec<u8>, EncodeError> {
         return Err(EncodeError::TlvTooLarge);
     }
 
-    let (uart, prefix): (Vec<u8>, Vec<u8>) = if input.direction == Direction::FromDevice {
-        let mut uart = vec![
+    let mut out = Vec::with_capacity(2 + 9 + tlv_bytes.len() + 2);
+    if input.direction == Direction::FromDevice {
+        out.extend_from_slice(&[
+            0x00,
+            0x00,
             0x04,
             0x00,
             0x00,
@@ -140,11 +146,11 @@ fn encode_tlv(input: &TlvEncodeInput) -> Result<Vec<u8>, EncodeError> {
             input.byte6.unwrap_or(0x04),
             input.byte7.unwrap_or(0x00),
             tlv_bytes.len() as u8,
-        ];
-        uart.extend_from_slice(&tlv_bytes);
-        (uart, vec![0x00, 0x00])
+        ]);
     } else {
-        let mut uart = vec![
+        out.extend_from_slice(&[
+            input.a.unwrap_or(0),
+            input.s.unwrap_or(0),
             0x04,
             0x00,
             0x00,
@@ -154,23 +160,21 @@ fn encode_tlv(input: &TlvEncodeInput) -> Result<Vec<u8>, EncodeError> {
             input.byte6.unwrap_or(2),
             input.byte7.unwrap_or(1),
             tlv_bytes.len() as u8,
-        ];
-        uart.extend_from_slice(&tlv_bytes);
-        (uart, vec![input.a.unwrap_or(0), input.s.unwrap_or(0)])
-    };
-
-    let crc = crc16(&uart);
-    let mut out = prefix;
-    out.extend_from_slice(&uart);
-    out.push(((crc >> 8) & 0xff) as u8);
+        ]);
+    }
+    out.extend_from_slice(&tlv_bytes);
+    let crc = crc16(&out[2..]);
+    out.push((crc >> 8) as u8);
     out.push((crc & 0xff) as u8);
     Ok(out)
 }
 
 fn encode_aabb(input: &AabbEncodeInput) -> Result<Vec<u8>, EncodeError> {
-    let inner = crate::hex::decode(&input.body_hex.replace(' ', ""))
+    let inner = crate::hex::decode_ignore_ws(&input.body_hex)
         .map_err(|e| EncodeError::InvalidHex(e.to_string()))?;
-    let mut head = vec![0xaa, (inner.len() + 4) as u8];
+    let mut head = Vec::with_capacity(inner.len() + 4);
+    head.push(0xaa);
+    head.push((inner.len() + 4) as u8);
     head.extend_from_slice(&inner);
     let checksum = aabb_checksum(&head);
     head.push(checksum);
@@ -178,13 +182,22 @@ fn encode_aabb(input: &AabbEncodeInput) -> Result<Vec<u8>, EncodeError> {
     Ok(head)
 }
 
+fn strip_ascii_ws(s: &str) -> String {
+    let bytes: Vec<u8> = s
+        .as_bytes()
+        .iter()
+        .copied()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    String::from_utf8(bytes).unwrap_or_else(|_| s.chars().filter(|c| !c.is_whitespace()).collect())
+}
+
 pub fn decode_packet(hex_str: &str) -> Decoded {
-    let cleaned: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
-    let buf = match crate::hex::decode(&cleaned) {
+    let buf = match crate::hex::decode_ignore_ws(hex_str) {
         Ok(b) => b,
         Err(_) => {
             return Decoded::Unknown(DecodedUnknown {
-                hex: cleaned,
+                hex: strip_ascii_ws(hex_str),
                 reason: "invalid hex".into(),
             })
         }
@@ -208,7 +221,7 @@ pub fn decode_packet(hex_str: &str) -> Decoded {
         let len = buf[10] as usize;
         if 11 + len + 2 > buf.len() {
             return Decoded::Unknown(DecodedUnknown {
-                hex: cleaned,
+                hex: crate::hex::encode(&buf),
                 reason: "UART length field overruns buffer".into(),
             });
         }
@@ -257,7 +270,7 @@ pub fn decode_packet(hex_str: &str) -> Decoded {
         // Non-TLV UART (private / SUPERSET / extended). Surface as Unknown with structured reason
         // so management UI does not invent phantom TLV tags from binary body.
         return Decoded::Unknown(DecodedUnknown {
-            hex: cleaned,
+            hex: crate::hex::encode(&buf),
             reason: format!(
                 "uart_binary kind=0x{kind:02x} b5=0x{:02x} b6=0x{:02x} b7=0x{:02x} body_len={len} crc_ok={crc_ok}",
                 buf[7], buf[8], buf[9]
@@ -266,7 +279,7 @@ pub fn decode_packet(hex_str: &str) -> Decoded {
     }
 
     Decoded::Unknown(DecodedUnknown {
-        hex: cleaned,
+        hex: crate::hex::encode(&buf),
         reason: "unrecognized framing".into(),
     })
 }
@@ -291,6 +304,14 @@ mod tests {
             assert_eq!(t.frame.len, 0x0b);
             assert!(!t.tlv.is_empty());
         }
+    }
+
+    #[test]
+    fn decode_packet_ignores_ascii_whitespace() {
+        let spaced = "00 00 04 00 00 00 87 02 04 69 0b 8c a0 36 45 8c d0 59 ac e0 01 de 6a c9";
+        assert_eq!(decode_packet(spaced).protocol(), Protocol::Tlv);
+        let aabb_spaced = "aa 16 f026 3a03 ff04010000000000030000000000 4f bb";
+        assert_eq!(decode_packet(aabb_spaced).protocol(), Protocol::Aabb);
     }
 
     #[test]
@@ -356,11 +377,7 @@ mod tests {
         let d = decode_packet(hex);
         match d {
             Decoded::Unknown(u) => {
-                assert!(
-                    u.reason.starts_with("uart_binary"),
-                    "reason={}",
-                    u.reason
-                );
+                assert!(u.reason.starts_with("uart_binary"), "reason={}", u.reason);
                 assert!(u.reason.contains("kind=0xa8"));
                 assert!(u.reason.contains("crc_ok=true"));
             }

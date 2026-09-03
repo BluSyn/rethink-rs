@@ -24,15 +24,16 @@ impl std::error::Error for MtospError {}
 /// Format an XML payload as an MTOSP frame.
 pub fn format(xml: &str) -> Vec<u8> {
     let payload = xml.as_bytes();
-    let mut header = vec![0xaa, (payload.len() >> 8) as u8, (payload.len() & 0xff) as u8];
-    let mut body = header.clone();
-    body.extend_from_slice(payload);
-    let crc = crc16(&body);
-    header.extend_from_slice(payload);
-    header.push((crc >> 8) as u8);
-    header.push((crc & 0xff) as u8);
-    header.push(0xbb);
-    header
+    let mut buf = Vec::with_capacity(6 + payload.len());
+    buf.push(0xaa);
+    buf.push((payload.len() >> 8) as u8);
+    buf.push((payload.len() & 0xff) as u8);
+    buf.extend_from_slice(payload);
+    let crc = crc16(&buf);
+    buf.push((crc >> 8) as u8);
+    buf.push((crc & 0xff) as u8);
+    buf.push(0xbb);
+    buf
 }
 
 /// Incremental byte-oriented MTOSP splitter.
@@ -110,6 +111,19 @@ impl Splitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_layout_is_aa_len_payload_crc_bb() {
+        let xml = "<x/>";
+        let framed = format(xml);
+        assert_eq!(framed[0], 0xaa);
+        assert_eq!(*framed.last().unwrap(), 0xbb);
+        let len = ((framed[1] as usize) << 8) | framed[2] as usize;
+        assert_eq!(len, xml.len());
+        assert_eq!(&framed[3..3 + len], xml.as_bytes());
+        assert_eq!(framed.len(), 3 + xml.len() + 3);
+        // CRC-16 of (header + payload + crc bytes) is 0; BB is outside the CRC.
+    }
 
     #[test]
     fn format_splitter_round_trip() {

@@ -34,12 +34,32 @@ fn encode_with(data: &[u8], alphabet: &[u8; 16]) -> String {
     String::from_utf8(out).expect("hex alphabet is ASCII")
 }
 
-fn nibble(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
+const fn nibble_table() -> [i8; 256] {
+    let mut t = [-1i8; 256];
+    let mut i = 0;
+    while i < 10 {
+        t[(b'0' + i) as usize] = i as i8;
+        i += 1;
+    }
+    i = 0;
+    while i < 6 {
+        t[(b'a' + i) as usize] = (10 + i) as i8;
+        t[(b'A' + i) as usize] = (10 + i) as i8;
+        i += 1;
+    }
+    t
+}
+
+const NIBBLE: [i8; 256] = nibble_table();
+
+#[inline]
+fn nibble_pair(hi_c: u8, lo_c: u8) -> Result<u8, DecodeError> {
+    let hi = NIBBLE[hi_c as usize];
+    let lo = NIBBLE[lo_c as usize];
+    if (hi | lo) < 0 {
+        Err(DecodeError)
+    } else {
+        Ok(((hi as u8) << 4) | (lo as u8))
     }
 }
 
@@ -53,9 +73,7 @@ pub fn decode(s: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
     let mut out = Vec::with_capacity(bytes.len() / 2);
     let mut i = 0;
     while i < bytes.len() {
-        let hi = nibble(bytes[i]).ok_or(DecodeError)?;
-        let lo = nibble(bytes[i + 1]).ok_or(DecodeError)?;
-        out.push((hi << 4) | lo);
+        out.push(nibble_pair(bytes[i], bytes[i + 1])?);
         i += 2;
     }
     Ok(out)
@@ -70,12 +88,15 @@ pub fn decode_ignore_ws(s: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
         if c.is_ascii_whitespace() {
             continue;
         }
-        let n = nibble(c).ok_or(DecodeError)?;
+        let n = NIBBLE[c as usize];
+        if n < 0 {
+            return Err(DecodeError);
+        }
         if let Some(h) = hi {
-            out.push((h << 4) | n);
+            out.push((h << 4) | (n as u8));
             hi = None;
         } else {
-            hi = Some(n);
+            hi = Some(n as u8);
         }
     }
     if hi.is_some() {
@@ -120,5 +141,21 @@ mod tests {
         assert_eq!(encode(&[]), "");
         assert_eq!(encode_upper(&[]), "");
         assert_eq!(decode("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn nibble_lut_matches_ascii_hex() {
+        for c in 0u8..=255 {
+            let got = NIBBLE[c as usize];
+            let want = match c {
+                b'0'..=b'9' => (c - b'0') as i8,
+                b'a'..=b'f' => (c - b'a' + 10) as i8,
+                b'A'..=b'F' => (c - b'A' + 10) as i8,
+                _ => -1,
+            };
+            assert_eq!(got, want, "NIBBLE[{c}]");
+        }
+        assert_eq!(nibble_pair(b'a', b'b').unwrap(), 0xab);
+        assert!(nibble_pair(b'z', b'0').is_err());
     }
 }

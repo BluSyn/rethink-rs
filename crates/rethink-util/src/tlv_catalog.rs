@@ -1,6 +1,8 @@
 //! Known ThinQ TLV tag catalog for RE tooling (unknown highlighting).
 
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KnownTag {
@@ -121,8 +123,13 @@ pub static KNOWN_TAGS: &[KnownTag] = &[
     KnownTag { id: 0x3e8, name: "caps_marker_hum", family: "caps" },
 ];
 
+fn known_by_id() -> &'static HashMap<u16, &'static str> {
+    static MAP: OnceLock<HashMap<u16, &'static str>> = OnceLock::new();
+    MAP.get_or_init(|| KNOWN_TAGS.iter().map(|t| (t.id, t.name)).collect())
+}
+
 pub fn known_tag_name(id: u16) -> Option<&'static str> {
-    KNOWN_TAGS.iter().find(|t| t.id == id).map(|t| t.name)
+    known_by_id().get(&id).copied()
 }
 
 pub fn is_known_tag(id: u16) -> bool {
@@ -452,6 +459,16 @@ mod tests {
                 r.id
             );
         }
+    }
+
+    #[test]
+    fn known_tag_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for t in KNOWN_TAGS {
+            assert!(seen.insert(t.id), "duplicate known tag 0x{:03x}", t.id);
+        }
+        assert_eq!(known_tag_name(0x1f7), Some("power"));
+        assert_eq!(known_tag_name(0x9999), None);
     }
 
     /// `TLV_DUMP_OUTDIR=<dir> cargo test -p rethink-util --lib tlv_catalog`
