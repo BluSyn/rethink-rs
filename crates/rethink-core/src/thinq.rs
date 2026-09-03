@@ -180,6 +180,20 @@ pub fn hex_encode(b: &[u8]) -> String {
 }
 
 pub fn hex_decode(s: &str) -> Vec<u8> {
-    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    rethink_util::hex::decode(&cleaned).unwrap_or_default()
+    rethink_util::hex::decode_ignore_ws(s).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod hex_helper_tests {
+    use super::*;
+
+    #[test]
+    fn hex_decode_strips_whitespace_in_one_pass() {
+        assert_eq!(
+            hex_decode("AA 0E\nF0ED"),
+            vec![0xaa, 0x0e, 0xf0, 0xed]
+        );
+        assert_eq!(hex_decode("not-hex"), Vec::<u8>::new());
+        assert_eq!(hex_encode(&[0xaa, 0xbb]), "AABB");
+    }
 }

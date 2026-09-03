@@ -357,21 +357,30 @@ impl HaMqttSink {
 
     pub fn handle_message(&self, topic: &str, message: &[u8], retain: bool) {
         let msg = String::from_utf8_lossy(message);
-        if topic == format!("{}/status", self.config.discovery_prefix) && msg == "online" {
+        if msg == "online"
+            && topic
+                .strip_prefix(self.config.discovery_prefix.as_str())
+                .is_some_and(|rest| rest == "/status")
+        {
             self.emit_discovery();
         }
-        let prefix = format!("{}/", self.config.rethink_prefix);
-        if let Some(rest) = topic.strip_prefix(&prefix) {
-            let parts: Vec<&str> = rest.split('/').collect();
-            if parts.len() >= 3 && parts[parts.len() - 1] == "set" {
-                let id = parts[0];
-                let prop = parts[1..parts.len() - 1].join("/");
+        let Some(rest) = topic
+            .strip_prefix(self.config.rethink_prefix.as_str())
+            .and_then(|r| r.strip_prefix('/'))
+        else {
+            return;
+        };
+        if let Some(without_set) = rest.strip_suffix("/set") {
+            if let Some((id, prop)) = without_set.split_once('/') {
                 for h in self.set_handlers.lock().iter() {
-                    h(id, &prop, &msg);
+                    h(id, prop, &msg);
                 }
             }
-            if parts.len() == 2 && parts[1] == "availability" && msg == "online" && retain {
-                if !self.published_availability.lock().contains(parts[0]) {
+        }
+        if retain && msg == "online" {
+            if let Some(id) = rest.strip_suffix("/availability") {
+                if !id.is_empty() && !id.contains('/') && !self.published_availability.lock().contains(id)
+                {
                     self.do_publish(topic, b"offline", true);
                 }
             }
@@ -407,6 +416,50 @@ mod ha_mqtt_sink_tests {
             h.fetch_add(1, Ordering::SeqCst);
         });
         sink.handle_message("rethink/dev1/climate-mode/set", b"heat", false);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn set_property_joins_nested_path_without_vec_split() {
+        let sink = HaMqttSink::new(test_cfg());
+        let got = Arc::new(Mutex::new(None));
+        let g = got.clone();
+        sink.on_set_property(move |id, prop, val| {
+            *g.lock() = Some((id.to_string(), prop.to_string(), val.to_string()));
+        });
+        sink.handle_message("rethink/dev1/upper/remote_temperature/set", b"350", false);
+        assert_eq!(
+            got.lock().clone(),
+            Some(("dev1".into(), "upper/remote_temperature".into(), "350".into()))
+        );
+    }
+
+    #[test]
+    fn stale_availability_only_for_device_root_topic() {
+        let sink = HaMqttSink::new(test_cfg());
+        let pubs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let p = pubs.clone();
+        sink.set_publish_fn(move |topic, _, _| {
+            p.lock().push(topic.to_string());
+        });
+        // Nested availability is not the device root; must not force offline.
+        sink.handle_message("rethink/dev1/extra/availability", b"online", true);
+        assert!(pubs.lock().is_empty());
+        sink.handle_message("rethink/dev1/availability", b"online", true);
+        assert_eq!(pubs.lock().as_slice(), ["rethink/dev1/availability"]);
+    }
+
+    #[test]
+    fn discovery_status_online_fires_without_format_alloc_on_mismatch() {
+        let sink = HaMqttSink::new(test_cfg());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        sink.on_discovery(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        sink.handle_message("homeassistant/status", b"online", false);
+        sink.handle_message("homeassistant/status", b"offline", false);
+        sink.handle_message("other/status", b"online", false);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 

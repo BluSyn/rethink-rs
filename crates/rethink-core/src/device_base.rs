@@ -76,7 +76,7 @@ impl AabbDeviceCore {
         self.thinq.send_packet(&wrap_aabb(inner));
     }
 
-    pub fn process_data_envelope(&self, buf: &[u8]) -> Option<Vec<u8>> {
+    pub fn process_data_envelope<'a>(&self, buf: &'a [u8]) -> Option<&'a [u8]> {
         unwrap_aabb(buf)
     }
 
@@ -140,6 +140,8 @@ pub struct FieldDefinition {
     pub id: Option<u16>,
     pub name: String,
     pub comp: String,
+    /// `{comp}-{name}` HA property key, computed once at construction.
+    pub ha_key: String,
     pub state_topic: Option<String>,
     pub readable: bool,
     pub writable: bool,
@@ -157,6 +159,7 @@ impl FieldDefinition {
             id: None,
             name: name.into(),
             comp: comp.into(),
+            ha_key: format!("{comp}-{name}"),
             state_topic: None,
             readable: true,
             writable: true,
@@ -193,6 +196,8 @@ pub struct TlvDeviceCore {
     pub fields_by_id: Mutex<HashMap<u16, Arc<FieldDefinition>>>,
     pub fields_by_ha: Mutex<HashMap<String, Arc<FieldDefinition>>>,
     pub raw_clip_state: Mutex<HashMap<u16, u32>>,
+    /// Last published HA string per field key (skip identical MQTT retains).
+    pub publish_cache: Mutex<HashMap<String, String>>,
     /// true while waiting for caps
     pub waiting_caps: Mutex<bool>,
     /// true while waiting for initial values
@@ -219,6 +224,7 @@ impl TlvDeviceCore {
             fields_by_id: Mutex::new(HashMap::new()),
             fields_by_ha: Mutex::new(HashMap::new()),
             raw_clip_state: Mutex::new(HashMap::new()),
+            publish_cache: Mutex::new(HashMap::new()),
             waiting_caps: Mutex::new(true),
             waiting_values: Mutex::new(false),
             on_caps: Mutex::new(None),
@@ -245,7 +251,7 @@ impl TlvDeviceCore {
     }
 
     pub fn add_field(&self, config: &mut DeviceDiscovery, options: FieldDefinition, autoreg: bool) {
-        let full_name = format!("{}-{}", options.comp, options.name);
+        let full_name = options.ha_key.clone();
         let options = Arc::new(options);
         if let Some(id) = options.id {
             self.fields_by_id.lock().insert(id, options.clone());
@@ -447,8 +453,15 @@ impl TlvDeviceCore {
             .map(|cb| cb(&processed))
             .unwrap_or(true);
         if do_read && def.readable {
-            let full_name = format!("{}-{}", def.comp, def.name);
-            self.ha.publish_property(&self.id, &full_name, processed);
+            let s = processed.as_string();
+            {
+                let mut cache = self.publish_cache.lock();
+                if cache.get(&def.ha_key) == Some(&s) {
+                    return;
+                }
+                cache.insert(def.ha_key.clone(), s);
+            }
+            self.ha.publish_property(&self.id, &def.ha_key, processed);
         }
     }
 
@@ -533,19 +546,22 @@ pub fn wrap_aabb(inner: &[u8]) -> Vec<u8> {
     packet.push(0xaa);
     packet.push((inner.len() + 4) as u8);
     packet.extend_from_slice(inner);
-    packet.push(0x00);
-    packet.push(0x00);
-    let sum: u32 = packet.iter().map(|&b| u32::from(b)).sum();
-    let last = packet.len() - 2;
-    packet[last] = ((sum & 0xff) as u8) ^ 0x55;
-    packet[last + 1] = 0xbb;
+    let mut sum = 0u8;
+    for &b in &packet {
+        sum = sum.wrapping_add(b);
+    }
+    packet.push(sum ^ 0x55);
+    packet.push(0xbb);
     packet
 }
 
 /// Strip `AA … BB` framing. Checksum is not validated (devices send it; tests often omit it).
-pub fn unwrap_aabb(buf: &[u8]) -> Option<Vec<u8>> {
+///
+/// Returns a borrow of `buf` (no copy). The slice excludes the leading `AA <len>`
+/// and the trailing `<csum> BB`.
+pub fn unwrap_aabb(buf: &[u8]) -> Option<&[u8]> {
     if buf.len() >= 4 && buf[0] == 0xaa && buf[buf.len() - 1] == 0xbb {
-        Some(buf[2..buf.len() - 2].to_vec())
+        Some(&buf[2..buf.len() - 2])
     } else {
         None
     }
@@ -585,7 +601,10 @@ mod tests {
         assert_eq!(pkt[0], 0xaa);
         assert_eq!(*pkt.last().unwrap(), 0xbb);
         assert_eq!(pkt[1] as usize, inner.len() + 4);
-        assert_eq!(unwrap_aabb(&pkt).as_deref(), Some(inner.as_slice()));
+        assert_eq!(unwrap_aabb(&pkt), Some(inner.as_slice()));
+        // Zero-copy: returned slice is a window into `pkt`.
+        let inner_ref = unwrap_aabb(&pkt).unwrap();
+        assert_eq!(inner_ref.as_ptr(), pkt[2..].as_ptr());
     }
 
     #[test]
@@ -604,5 +623,63 @@ mod tests {
             crate::hex_encode(&pkt).to_ascii_uppercase(),
             "AA0EF0ED1121010000001800B5BB"
         );
+    }
+
+    #[test]
+    fn wrap_aabb_checksum_matches_packet_codec() {
+        let inner = [0x40, 0xeb, 0x00, 0x01, 0x02];
+        let pkt = wrap_aabb(&inner);
+        let without_csum = &pkt[..pkt.len() - 2];
+        assert_eq!(
+            pkt[pkt.len() - 2],
+            rethink_util::packet_codec::aabb_checksum(without_csum)
+        );
+    }
+
+    struct CountingHa {
+        pubs: Mutex<Vec<(String, String)>>,
+    }
+    impl HaConnection for CountingHa {
+        fn publish_config(&self, _id: &str, _config: &DeviceDiscovery) {}
+        fn publish_property(&self, _id: &str, property: &str, value: PropertyValue) {
+            self.pubs.lock().push((property.to_string(), value.as_string()));
+        }
+        fn publish_event(&self, _id: &str, _topic_suffix: &str, _payload: &str) {}
+        fn is_connected(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn tlv_process_key_value_skips_identical_republish() {
+        let ha = Arc::new(CountingHa {
+            pubs: Mutex::new(Vec::new()),
+        });
+        let thinq = crate::MockThinq2Device::new("id", crate::Metadata::new("M", "M", "1"));
+        let core = TlvDeviceCore::new(ha.clone(), thinq);
+        let mut cfg = default_config(&crate::Metadata::new("M", "M", "1"), None);
+        let mut field = FieldDefinition::new("power", "").with_id(0x1f7);
+        field.read_xform = Some(Box::new(|raw| {
+            Some(if raw != 0 { "ON".into() } else { "OFF".into() })
+        }));
+        core.add_field(&mut cfg, field, true);
+        core.process_key_value(0x1f7, 1);
+        core.process_key_value(0x1f7, 1);
+        core.process_key_value(0x1f7, 0);
+        let pubs = ha.pubs.lock().clone();
+        let power_pubs: Vec<_> = pubs
+            .into_iter()
+            .filter(|(k, _)| k == "power-")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(power_pubs, vec!["ON".to_string(), "OFF".to_string()]);
+    }
+
+    #[test]
+    fn field_ha_key_is_comp_dash_name() {
+        let empty_name = FieldDefinition::new("climate", "");
+        assert_eq!(empty_name.ha_key, "climate-");
+        let named = FieldDefinition::new("climate", "mode");
+        assert_eq!(named.ha_key, "climate-mode");
     }
 }
