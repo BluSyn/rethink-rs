@@ -83,9 +83,8 @@ impl DeviceAcceptor {
         let cmd = payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
 
         if topic_ends_with_device("clip/message/devices/", &topic, did) {
-            // Some RTL CLIP firmware (e.g. T17A1EFHU_F) never sends
-            // completeProvisioning_ack; it starts publishing device_packets after
-            // deploy. Register on the first packet once deploy/preDeploy is stored.
+            // completeProvisioning_ack is a no-op: some RTL CLIP firmware
+            // (e.g. T17A1EFHU_F) never sends it. Registration is on deploy/preDeploy.
             if cmd == "device_packet" {
                 let meta = self.broker.client_meta(client_id);
                 if meta
@@ -95,9 +94,6 @@ impl DeviceAcceptor {
                     .and_then(|v| v.as_str())
                     == Some(did)
                 {
-                    if self.devices.lock().get(&client_id).is_none() {
-                        self.complete_provisioning(did, client_id);
-                    }
                     if let Some(dev) = self.devices.lock().get(&client_id).cloned() {
                         // Heal: reconnect race may have removed this id from DeviceManager
                         // while the MQTT session + acceptor still hold the device.
@@ -137,24 +133,31 @@ impl DeviceAcceptor {
                 },
                 None,
             );
+            // Master 8f6d19e: register immediately here so start()/status query
+            // can run before the appliance speaks.
+            if self.devices.lock().get(&client_id).is_none() {
+                self.complete_provisioning(did, client_id);
+            } else {
+                eprintln!("device {did} already set up");
+            }
         }
     }
 
     fn complete_provisioning(&self, device_id: &str, client_id: u64) {
         let meta_c = self.broker.client_meta(client_id);
         let Some(deploy) = meta_c.deploy_msg.clone() else {
-            eprintln!("completeProvisioning_ack received without deploy/preDeploy");
+            eprintln!("completeProvisioning without deploy/preDeploy");
             return;
         };
         // Same MQTT client already provisioned — only re-bind if manager lost the device
-        // (e.g. pre-fix reconnect race). Otherwise ignore duplicate ack.
+        // (e.g. pre-fix reconnect race). Otherwise ignore a duplicate deploy.
         if meta_c.has_device {
             if self.manager.get(device_id).is_some() && self.devices.lock().contains_key(&client_id)
             {
                 return;
             }
             eprintln!(
-                "device {device_id}: completeProvisioning_ack on already-flagged client but missing from manager — re-registering"
+                "device {device_id}: deploy on already-flagged client but missing from manager — re-registering"
             );
         }
 
@@ -399,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn registers_on_first_device_packet_without_provisioning_ack() {
+    fn registers_on_deploy_without_provisioning_ack() {
         let (_broker, manager, acc) = clip_acceptor();
         let did = "rtl-no-ack";
         acc.handle_mqtt(
@@ -407,10 +410,11 @@ mod tests {
             &deploy_json(did),
             7,
         );
-        assert!(
-            manager.get(did).is_none(),
-            "deploy alone must not register (master 8f6d19e registers on device_packet)"
-        );
+        let dev = manager
+            .get(did)
+            .expect("master 8f6d19e registers immediately on deploy/preDeploy");
+        assert_eq!(dev.meta.model_id, "T17A1EFHU_F");
+        assert_eq!(dev.meta.model_name, "T17A1EFHU_F");
 
         acc.handle_mqtt(
             &format!("clip/message/devices/{did}"),
@@ -421,10 +425,15 @@ mod tests {
             7,
         );
         assert!(
-            manager.get(did).is_none(),
-            "ack is optional and must not be required"
+            Arc::ptr_eq(&dev, &manager.get(did).unwrap()),
+            "ack is a no-op and must not replace the device"
         );
 
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        dev.add_data_handler(move |_| {
+            h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
         acc.handle_mqtt(
             &format!("clip/message/devices/{did}"),
             &serde_json::json!({
@@ -434,25 +443,25 @@ mod tests {
             }),
             7,
         );
-        let dev = manager
-            .get(did)
-            .expect("first device_packet after deploy must register the appliance");
-        assert_eq!(dev.meta.model_id, "T17A1EFHU_F");
-        assert_eq!(dev.meta.model_name, "T17A1EFHU_F");
-
-        acc.handle_mqtt(
-            &format!("clip/message/devices/{did}"),
-            &serde_json::json!({
-                "did": did,
-                "cmd": "device_packet",
-                "data": "AA0EF0ED1121010000001800B5BB",
-            }),
-            7,
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "device_packet after deploy must reach the registered device"
         );
         assert!(
             Arc::ptr_eq(&dev, &manager.get(did).unwrap()),
-            "second packet must not replace the registered device"
+            "device_packet must not replace the registered device"
         );
+    }
+
+    #[test]
+    fn pre_deploy_also_registers() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "pre-deploy-id";
+        let mut body = deploy_json(did);
+        body["cmd"] = serde_json::json!("preDeploy");
+        acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 4);
+        assert!(manager.get(did).is_some());
     }
 
     #[test]
