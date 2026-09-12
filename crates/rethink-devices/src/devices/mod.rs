@@ -89,6 +89,7 @@ register_devices! {
         rh90v9_ww => { "RH90V9_WW" },
         wfv474pgv => { "WFV474PGV" },
         wmvem1825 => { "WMVEM1825" },
+        wmvel2137 => { "WMVEL2137" },
         wlrel6323s => { "WLREL6323S" },
         y_vb_y___w_b32qeuk => { "Y_VB_Y___W.B32QEUK" },
         sdh_gvx5_6211 => { "SDH_GVX5_6211" },
