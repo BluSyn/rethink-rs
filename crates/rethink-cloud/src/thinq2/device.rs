@@ -83,9 +83,9 @@ impl DeviceAcceptor {
         let cmd = payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
 
         if topic_ends_with_device("clip/message/devices/", &topic, did) {
-            if cmd == "completeProvisioning_ack" {
-                self.complete_provisioning(did, payload, client_id);
-            }
+            // Some RTL CLIP firmware (e.g. T17A1EFHU_F) never sends
+            // completeProvisioning_ack; it starts publishing device_packets after
+            // deploy. Register on the first packet once deploy/preDeploy is stored.
             if cmd == "device_packet" {
                 let meta = self.broker.client_meta(client_id);
                 if meta
@@ -95,6 +95,9 @@ impl DeviceAcceptor {
                     .and_then(|v| v.as_str())
                     == Some(did)
                 {
+                    if self.devices.lock().get(&client_id).is_none() {
+                        self.complete_provisioning(did, client_id);
+                    }
                     if let Some(dev) = self.devices.lock().get(&client_id).cloned() {
                         // Heal: reconnect race may have removed this id from DeviceManager
                         // while the MQTT session + acceptor still hold the device.
@@ -137,7 +140,7 @@ impl DeviceAcceptor {
         }
     }
 
-    fn complete_provisioning(&self, device_id: &str, _payload: &serde_json::Value, client_id: u64) {
+    fn complete_provisioning(&self, device_id: &str, client_id: u64) {
         let meta_c = self.broker.client_meta(client_id);
         let Some(deploy) = meta_c.deploy_msg.clone() else {
             eprintln!("completeProvisioning_ack received without deploy/preDeploy");
@@ -211,13 +214,7 @@ impl DeviceAcceptor {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let messagestr = match msg {
-                SendToDevice::T2Packet(buf) => serde_json::json!({
-                    "did": did,
-                    "mid": mid,
-                    "cmd": "packet",
-                    "type": 1,
-                    "data": rethink_util::hex::encode(&buf),
-                }),
+                SendToDevice::T2Packet(buf) => clip_packet_json(&did, mid, &buf),
                 SendToDevice::T2Clip {
                     cmd,
                     msg_type,
@@ -307,6 +304,21 @@ impl DeviceAcceptor {
     }
 }
 
+/// CLIP `cmd=packet` payload. Some firmware (F_C__Y___W.A__QEUK) ignores lowercase hex.
+fn encode_clip_packet_hex(buf: &[u8]) -> String {
+    rethink_util::hex::encode_upper(buf)
+}
+
+fn clip_packet_json(did: &str, mid: u64, buf: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "did": did,
+        "mid": mid,
+        "cmd": "packet",
+        "type": 1,
+        "data": encode_clip_packet_hex(buf),
+    })
+}
+
 /// Normalize broker topics to `clip/...` without allocating when already relative.
 fn clip_relative_topic(topic: &str) -> Cow<'_, str> {
     if let Some(idx) = topic.find("/clip") {
@@ -325,6 +337,8 @@ fn topic_ends_with_device(prefix: &str, topic: &str, did: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::devmgr::DeviceManager;
+    use crate::mqtt_broker::Broker;
 
     #[test]
     fn clip_relative_topic_strips_broker_prefix() {
@@ -351,5 +365,119 @@ mod tests {
             "clip/provisioning/devices/dev1",
             "dev1"
         ));
+    }
+
+    #[test]
+    fn clip_outbound_packet_hex_is_uppercase() {
+        assert_eq!(encode_clip_packet_hex(&[0xaa, 0x0e, 0xf0]), "AA0EF0");
+        assert_eq!(encode_clip_packet_hex(&[0xde, 0xad]), "DEAD");
+        assert!(!encode_clip_packet_hex(&[0xaa])
+            .chars()
+            .any(|c| c.is_ascii_lowercase()));
+    }
+
+    fn clip_acceptor() -> (Arc<Broker>, Arc<DeviceManager>, Arc<DeviceAcceptor>) {
+        let broker = Arc::new(Broker::new());
+        let manager = DeviceManager::new();
+        let acc = DeviceAcceptor::new(broker.clone(), manager.clone());
+        (broker, manager, acc)
+    }
+
+    fn deploy_json(did: &str) -> serde_json::Value {
+        serde_json::json!({
+            "did": did,
+            "cmd": "deploy",
+            "kind": "T17A1EFHU_F",
+            "data": {
+                "appInfo": {
+                    "modelName": "T17A1EFHU_F",
+                    "softVer": "1.0",
+                    "DeviceType": "201"
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn registers_on_first_device_packet_without_provisioning_ack() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "rtl-no-ack";
+        acc.handle_mqtt(
+            &format!("clip/provisioning/devices/{did}"),
+            &deploy_json(did),
+            7,
+        );
+        assert!(
+            manager.get(did).is_none(),
+            "deploy alone must not register (master 8f6d19e registers on device_packet)"
+        );
+
+        acc.handle_mqtt(
+            &format!("clip/message/devices/{did}"),
+            &serde_json::json!({
+                "did": did,
+                "cmd": "completeProvisioning_ack",
+            }),
+            7,
+        );
+        assert!(
+            manager.get(did).is_none(),
+            "ack is optional and must not be required"
+        );
+
+        acc.handle_mqtt(
+            &format!("clip/message/devices/{did}"),
+            &serde_json::json!({
+                "did": did,
+                "cmd": "device_packet",
+                "data": "AA0EF0ED1121010000001800B5BB",
+            }),
+            7,
+        );
+        let dev = manager
+            .get(did)
+            .expect("first device_packet after deploy must register the appliance");
+        assert_eq!(dev.meta.model_id, "T17A1EFHU_F");
+        assert_eq!(dev.meta.model_name, "T17A1EFHU_F");
+
+        acc.handle_mqtt(
+            &format!("clip/message/devices/{did}"),
+            &serde_json::json!({
+                "did": did,
+                "cmd": "device_packet",
+                "data": "AA0EF0ED1121010000001800B5BB",
+            }),
+            7,
+        );
+        assert!(
+            Arc::ptr_eq(&dev, &manager.get(did).unwrap()),
+            "second packet must not replace the registered device"
+        );
+    }
+
+    #[test]
+    fn device_packet_without_deploy_is_ignored() {
+        let (_broker, manager, acc) = clip_acceptor();
+        acc.handle_mqtt(
+            "clip/message/devices/orphan",
+            &serde_json::json!({
+                "did": "orphan",
+                "cmd": "device_packet",
+                "data": "AA04BB",
+            }),
+            3,
+        );
+        assert!(manager.get("orphan").is_none());
+    }
+
+    #[test]
+    fn outbound_clip_packet_json_uses_uppercase_hex() {
+        let body = clip_packet_json("dev-x", 42, &[0xaa, 0x0e, 0xf0, 0xed]);
+        assert_eq!(body["cmd"], "packet");
+        assert_eq!(body["type"], 1);
+        assert_eq!(body["did"], "dev-x");
+        assert_eq!(body["data"], "AA0EF0ED");
+        let data = body["data"].as_str().unwrap();
+        assert!(!data.chars().any(|c| c.is_ascii_lowercase()));
     }
 }
