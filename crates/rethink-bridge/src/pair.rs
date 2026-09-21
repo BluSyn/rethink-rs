@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 
 const IOT_BASE_URL: &str = "https://common.lgthinq.com";
 
+/// CA fetch URL after `/route` has named the regional `apiServer`.
+pub fn route_certificate_url(api_server: &str) -> String {
+    format!("{api_server}/route/certificate?name=aws-iot")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thinq2DeviceState {
@@ -166,8 +171,10 @@ pub async fn pair_thinq2(
         .ok_or_else(|| anyhow::anyhow!("missing mqttServer"))?
         .to_string();
 
+    // Region apiServer, not common.lgthinq.com — master 980b42e. The common
+    // host returned a root that only matched some regions' MQTT brokers.
     let ca_resp = api_fetch_json(
-        &format!("{IOT_BASE_URL}/route/certificate?name=aws-iot"),
+        &route_certificate_url(&api_server),
         "GET",
         &[("accept", "application/json")],
         None,
@@ -341,6 +348,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["cmd"], "preDeploy");
         assert_eq!(v["data"]["appInfo"]["countryCode"], "US");
+    }
+
+    #[test]
+    fn ca_cert_url_uses_region_api_server_not_common() {
+        let url = route_certificate_url("https://kic-api.lgthinq.com:46030");
+        assert_eq!(
+            url,
+            "https://kic-api.lgthinq.com:46030/route/certificate?name=aws-iot"
+        );
+        assert!(!url.contains("common.lgthinq.com"));
+        assert_ne!(url, format!("{IOT_BASE_URL}/route/certificate?name=aws-iot"));
     }
 
     #[test]
