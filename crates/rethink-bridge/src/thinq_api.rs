@@ -207,6 +207,44 @@ impl Client {
         Ok(())
     }
 
+    pub fn home_devices_url(thinq2_uri: &str, home_id: &str) -> String {
+        format!("{thinq2_uri}/service/homes/{home_id}")
+    }
+
+    /// Devices listed on a home payload (`GET /service/homes/{homeId}` result).
+    pub fn parse_home_devices(home: &Value) -> Vec<Value> {
+        home.get("devices")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn home_has_device(devices: &[Value], device_id: &str) -> bool {
+        devices
+            .iter()
+            .any(|d| d.get("deviceId").and_then(|v| v.as_str()) == Some(device_id))
+    }
+
+    /// Appliances already registered in the current home (master `9b76e42`).
+    pub async fn list_devices(&self) -> anyhow::Result<Vec<Value>> {
+        let g = self
+            .gateway
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("gateway not loaded"))?;
+        let thinq2 = g
+            .get("thinq2Uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing thinq2Uri"))?;
+        let home = self
+            .home_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("home not set"))?;
+        let body = self
+            .api_fetch(&Self::home_devices_url(thinq2, home), "GET", None)
+            .await?;
+        Ok(Self::parse_home_devices(&body))
+    }
+
     pub async fn remove_device(&self, device_id: &str) -> anyhow::Result<()> {
         let g = self
             .gateway
@@ -346,5 +384,33 @@ mod tests {
         assert!(u.contains("country=US"));
         assert!(u.contains("svc_code=SVC202"));
         assert!(u.contains("signin"));
+    }
+
+    #[test]
+    fn list_devices_url_is_home_resource() {
+        assert_eq!(
+            Client::home_devices_url("https://thinq2.example", "home-1"),
+            "https://thinq2.example/service/homes/home-1"
+        );
+    }
+
+    #[test]
+    fn home_lookup_skips_reregistration_when_already_listed() {
+        let home = json!({
+            "devices": [
+                {"deviceId": "other-device", "alias": "Dryer"},
+                {"deviceId": "aaaabbbb-cccc-dddd-eeee-ffff00001111", "alias": "침실 에어컨"},
+            ]
+        });
+        let devices = Client::parse_home_devices(&home);
+        assert!(Client::home_has_device(
+            &devices,
+            "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+        ));
+        assert!(!Client::home_has_device(&devices, "missing-id"));
+        assert!(!Client::home_has_device(
+            &Client::parse_home_devices(&json!({})),
+            "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+        ));
     }
 }

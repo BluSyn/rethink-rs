@@ -201,23 +201,26 @@ impl Bridge {
             .or_else(|| device.device_type().map(|s| s.to_string()))
             .ok_or_else(|| anyhow::anyhow!("Device type must be specified"))?;
 
-        report("Removing device from home");
-        let _ = client.remove_device(&id).await;
+        // Keep an existing home membership (master 9b76e42). remove+addDevice
+        // renamed the appliance to "Rethink xxxxxxxx" and bounced it out of
+        // every linked app. Pairing still runs; only the home row is reused.
+        let home_devices = client.list_devices().await?;
+        let has_device = thinq_api::Client::home_has_device(&home_devices, &id);
+        let alias = format!("Rethink {}", &id[..id.len().min(8)]);
+
+        if !has_device {
+            report("Removing device from home");
+            let _ = client.remove_device(&id).await;
+        }
 
         let lg_state = if device.platform() == "thinq1" {
-            report("Adding ThinQ1 device to home");
             let state = client.thinq1_state()?;
-            let alias = format!("Rethink {}", &id[..id.len().min(8)]);
-            client
-                .add_device(
-                    &id,
-                    &alias,
-                    device.model_name(),
-                    &dtype,
-                    "thinq1",
-                    None,
-                )
-                .await?;
+            if !has_device {
+                report("Adding ThinQ1 device to home");
+                client
+                    .add_device(&id, &alias, device.model_name(), &dtype, "thinq1", None)
+                    .await?;
+            }
             serde_json::json!({
                 "rtiServer": state.get("rtiServer").cloned().unwrap_or(serde_json::Value::Null),
                 "httpServer": state.get("httpServer").cloned().unwrap_or(serde_json::Value::Null),
@@ -236,22 +239,23 @@ impl Bridge {
                     return Err(e);
                 }
             };
-            report("Adding ThinQ2 device to home");
-            let alias = format!("Rethink {}", &id[..id.len().min(8)]);
-            let ct_b64 = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &pair.add_device_ciphertext,
-            );
-            client
-                .add_device(
-                    &id,
-                    &alias,
-                    device.model_name(),
-                    &dtype,
-                    "thinq2",
-                    Some(&ct_b64),
-                )
-                .await?;
+            if !has_device {
+                report("Adding ThinQ2 device to home");
+                let ct_b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &pair.add_device_ciphertext,
+                );
+                client
+                    .add_device(
+                        &id,
+                        &alias,
+                        device.model_name(),
+                        &dtype,
+                        "thinq2",
+                        Some(&ct_b64),
+                    )
+                    .await?;
+            }
             serde_json::to_value(&pair.state)?
         };
 
@@ -708,6 +712,20 @@ mod lifecycle_tests {
             .unwrap();
         assert!(bridge.status_for(id));
         assert!(b.data_handler_count() >= 1);
+    }
+
+    #[test]
+    fn keep_existing_home_registration_when_listed() {
+        let devices = serde_json::json!([
+            {"deviceId": "other-device", "alias": "Dryer"},
+            {"deviceId": "aaaabbbb-cccc-dddd-eeee-ffff00001111", "alias": "침실 에어컨"},
+        ]);
+        let arr = devices.as_array().unwrap();
+        assert!(thinq_api::Client::home_has_device(
+            arr,
+            "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+        ));
+        assert!(!thinq_api::Client::home_has_device(arr, "missing-id"));
     }
 
     // Packet format tests (real shipped formatters)
