@@ -1,7 +1,7 @@
 //! ThinQ2 upstream MQTT connection to LG cloud (port of bridge/thinq2connection.ts).
 
 use crate::pair::{
-    format_device_packet, format_pre_deploy, parse_lg_packet_payload, Thinq2DeviceState,
+    format_device_packet, parse_lg_packet_payload, upstream_pre_deploy, Thinq2DeviceState,
 };
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, TlsConfiguration, Transport};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -48,6 +48,7 @@ pub async fn connect_thinq2(
     state: &Thinq2DeviceState,
     device_id: &str,
     model_name: &str,
+    deploy: Option<serde_json::Value>,
 ) -> anyhow::Result<(Thinq2Handle, mpsc::UnboundedReceiver<Vec<u8>>)> {
     let mqtt_url = state.mqtt_server.replace("ssl://", "mqtts://");
     let url = url::Url::parse(&mqtt_url)
@@ -78,7 +79,6 @@ pub async fn connect_thinq2(
     let pub_topic = state.pub_topic.clone();
     let did = device_id.to_string();
     let model = model_name.to_string();
-    let country = state.country_code.clone();
     let mid_c = mid.clone();
     let client_c = client.clone();
     let stopped_c = stopped.clone();
@@ -93,7 +93,7 @@ pub async fn connect_thinq2(
                     eprintln!("[bridge] {did} connected");
                     let _ = client_c.subscribe(&sub_topic, QoS::AtLeastOnce).await;
                     let m = mid_c.fetch_add(1, Ordering::SeqCst) + 1;
-                    let pre = format_pre_deploy(m, &did, &model, &country);
+                    let pre = upstream_pre_deploy(m, &did, &model, deploy.as_ref()).to_string();
                     let _ = client_c
                         .publish(&prov_topic, QoS::AtLeastOnce, false, pre)
                         .await;

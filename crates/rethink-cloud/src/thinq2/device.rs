@@ -245,6 +245,7 @@ impl DeviceAcceptor {
 
         let dev =
             ConnectedDevice::new(device_id.to_string(), Platform::Thinq2, meta, emit, send_to);
+        dev.set_deploy(deploy);
         *device_slot.lock() = Some(dev.clone());
 
         let mut cm = self.broker.client_meta(client_id);
@@ -455,6 +456,41 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn deploy_payload_is_forwarded_without_rac_placeholders() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "real-deploy";
+        let body = serde_json::json!({
+            "did": did,
+            "cmd": "deploy",
+            "kind": "OVEN",
+            "data": {
+                "appInfo": {
+                    "modelName": "OVEN",
+                    "protocolVer": "4.9",
+                    "softVer": "424242",
+                    "panelCode": "ZZ"
+                }
+            }
+        });
+        acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 1);
+        let dev = manager.get(did).expect("registered");
+        let stored = dev.deploy_payload().expect("deploy stored");
+        let local = crate::bridge_adapter::ConnectedAsLocal(dev);
+        let forwarded = rethink_bridge::pair::upstream_pre_deploy(
+            7,
+            did,
+            "OVEN",
+            rethink_bridge::LocalDevice::deploy_payload(&local).as_ref(),
+        );
+        assert_eq!(stored["data"]["appInfo"]["protocolVer"], "4.9");
+        assert_eq!(forwarded["data"]["appInfo"]["protocolVer"], "4.9");
+        assert_eq!(forwarded["data"]["appInfo"]["panelCode"], "ZZ");
+        assert_eq!(forwarded["data"]["appInfo"]["softVer"], "424242");
+        assert!(forwarded["data"].get("platformInfo").is_none());
+        assert!(!forwarded.to_string().contains("690409"));
+    }
+
     fn pre_deploy_also_registers() {
         let (_broker, manager, acc) = clip_acceptor();
         let did = "pre-deploy-id";

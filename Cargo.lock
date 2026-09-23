@@ -1478,6 +1478,7 @@ dependencies = [
  "base64",
  "chrono",
  "hmac",
+ "openssl",
  "rand 0.8.7",
  "reqwest",
  "rethink-core",

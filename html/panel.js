@@ -79,6 +79,8 @@ document.addEventListener('DOMContentLoaded', function () {
 const STATUS_OK = `<i class="tiny material-icons" style="color:#3dd68c">check</i>`
 const STATUS_ERROR = `<i class="tiny material-icons" style="color:#f07178">error</i>`
 const STATUS_UNKNOWN = `<i class="tiny material-icons" style="color:#8b9bb0">question_mark</i>`
+// Not an error: the bridge was left out of the configuration on purpose.
+const STATUS_DISABLED = `<i class="tiny material-icons" style="color:#8b9bb0">block</i>`
 
 let ws
 let deviceWs
@@ -244,7 +246,9 @@ class DeviceEntry {
         } else {
             this.spinner.classList.add('hide')
             this.bridgeDiv.classList.remove('hide')
-            this.bridgeSwitch.checked = !!this.remoteState.bridged
+            const state = this.remoteState.bridgeState
+            const enabled = state === 'online' || state === 'offline'
+            this.bridgeSwitch.checked = state == null ? !!this.remoteState.bridged : enabled
         }
         this.bridgeSwitch.disabled = !bridge_status
     }
@@ -1592,7 +1596,12 @@ function connect() {
 
         if (typeof json.bridge === 'object') {
             bridge_status = json.bridge.loggedIn
-            if (json.bridge.loggedIn === true) {
+            if (json.bridge.disabled) {
+                get('btn_thinq_login').classList.add('hide')
+                get('btn_thinq_logout').classList.add('hide')
+                get('status_bridge').innerHTML = STATUS_DISABLED
+                get('status_bridge_text').innerText = 'Disabled by configuration'
+            } else if (json.bridge.loggedIn === true) {
                 get('btn_thinq_login').classList.add('hide')
                 get('btn_thinq_logout').classList.remove('hide')
                 get('status_bridge').innerHTML = STATUS_OK
@@ -1601,7 +1610,7 @@ function connect() {
                 get('btn_thinq_login').classList.remove('hide')
                 get('btn_thinq_logout').classList.add('hide')
                 get('status_bridge').innerHTML = STATUS_ERROR
-                get('status_bridge_text').innerText = 'Not configured'
+                get('status_bridge_text').innerText = 'Not logged in'
             }
             for (const id in devices) devices[id].refreshUI()
         }

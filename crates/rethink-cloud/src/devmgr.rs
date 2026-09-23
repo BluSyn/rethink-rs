@@ -23,6 +23,8 @@ pub struct ConnectedDevice {
     pub on_close: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
     pub on_data: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
     pub on_send: Mutex<Vec<Box<dyn Fn(SendToDevice) + Send + Sync>>>,
+    /// The deploy/preDeploy message that registered this appliance.
+    pub deploy: Mutex<Option<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +57,16 @@ impl ConnectedDevice {
             on_close: Mutex::new(Vec::new()),
             on_data: Mutex::new(Vec::new()),
             on_send: Mutex::new(Vec::new()),
+            deploy: Mutex::new(None),
         })
+    }
+
+    pub fn set_deploy(&self, msg: serde_json::Value) {
+        *self.deploy.lock() = Some(msg);
+    }
+
+    pub fn deploy_payload(&self) -> Option<serde_json::Value> {
+        self.deploy.lock().clone()
     }
 
     pub fn notify_data(&self, buf: &[u8]) {

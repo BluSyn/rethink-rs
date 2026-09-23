@@ -37,4 +37,7 @@ impl LocalDevice for ConnectedAsLocal {
     fn send_json_to_local(&self, body: serde_json::Value) {
         (self.0.send_to_device)(SendToDevice::T1Json(body));
     }
+    fn deploy_payload(&self) -> Option<serde_json::Value> {
+        self.0.deploy_payload()
+    }
 }

@@ -1,7 +1,6 @@
 //! ThinQ2 device pairing (port of Thinq2Device.pair in bridge/thinqApi.ts).
 
 use crate::state::Environment;
-use crate::util::{subprocess, SubprocessOptions};
 use base64::Engine;
 use rand::RngCore;
 use rsa::pkcs8::DecodePublicKey;
@@ -94,35 +93,22 @@ fn rsa_pkcs1_encrypt(public_key_pem: &str, plaintext: &[u8]) -> anyhow::Result<V
     Ok(encrypted)
 }
 
-/// Generate EC P-256 key + CSR via openssl (matches TS subprocess path).
+/// Generate an EC P-256 key and CSR in-process (no `openssl` CLI).
 async fn generate_ec_key_and_csr() -> anyhow::Result<(String, String, String)> {
-    let private_key = subprocess(
-        "openssl",
-        &["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", "-"],
-        "",
-        SubprocessOptions::default(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!(e.0))?;
-
-    let public_key = subprocess(
-        "openssl",
-        &["ec", "-pubout", "-out", "-"],
-        &private_key,
-        SubprocessOptions::default(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!(e.0))?;
-
-    let csr = subprocess(
-        "sh",
-        &["-c", "cat | openssl req -new -key /dev/stdin -subj '/CN=*.clip.com/O=LGE/C=KR'"],
-        &private_key,
-        SubprocessOptions::default(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!(e.0))?;
-
+    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)?;
+    let ec = openssl::ec::EcKey::generate(&group)?;
+    let key = openssl::pkey::PKey::from_ec_key(ec)?;
+    let mut name = openssl::x509::X509NameBuilder::new()?;
+    name.append_entry_by_text("CN", "*.clip.com")?;
+    name.append_entry_by_text("O", "LGE")?;
+    name.append_entry_by_text("C", "KR")?;
+    let mut req = openssl::x509::X509ReqBuilder::new()?;
+    req.set_subject_name(name.build().as_ref())?;
+    req.set_pubkey(&key)?;
+    req.sign(&key, openssl::hash::MessageDigest::sha256())?;
+    let private_key = String::from_utf8(key.private_key_to_pem_pkcs8()?)?;
+    let public_key = String::from_utf8(key.public_key_to_pem()?)?;
+    let csr = String::from_utf8(req.build().to_pem()?)?;
     Ok((private_key, public_key, csr))
 }
 
@@ -278,8 +264,33 @@ pub fn format_device_packet(
     .to_string()
 }
 
-/// Build preDeploy payload published on connect (mirrors thinq2connection.ts).
-pub fn format_pre_deploy(mid: u32, device_id: &str, model_name: &str, country_code: &str) -> String {
+/// Upstream preDeploy built from the appliance's own deploy message.
+///
+/// `appInfo` is forwarded verbatim (including `protocolVer` and any extra
+/// fields). `platformInfo` is included only when the appliance sent an object;
+/// a missing key stays missing. The old RAC placeholder set (`softVer`
+/// `690409`, `protocolVer` `"1"`) is never substituted.
+pub fn upstream_pre_deploy(
+    mid: u32,
+    device_id: &str,
+    model_name: &str,
+    deploy: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let app_info = deploy
+        .and_then(|d| d.pointer("/data/appInfo").or_else(|| d.get("appInfo")))
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "modelName": model_name }));
+    let mut data = serde_json::Map::new();
+    data.insert("appInfo".into(), app_info);
+    if let Some(platform) = deploy.and_then(|d| {
+        d.pointer("/data/platformInfo")
+            .or_else(|| d.get("platformInfo"))
+    }) {
+        if platform.is_object() {
+            data.insert("platformInfo".into(), platform.clone());
+        }
+    }
     serde_json::json!({
         "mid": mid,
         "did": device_id,
@@ -287,35 +298,9 @@ pub fn format_pre_deploy(mid: u32, device_id: &str, model_name: &str, country_co
         "cmd": "preDeploy",
         "rssi": -48,
         "fs": "idle",
-        "data": {
-            "appInfo": {
-                "modelName": model_name,
-                "modelLanguage": country_code,
-                "softVer": "690409",
-                "ruleVer": "2.0.11",
-                "countryCode": country_code,
-                "subCountryCode": country_code,
-                "appVersion": "clip_hna_v1.9.183",
-                "modemType": "RTK_RTL8711am",
-                "regionalCode": "eic",
-                "timezone": "+0100",
-                "svcCode": "SVC202",
-                "HomeApSsid": "whatever",
-                "DeviceType": "",
-                "ruleEngine": "y",
-                "protocolVer": "1",
-                "oneshot": "y",
-                "size": 1572864,
-                "fwUpgradeInfo": { "upgSched": { "cmd": "none", "upgUtc": "0" } },
-            },
-            "platformInfo": {
-                "provisioningKey": model_name,
-                "version": "clip_v2.00.15.05-RTK_RTL8711am-SDK-8-RELEASE",
-            },
-        },
+        "data": data,
         "type": 0,
     })
-    .to_string()
 }
 
 /// Parse LG → local packet command from MQTT JSON.
@@ -343,11 +328,30 @@ mod tests {
     }
 
     #[test]
-    fn pre_deploy_has_cmd() {
-        let s = format_pre_deploy(10000, "dev-1", "MODEL", "US");
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    fn upstream_pre_deploy_keeps_real_app_info_and_omits_platform_info() {
+        let deploy = serde_json::json!({
+            "cmd": "deploy",
+            "did": "dev-1",
+            "data": {
+                "appInfo": {
+                    "modelName": "REAL-MODEL",
+                    "protocolVer": "2.1",
+                    "softVer": "424242",
+                    "countryCode": "US",
+                    "panelCode": "ZZ"
+                }
+            }
+        });
+        let v = upstream_pre_deploy(10000, "dev-1", "REAL-MODEL", Some(&deploy));
         assert_eq!(v["cmd"], "preDeploy");
+        assert_eq!(v["data"]["appInfo"]["protocolVer"], "2.1");
+        assert_eq!(v["data"]["appInfo"]["softVer"], "424242");
+        assert_eq!(v["data"]["appInfo"]["panelCode"], "ZZ");
         assert_eq!(v["data"]["appInfo"]["countryCode"], "US");
+        assert!(v["data"].get("platformInfo").is_none());
+        let text = v.to_string();
+        assert!(!text.contains("690409"), "RAC placeholder softVer must not be substituted");
+        assert!(!text.contains("clip_v2.00.15.05"));
     }
 
     #[test]

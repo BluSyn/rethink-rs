@@ -8,6 +8,7 @@
 
 pub mod oauth2;
 pub mod pair;
+pub mod resolver;
 pub mod state;
 pub mod thinq1_conn;
 pub mod thinq2_conn;
@@ -36,6 +37,10 @@ pub trait LocalDevice: Send + Sync {
     fn on_close(&self, handler: Box<dyn Fn() + Send + Sync>);
     fn send_to_local(&self, buf: &[u8]);
     fn send_json_to_local(&self, body: serde_json::Value);
+    /// The appliance's deploy/preDeploy message, if it has provisioned.
+    fn deploy_payload(&self) -> Option<serde_json::Value> {
+        None
+    }
     /// How many `on_data` handlers are currently registered (tests / diagnostics).
     fn data_handler_count(&self) -> usize {
         0
@@ -58,6 +63,8 @@ struct BridgedSession {
     lg_state: serde_json::Value,
     /// Set true when detaching; forward tasks exit.
     stopped: Arc<AtomicBool>,
+    /// Upstream MQTT (or equivalent) is up.
+    link_up: Arc<AtomicBool>,
     upstream: Mutex<Option<UpstreamHandle>>,
 }
 
@@ -87,6 +94,19 @@ impl Bridge {
     /// True only while a **live** session is registered (map membership == live).
     pub fn status_for(&self, id: &str) -> bool {
         self.sessions.lock().contains_key(id)
+    }
+
+    /// `(bridge mode enabled, upstream link up)` for management `bridgeState`.
+    pub fn bridge_flags(&self, id: &str) -> (bool, bool) {
+        let enabled = self.want_enabled.lock().contains(id)
+            || self.storage.get_device_state_json(id).is_some();
+        let up = self
+            .sessions
+            .lock()
+            .get(id)
+            .map(|s| s.link_up.load(Ordering::SeqCst))
+            .unwrap_or(false);
+        (enabled, up)
     }
 
     pub fn storage(&self) -> &Arc<dyn BridgeState> {
@@ -304,7 +324,8 @@ impl Bridge {
             if state.mqtt_server.is_empty() {
                 anyhow::bail!("ThinQ2 state missing mqttServer — re-enable to re-pair");
             }
-            let (handle, mut from_lg) = connect_thinq2(&state, &id, &model_name).await?;
+            let (handle, mut from_lg) =
+                connect_thinq2(&state, &id, &model_name, device.deploy_payload()).await?;
 
             let dev = device.clone();
             let stop_f = stopped.clone();
@@ -363,6 +384,7 @@ impl Bridge {
             device_id: id.clone(),
             lg_state,
             stopped: stopped.clone(),
+            link_up: Arc::new(AtomicBool::new(test_mode)),
             upstream: Mutex::new(Some(upstream)),
         });
 

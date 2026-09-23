@@ -147,6 +147,12 @@ pub fn router(state: MgmtState) -> Router {
 fn enum_devices(state: &MgmtState) -> Value {
     let mut all = serde_json::Map::new();
     for (id, dev) in state.manager.all() {
+        let (enabled, up) = state
+            .bridge
+            .as_ref()
+            .map(|b| b.bridge_flags(&id))
+            .unwrap_or((false, false));
+        let bridge_state = device_bridge_state(state.bridge.is_some(), enabled, up);
         all.insert(
             id.clone(),
             json!({
@@ -157,17 +163,37 @@ fn enum_devices(state: &MgmtState) -> Value {
                     Platform::Thinq2 => "thinq2",
                 },
                 "mapped": state.ha_bridge.has_device(&id),
-                "bridged": state.bridge.as_ref().map(|b| b.status_for(&id)).unwrap_or(false),
+                "bridgeState": bridge_state,
             }),
         );
     }
     Value::Object(all)
 }
 
+/// Bridge object on the management websocket. No bridge configured is not an error.
+pub fn bridge_status_value(configured: bool, logged_in: bool) -> Value {
+    if !configured {
+        json!({ "disabled": true })
+    } else {
+        json!({ "loggedIn": logged_in })
+    }
+}
+
+/// Per-device link: `disabled` when bridge mode is off, otherwise `online` / `offline`.
+pub fn device_bridge_state(configured: bool, enabled: bool, link_up: bool) -> &'static str {
+    if !configured || !enabled {
+        "disabled"
+    } else if link_up {
+        "online"
+    } else {
+        "offline"
+    }
+}
+
 fn bridge_status(state: &MgmtState) -> Value {
     match &state.bridge {
-        Some(b) => json!({ "loggedIn": b.is_logged_in() }),
-        None => Value::Null,
+        Some(b) => bridge_status_value(true, b.is_logged_in()),
+        None => bridge_status_value(false, false),
     }
 }
 
@@ -1012,6 +1038,38 @@ async fn api_device_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_status_distinguishes_disabled_offline_and_online() {
+        assert_eq!(
+            bridge_status_value(false, false),
+            serde_json::json!({ "disabled": true })
+        );
+        assert_eq!(bridge_status_value(false, false).get("loggedIn"), None);
+        assert_eq!(
+            bridge_status_value(true, false),
+            serde_json::json!({ "loggedIn": false })
+        );
+        assert_eq!(
+            bridge_status_value(true, true),
+            serde_json::json!({ "loggedIn": true })
+        );
+        assert_eq!(device_bridge_state(false, false, false), "disabled");
+        assert_eq!(device_bridge_state(true, false, false), "disabled");
+        assert_eq!(device_bridge_state(true, true, false), "offline");
+        assert_eq!(device_bridge_state(true, true, true), "online");
+
+        let panel = include_str!("../../../html/panel.js");
+        assert!(
+            panel.contains("Disabled by configuration"),
+            "management page must show bridge-not-configured as disabled, not an error"
+        );
+        assert!(panel.contains("json.bridge.disabled"));
+        assert!(
+            !panel.contains("status_bridge_text').innerText = 'Not configured'"),
+            "the logged-out error wording must not be used for a disabled bridge"
+        );
+    }
 
     #[test]
     fn frame_log_ring_keeps_recent() {

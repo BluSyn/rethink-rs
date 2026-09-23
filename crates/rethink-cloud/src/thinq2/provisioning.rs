@@ -15,10 +15,16 @@ use std::sync::Arc;
 pub struct T2HttpState {
     pub config: Arc<Config>,
     pub ca: Arc<Ca>,
+    /// PEM returned by `/route/certificate?name=…` (custom root, or the CA).
+    pub root_pem: String,
 }
 
-pub fn routes(config: Arc<Config>, ca: Arc<Ca>) -> Router {
-    let state = T2HttpState { config, ca };
+pub fn routes(config: Arc<Config>, ca: Arc<Ca>, root_pem: String) -> Router {
+    let state = T2HttpState {
+        config,
+        ca,
+        root_pem,
+    };
     Router::new()
         .route("/route", get(route))
         .route("/route/certificate", get(route_certificate))
@@ -29,13 +35,20 @@ pub fn routes(config: Arc<Config>, ca: Arc<Ca>) -> Router {
 
 async fn route(State(state): State<T2HttpState>) -> Json<Value> {
     rethink_core::logging::log("HTTPS", &["/route"]);
-    Json(json!({
-        "resultCode": "0000",
-        "result": {
-            "apiServer": format!("https://{}:{}", state.config.hostname, state.config.https_port.advertise),
-            "mqttServer": format!("ssl://{}:{}", state.config.hostname, state.config.mqtts_port.advertise),
-        }
-    }))
+    Json(route_document(
+        state
+            .config
+            .https_port
+            .advertise_url
+            .as_deref()
+            .unwrap_or(""),
+        state
+            .config
+            .mqtts_port
+            .advertise_url
+            .as_deref()
+            .unwrap_or(""),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -47,17 +60,7 @@ async fn route_certificate(
     State(state): State<T2HttpState>,
     Query(q): Query<CertQuery>,
 ) -> Json<Value> {
-    if q.name.is_some() {
-        Json(json!({
-            "resultCode": "0000",
-            "result": { "certificatePem": state.ca.cert_pem }
-        }))
-    } else {
-        Json(json!({
-            "resultCode": "0000",
-            "result": ["common-server", "aws-iot"]
-        }))
-    }
+    Json(route_certificate_body(q.name.as_deref(), &state.root_pem))
 }
 
 #[derive(Deserialize)]
@@ -70,7 +73,7 @@ async fn device_certificate(
     Path(_device_id): Path<String>,
     Json(body): Json<CsrBody>,
 ) -> Response {
-    match sign_csr(&state.ca, &body.csr).await {
+    match sign_csr(&state.ca, &body.csr) {
         Ok(pem) => Json(json!({
             "resultCode": "0000",
             "result": { "certificatePem": pem }
@@ -78,13 +81,61 @@ async fn device_certificate(
         .into_response(),
         Err(e) => {
             eprintln!("CSR sign failed: {e}");
-            // Fall back to returning CA cert so smoke tests still respond
-            Json(json!({
-                "resultCode": "0000",
-                "result": { "certificatePem": state.ca.cert_pem }
-            }))
-            .into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "resultCode": "9999", "result": {} })),
+            )
+                .into_response()
         }
+    }
+}
+
+/// Body of `GET /route/certificate`. A name serves the configured root PEM verbatim.
+pub fn route_certificate_body(name: Option<&str>, root_pem: &str) -> Value {
+    if name.is_some() {
+        json!({
+            "resultCode": "0000",
+            "result": { "certificatePem": root_pem }
+        })
+    } else {
+        json!({
+            "resultCode": "0000",
+            "result": ["common-server", "aws-iot"]
+        })
+    }
+}
+
+/// JSON body of `GET /route`, using the advertised URLs (which may not be the bind ports).
+pub fn route_document(https_advertise: &str, mqtts_advertise: &str) -> Value {
+    json!({
+        "resultCode": "0000",
+        "result": {
+            "apiServer": https_advertise,
+            "mqttServer": mqtts_advertise,
+        }
+    })
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn certificate_route_serves_custom_root_or_ca_pem() {
+        let custom = "-----BEGIN CERTIFICATE-----\nCUSTOM\n-----END CERTIFICATE-----\n";
+        let ca = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n";
+        let named = route_certificate_body(Some("aws-iot"), custom);
+        assert_eq!(named["result"]["certificatePem"], custom);
+        let builtin = route_certificate_body(Some("common-server"), ca);
+        assert_eq!(builtin["result"]["certificatePem"], ca);
+        assert!(route_certificate_body(None, ca)["result"].is_array());
+    }
+
+    #[test]
+    fn route_document_uses_advertise_urls() {
+        let body = route_document("https://proxy.example/thinq", "ssl://proxy.example:8883");
+        assert_eq!(body["result"]["apiServer"], "https://proxy.example/thinq");
+        assert_eq!(body["result"]["mqttServer"], "ssl://proxy.example:8883");
     }
 }
 
