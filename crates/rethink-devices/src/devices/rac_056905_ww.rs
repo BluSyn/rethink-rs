@@ -13,6 +13,14 @@ use std::sync::Arc;
 
 type PowerModeChangeHook = Box<dyn Fn() + Send + Sync>;
 
+/// EEPROM checksums at 0x2da that both report and accept display light (0x21f) with
+/// 0 = off, 1 = on. Negative cases that must stay hidden: 0x4dda, 0x4d81, 0x4dfa.
+const DISPLAY_LIGHT_EEPROM_CHECKSUMS: [u32; 3] = [0x4e88, 0x551d, 0x4c19];
+
+fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
+    (cap_2d6 & 2) != 0 && DISPLAY_LIGHT_EEPROM_CHECKSUMS.contains(&eeprom_checksum)
+}
+
 struct Inner {
     meta: Metadata,
     initial_values_received: bool,
@@ -713,9 +721,19 @@ impl Device {
             );
         }
 
-        // Display light (PR #40) — TLV 0x21f. Always advertise; units without the tag
-        // simply never update the state.
-        self.add_config_switch_field(&mut config, 0x21f, "light", "Light", "mdi:lightbulb");
+        // 0x21f is not in the ThinQ app. Polarity and writability differ by indoor unit,
+        // so only the firmwares verified to report and accept this polarity expose it.
+        let cap_2d6 = self.core.get_raw(0x2d6).unwrap_or(0);
+        let eeprom = self.core.get_raw(0x2da).unwrap_or(0);
+        if display_light_supported(cap_2d6, eeprom) {
+            self.add_config_switch_field(
+                &mut config,
+                0x21f,
+                "displaylight",
+                "Display light",
+                "mdi:lightbulb-outline",
+            );
+        }
 
         if self.has_cap_or_tag(0x2cc, 4, 0x20e) {
             self.add_config_switch_field(&mut config, 0x20e, "autodry", "Auto dry", "mdi:hair-dryer");
@@ -1279,6 +1297,12 @@ mod tests {
     const WRITE_AUTODRY_OFF_HEX: &str = "010104000000650201010283807D7C";
     const MINIMAL_CAPS_HEX: &str = "0000040000008702010002b6819989";
     const CST_VALUES_HEX: &str = "000004000000a70204004b7dc17e407e887f502d7f902a7f0086808840d4c0d500c84081408180c9408340838083c08fc0cd40cd00ccc0cda00352d56007f3d5a00960bc9089d5d03cd61020c9009c4087cbac40e9c1ad27";
+    // S4NW12JA31A, firmware 0x690441, EEPROM checksum 0x4e88. 0x2d6 bit 1 is set.
+    const DISPLAY_CAPS_RESPONSE_HEX: &str = "000004000000870201F361B001B05057B0A0017CB85024B8903CB8D020B9103CBAD024BB103CB0C1B103B306B280B347B4C7B582B541B543B6A04E88B6F0690441B701B740BC40BD4FB5C0B6102EB643B5C1B61028B643B5C2B61028B643B5C4B6102EB643B5C6B6102EB643EE35";
+    const DISPLAY_OFF_QUERY_RESPONSE_HEX: &str = "00000400000087020426797E447DC17E827F502A7F9030C840C880C8C08340838083C0868086C0870087C08F80894088408A102A8A50548A8F8C90238CC2ACE0027ACA00D540D580C900CAD0B8CB1061CB40CB8CCBCFCC00CC90688B40BF600155BFC0BFA00155C000BE502DBE8CCC504F1B01BED050C340C0C0C380CCC0CD00CD4090000AA0";
+    const DISPLAY_ON_NOTIFY_HEX: &str = "0000040000008702047D0287C1BF4D";
+    const WRITE_DISPLAY_ON_HEX: &str = "010104000000650201010287C1E95D";
+    const WRITE_DISPLAY_OFF_HEX: &str = "010104000000650201010287C0F97C";
 
     fn meta() -> Metadata {
         Metadata::new("RAC_056905_WW", "TEST", "1.0")
@@ -1295,6 +1319,59 @@ mod tests {
             }
         });
         (ha, thinq, dev)
+    }
+
+    #[test]
+    fn display_light_follows_the_known_firmware_gate() {
+        assert!(display_light_supported(2, 0x4e88));
+        assert!(display_light_supported(2, 0x551d));
+        assert!(display_light_supported(2, 0x4c19));
+        assert!(display_light_supported(0x6, 0x4e88));
+        // Negative checksums, and a positive checksum with the capability bit clear.
+        assert!(!display_light_supported(2, 0x4dda));
+        assert!(!display_light_supported(2, 0x4d81));
+        assert!(!display_light_supported(2, 0x4dfa));
+        assert!(!display_light_supported(1, 0x4e88));
+        assert!(!display_light_supported(0, 0x4e88));
+
+        let (ha, thinq, dev) = make_device();
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(DISPLAY_CAPS_RESPONSE_HEX));
+        thinq.emit_data(&hex_decode(DISPLAY_OFF_QUERY_RESPONSE_HEX));
+        // The first values packet is applied before the field exists. Replay it.
+        thinq.emit_data(&hex_decode(DISPLAY_OFF_QUERY_RESPONSE_HEX));
+
+        let device = ha.device(DEVICE_ID).expect("HA configuration published");
+        let c = device.config.as_ref().unwrap();
+        let component = &c.components["displaylight"];
+        assert_eq!(component["platform"], "switch");
+        assert_eq!(component["name"], "Display light");
+        assert_eq!(component["icon"], "mdi:lightbulb-outline");
+        assert_eq!(component["entity_category"], "config");
+        assert!(!c.components.contains_key("light"));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "displaylight", "state"),
+            Some("OFF".into())
+        );
+
+        thinq.emit_data(&hex_decode(DISPLAY_ON_NOTIFY_HEX));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "displaylight", "state"),
+            Some("ON".into())
+        );
+
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "displaylight", "command", "ON");
+        let out = thinq.outbox();
+        assert_eq!(out.len(), 1, "display light ON write");
+        assert_eq!(hex_encode(&out[0]), WRITE_DISPLAY_ON_HEX);
+
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "displaylight", "command", "OFF");
+        let out = thinq.outbox();
+        assert_eq!(out.len(), 1, "display light OFF write");
+        assert_eq!(hex_encode(&out[0]), WRITE_DISPLAY_OFF_HEX);
+        let _ = dev;
     }
 
     fn build_ready() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
@@ -1322,10 +1399,9 @@ mod tests {
         assert!(c.contains_key("starttimer"));
         assert!(c.contains_key("stoptimer"));
         assert!(c.contains_key("airclean"));
-        // PR #40: display light switch (TLV 0x21f)
-        assert!(c.contains_key("light"));
-        assert_eq!(c["light"]["platform"], "switch");
-        assert_eq!(c["light"]["icon"], "mdi:lightbulb");
+        // CAPS checksum 0x4d81 is a known negative: no display-light entity.
+        assert!(!c.contains_key("light"));
+        assert!(!c.contains_key("displaylight"));
         assert_eq!(
             c["climate"]["swing_modes"],
             json!(["1", "2", "3", "4", "5", "6", "on", "off"])
