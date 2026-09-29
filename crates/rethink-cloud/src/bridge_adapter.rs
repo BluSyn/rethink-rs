@@ -34,10 +34,49 @@ impl LocalDevice for ConnectedAsLocal {
     fn send_to_local(&self, buf: &[u8]) {
         (self.0.send_to_device)(SendToDevice::T2Packet(buf.to_vec()));
     }
+    fn send_ack_to_local(&self, buf: &[u8]) {
+        (self.0.send_to_device)(SendToDevice::T2Ack(buf.to_vec()));
+    }
+    fn is_managed(&self) -> bool {
+        self.0.is_managed()
+    }
     fn send_json_to_local(&self, body: serde_json::Value) {
         (self.0.send_to_device)(SendToDevice::T1Json(body));
     }
     fn deploy_payload(&self) -> Option<serde_json::Value> {
         self.0.deploy_payload()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rethink_core::metadata::Metadata;
+    use rethink_util::sync::Mutex;
+
+    #[test]
+    fn local_ack_is_a_t2_ack_and_managed_is_visible() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let send = Arc::new(move |msg: SendToDevice| {
+            record.lock().push(msg);
+        });
+        let emit = Arc::new(|_buf: Vec<u8>| {});
+        let dev = ConnectedDevice::new(
+            "id".into(),
+            Platform::Thinq2,
+            Metadata::new("M", "M", "1"),
+            emit,
+            send,
+        );
+        let local = ConnectedAsLocal(dev.clone());
+        assert!(!local.is_managed());
+        local.send_ack_to_local(&[0xaa, 0x08, 0xf0, 0x00, 0x4d, 0x04, 0xa6, 0xbb]);
+        local.send_to_local(&[0xaa, 0x12]);
+        dev.set_managed(true);
+        assert!(local.is_managed());
+        let got = seen.lock().clone();
+        assert!(matches!(&got[0], SendToDevice::T2Ack(b) if b == &[0xaa, 0x08, 0xf0, 0x00, 0x4d, 0x04, 0xa6, 0xbb]));
+        assert!(matches!(&got[1], SendToDevice::T2Packet(b) if b == &[0xaa, 0x12]));
     }
 }

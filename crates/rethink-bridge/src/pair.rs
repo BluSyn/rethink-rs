@@ -303,13 +303,45 @@ pub fn upstream_pre_deploy(
     })
 }
 
-/// Parse LG → local packet command from MQTT JSON.
-pub fn parse_lg_packet_payload(json: &serde_json::Value) -> Option<Vec<u8>> {
-    if json.get("cmd").and_then(|v| v.as_str()) != Some("packet") {
-        return None;
-    }
+/// What an LG MQTT downlink is, from the bridge's point of view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LgDownlink {
+    Packet(Vec<u8>),
+    /// Delivery ack. `data` must be a hex string; anything else is [`LgDownlink::Dropped`].
+    Ack(Vec<u8>),
+    CompleteProvisioning,
+    /// Not forwarded. The string is the full JSON payload, for the bridge log.
+    Dropped(String),
+}
+
+fn hex_data(json: &serde_json::Value) -> Option<Vec<u8>> {
     let data = json.get("data").and_then(|v| v.as_str())?;
     rethink_util::hex::decode(data).ok()
+}
+
+/// Classify one LG → device MQTT message. `completeProvisioning` is answered by the
+/// connection itself and is not a device packet.
+pub fn classify_lg_downlink(json: &serde_json::Value) -> LgDownlink {
+    match json.get("cmd").and_then(|v| v.as_str()) {
+        Some("completeProvisioning") => LgDownlink::CompleteProvisioning,
+        Some("packet") => match hex_data(json) {
+            Some(buf) => LgDownlink::Packet(buf),
+            None => LgDownlink::Dropped(json.to_string()),
+        },
+        Some("ack") => match hex_data(json) {
+            Some(buf) => LgDownlink::Ack(buf),
+            None => LgDownlink::Dropped(json.to_string()),
+        },
+        _ => LgDownlink::Dropped(json.to_string()),
+    }
+}
+
+/// Parse LG → local packet command from MQTT JSON.
+pub fn parse_lg_packet_payload(json: &serde_json::Value) -> Option<Vec<u8>> {
+    match classify_lg_downlink(json) {
+        LgDownlink::Packet(buf) => Some(buf),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +403,35 @@ mod tests {
         assert_eq!(parse_lg_packet_payload(&v), Some(vec![1, 2]));
         let v2 = serde_json::json!({"cmd":"other","data":"0102"});
         assert!(parse_lg_packet_payload(&v2).is_none());
+    }
+
+    #[test]
+    fn classify_forwards_ack_and_packet_and_drops_the_rest() {
+        let ack = serde_json::json!({"cmd":"ack","data":"AA08F0004D04A6BB"});
+        assert_eq!(
+            classify_lg_downlink(&ack),
+            LgDownlink::Ack(rethink_util::hex::decode("AA08F0004D04A6BB").unwrap())
+        );
+        assert!(parse_lg_packet_payload(&ack).is_none());
+
+        let packet = serde_json::json!({"cmd":"packet","data":"0102"});
+        assert_eq!(classify_lg_downlink(&packet), LgDownlink::Packet(vec![1, 2]));
+
+        assert_eq!(
+            classify_lg_downlink(&serde_json::json!({"cmd":"completeProvisioning"})),
+            LgDownlink::CompleteProvisioning
+        );
+
+        let other = serde_json::json!({"cmd":"somethingNew","data":"AA00"});
+        match classify_lg_downlink(&other) {
+            LgDownlink::Dropped(text) => assert!(text.contains("somethingNew")),
+            other => panic!("expected drop, got {other:?}"),
+        }
+        // A non-string ack is not a delivery ack.
+        assert!(matches!(
+            classify_lg_downlink(&serde_json::json!({"cmd":"ack","data":{"nope":true}})),
+            LgDownlink::Dropped(_)
+        ));
     }
 
     #[tokio::test]

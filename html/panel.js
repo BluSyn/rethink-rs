@@ -325,7 +325,7 @@ async function selectDevice(id) {
             // Only seed if WS history hasn't already filled the list
             if (get('messages').childElementCount === 0) {
                 for (const f of data.frames) {
-                    pushFrame(f.dir || 'rx', f.hex, f.injected, f.ts, true)
+                    pushFrame(f.dir || 'rx', f.hex, f.injected, f.ts, true, f.type)
                 }
             }
         }
@@ -395,16 +395,16 @@ function connectDeviceWs(id) {
                 for (const f of json.history) {
                     const dir = f.rx != null ? 'rx' : 'tx'
                     const hex = f.rx != null ? f.rx : typeof f.tx === 'string' ? f.tx : JSON.stringify(f.tx)
-                    pushFrame(dir, hex, f.injected, f.ts, true)
+                    pushFrame(dir, hex, f.injected, f.ts, true, f.type)
                 }
             }
             if (json.rx != null) {
                 const hex = typeof json.rx === 'string' ? json.rx : JSON.stringify(json.rx)
-                pushFrame('rx', hex, json.injected, json.ts, false)
+                pushFrame('rx', hex, json.injected, json.ts, false, json.type)
             }
             if (json.tx != null) {
                 const hex = typeof json.tx === 'string' ? json.tx : JSON.stringify(json.tx)
-                pushFrame('tx', hex, json.injected, json.ts, false)
+                pushFrame('tx', hex, json.injected, json.ts, false, json.type)
             }
             if (json.status) {
                 get('device_status').textContent = json.status
@@ -478,7 +478,7 @@ function clipSummary(s) {
     }
 }
 
-function pushFrame(dir, payload, injected, ts, fromHistory) {
+function pushFrame(dir, payload, injected, ts, fromHistory, type) {
     const messages = get('messages')
     const div = document.createElement('div')
     const raw = String(payload)
@@ -489,11 +489,14 @@ function pushFrame(dir, payload, injected, ts, fromHistory) {
     div.dataset.dir = dir
     div.dataset.kind = clip ? 'clip' : 'hex'
     div.dataset.ts = String(tsMs)
+    div.dataset.type = type || 'packet'
     const label = clip ? clipSummary(raw) : raw
     const show = label.length > 200 ? label.slice(0, 200) + '…' : label
+    const typeLabel =
+        type && type !== 'packet' ? `<span class="typeLabel">${escapeHtml(type)}</span>` : ''
     div.innerHTML = `<span class="ts">${escapeHtml(formatTs(tsMs))}</span><span class="dir">${
         clip ? 'clip' : dir
-    }</span>${escapeHtml(show)}`
+    }</span>${typeLabel}${escapeHtml(show)}`
     div.addEventListener('click', (ev) => onFrameClick(ev, div))
     messages.appendChild(div)
     if (!fromHistory && get('autoscroll').checked) {

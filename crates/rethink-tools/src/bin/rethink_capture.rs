@@ -132,30 +132,18 @@ fn main() -> Result<()> {
                 let v: Value =
                     serde_json::from_str(&text).unwrap_or(json!({"raw": text}));
                 let t = now_ms();
-                if let Some(hex) = v.get("rx").and_then(|h| h.as_str()) {
-                    write_ev(
-                        &mut out,
-                        json!({
-                            "k": "rx",
-                            "t": t,
-                            "hex": hex,
-                            "injected": v.get("injected").and_then(|x| x.as_bool()).unwrap_or(false),
-                            "decode": decode_summary(hex),
-                        }),
-                    )?;
-                    eprintln!("[rx] {}", &hex[..hex.len().min(32)]);
-                } else if let Some(hex) = v.get("tx").and_then(|h| h.as_str()) {
-                    write_ev(
-                        &mut out,
-                        json!({
-                            "k": "tx",
-                            "t": t,
-                            "hex": hex,
-                            "injected": v.get("injected").and_then(|x| x.as_bool()).unwrap_or(false),
-                            "decode": decode_summary(hex),
-                        }),
-                    )?;
-                    eprintln!("[tx] {}", &hex[..hex.len().min(32)]);
+                if let Some(mut ev) = rethink_util::wire::capture_from_monitor_message(&v) {
+                    ev["t"] = json!(t);
+                    if let Some(hex) = ev.get("hex").and_then(|h| h.as_str()).map(|s| s.to_string())
+                    {
+                        eprintln!(
+                            "[{}] {}",
+                            ev["k"].as_str().unwrap_or("wire"),
+                            &hex[..hex.len().min(32)]
+                        );
+                        ev["decode"] = decode_summary(&hex);
+                    }
+                    write_ev(&mut out, ev)?;
                 } else if v.get("status").is_some() {
                     write_ev(&mut out, json!({"k": "status", "t": t, "msg": v}))?;
                     eprintln!("[status] {v}");

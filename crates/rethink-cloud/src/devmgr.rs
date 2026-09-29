@@ -3,6 +3,7 @@
 use rethink_util::sync::Mutex;
 use rethink_core::metadata::Metadata;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +26,16 @@ pub struct ConnectedDevice {
     pub on_send: Mutex<Vec<Box<dyn Fn(SendToDevice) + Send + Sync>>>,
     /// The deploy/preDeploy message that registered this appliance.
     pub deploy: Mutex<Option<serde_json::Value>>,
+    /// A rethink handler is assigned. Never cleared; the connection does not outlive the handler.
+    managed: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
 pub enum SendToDevice {
     /// Raw AABB/TLV packet (published as CLIP cmd=packet).
     T2Packet(Vec<u8>),
+    /// Delivery ack (published as CLIP cmd=ack, not packet).
+    T2Ack(Vec<u8>),
     /// Arbitrary CLIP command (setMaskingInfo, etc.).
     T2Clip {
         cmd: String,
@@ -58,7 +63,16 @@ impl ConnectedDevice {
             on_data: Mutex::new(Vec::new()),
             on_send: Mutex::new(Vec::new()),
             deploy: Mutex::new(None),
+            managed: AtomicBool::new(false),
         })
+    }
+
+    pub fn set_managed(&self, managed: bool) {
+        self.managed.store(managed, Ordering::SeqCst);
+    }
+
+    pub fn is_managed(&self) -> bool {
+        self.managed.load(Ordering::SeqCst)
     }
 
     pub fn set_deploy(&self, msg: serde_json::Value) {

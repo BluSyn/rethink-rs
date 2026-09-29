@@ -218,6 +218,7 @@ impl DeviceAcceptor {
                 .unwrap_or(0);
             let messagestr = match msg {
                 SendToDevice::T2Packet(buf) => clip_packet_json(&did, mid, &buf),
+                SendToDevice::T2Ack(buf) => clip_outbound_json("ack", &did, mid, &buf),
                 SendToDevice::T2Clip {
                     cmd,
                     msg_type,
@@ -313,14 +314,18 @@ fn encode_clip_packet_hex(buf: &[u8]) -> String {
     rethink_util::hex::encode_upper(buf)
 }
 
-fn clip_packet_json(did: &str, mid: u64, buf: &[u8]) -> serde_json::Value {
+fn clip_outbound_json(cmd: &str, did: &str, mid: u64, buf: &[u8]) -> serde_json::Value {
     serde_json::json!({
         "did": did,
         "mid": mid,
-        "cmd": "packet",
+        "cmd": cmd,
         "type": 1,
         "data": encode_clip_packet_hex(buf),
     })
+}
+
+fn clip_packet_json(did: &str, mid: u64, buf: &[u8]) -> serde_json::Value {
+    clip_outbound_json("packet", did, mid, buf)
 }
 
 /// Normalize broker topics to `clip/...` without allocating when already relative.
@@ -378,6 +383,17 @@ mod tests {
         assert!(!encode_clip_packet_hex(&[0xaa])
             .chars()
             .any(|c| c.is_ascii_lowercase()));
+    }
+
+    #[test]
+    fn clip_outbound_ack_is_not_a_packet() {
+        let buf = [0xaa, 0x08, 0xf0, 0x00, 0x4d, 0x04, 0xa6, 0xbb];
+        let ack = clip_outbound_json("ack", "dev-1", 7, &buf);
+        assert_eq!(ack["cmd"], "ack");
+        assert_eq!(ack["type"], 1);
+        assert_eq!(ack["did"], "dev-1");
+        assert_eq!(ack["data"], "AA08F0004D04A6BB");
+        assert_eq!(clip_packet_json("dev-1", 7, &buf)["cmd"], "packet");
     }
 
     fn clip_acceptor() -> (Arc<Broker>, Arc<DeviceManager>, Arc<DeviceAcceptor>) {

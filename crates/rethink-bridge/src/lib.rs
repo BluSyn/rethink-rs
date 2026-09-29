@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thinq1_conn::{connect_thinq1, Thinq1Handle};
-use thinq2_conn::{connect_thinq2, Thinq2Handle};
+use thinq2_conn::{connect_thinq2, LgToDevice, Thinq2Handle};
 
 /// Minimal local device view for bridge enable/disable (avoids cyclic deps on cloud).
 pub trait LocalDevice: Send + Sync {
@@ -36,6 +36,12 @@ pub trait LocalDevice: Send + Sync {
     fn on_data(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>);
     fn on_close(&self, handler: Box<dyn Fn() + Send + Sync>);
     fn send_to_local(&self, buf: &[u8]);
+    /// Cloud delivery ack. Default drops it; the cloud adapter sends it as `cmd=ack`.
+    fn send_ack_to_local(&self, _buf: &[u8]) {}
+    /// A rethink handler is assigned. Cloud acks are not forwarded when this is true.
+    fn is_managed(&self) -> bool {
+        false
+    }
     fn send_json_to_local(&self, body: serde_json::Value);
     /// The appliance's deploy/preDeploy message, if it has provisioned.
     fn deploy_payload(&self) -> Option<serde_json::Value> {
@@ -330,11 +336,11 @@ impl Bridge {
             let dev = device.clone();
             let stop_f = stopped.clone();
             tokio::spawn(async move {
-                while let Some(buf) = from_lg.recv().await {
+                while let Some(msg) = from_lg.recv().await {
                     if stop_f.load(Ordering::SeqCst) {
                         break;
                     }
-                    dev.send_to_local(&buf);
+                    deliver_lg_to_device(dev.as_ref(), msg);
                 }
             });
 
@@ -479,6 +485,19 @@ fn normalize_t2_state(v: serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// Forward one classified downlink. Packets always go through. Cloud acks go through
+/// only while no rethink handler owns the device (that handler acks locally if it needs to).
+pub fn deliver_lg_to_device(dev: &dyn LocalDevice, msg: LgToDevice) {
+    match msg {
+        LgToDevice::Packet(buf) => dev.send_to_local(&buf),
+        LgToDevice::Ack(buf) => {
+            if !dev.is_managed() {
+                dev.send_ack_to_local(&buf);
+            }
+        }
+    }
+}
+
 fn parse_t1_state(v: &serde_json::Value) -> anyhow::Result<Thinq1DeviceState> {
     let rti = v
         .get("rtiServer")
@@ -505,13 +524,16 @@ mod lifecycle_tests {
     use super::*;
     use crate::pair::{format_device_packet, parse_lg_packet_payload};
     use crate::thinq1_conn::format_status_body;
-    use std::sync::atomic::AtomicUsize; // used by MockLocal
+    use crate::thinq2_conn::LgToDevice;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Real mock: stores handlers; simulate_close fires them.
     struct MockLocal {
         id: String,
         platform: String,
         to_local: Mutex<Vec<Vec<u8>>>,
+        acks: Mutex<Vec<Vec<u8>>>,
+        managed: AtomicBool,
         data_handlers: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
         close_handlers: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
         data_handler_regs: AtomicUsize,
@@ -523,6 +545,8 @@ mod lifecycle_tests {
                 id: id.into(),
                 platform: platform.into(),
                 to_local: Mutex::new(Vec::new()),
+                acks: Mutex::new(Vec::new()),
+                managed: AtomicBool::new(false),
                 data_handlers: Mutex::new(Vec::new()),
                 close_handlers: Mutex::new(Vec::new()),
                 data_handler_regs: AtomicUsize::new(0),
@@ -568,6 +592,12 @@ mod lifecycle_tests {
         }
         fn send_to_local(&self, buf: &[u8]) {
             self.to_local.lock().push(buf.to_vec());
+        }
+        fn send_ack_to_local(&self, buf: &[u8]) {
+            self.acks.lock().push(buf.to_vec());
+        }
+        fn is_managed(&self) -> bool {
+            self.managed.load(Ordering::SeqCst)
         }
         fn send_json_to_local(&self, _body: serde_json::Value) {}
         fn data_handler_count(&self) -> usize {
@@ -678,6 +708,36 @@ mod lifecycle_tests {
         assert!(bridge.storage.get_device_state_json(id).is_none());
 
         let _ = regs_after_enable;
+    }
+
+    #[test]
+    fn cloud_delivery_ack_reaches_only_an_unmanaged_device() {
+        let local = MockLocal::new("dev-ack", "thinq2");
+        let ack = rethink_util::hex::decode("AA08F0004D04A6BB").unwrap();
+        let packet = rethink_util::hex::decode("AA12F0ED1121010000001804111200005EBB").unwrap();
+
+        deliver_lg_to_device(local.as_ref(), LgToDevice::Ack(ack.clone()));
+        deliver_lg_to_device(local.as_ref(), LgToDevice::Packet(packet.clone()));
+        assert_eq!(
+            local.acks.lock().clone(),
+            vec![ack.clone()],
+            "unmanaged device receives the cloud ack"
+        );
+        assert_eq!(local.to_local.lock().clone(), vec![packet.clone()]);
+
+        local.managed.store(true, Ordering::SeqCst);
+        deliver_lg_to_device(local.as_ref(), LgToDevice::Ack(ack));
+        deliver_lg_to_device(local.as_ref(), LgToDevice::Packet(packet.clone()));
+        assert_eq!(
+            local.acks.lock().len(),
+            1,
+            "a handler acks for itself; the cloud ack is not forwarded"
+        );
+        assert_eq!(
+            local.to_local.lock().clone(),
+            vec![packet.clone(), packet],
+            "packets are still forwarded when the device is managed"
+        );
     }
 
     #[tokio::test]

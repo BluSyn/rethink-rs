@@ -27,6 +27,10 @@ impl Thinq2Device for T2Adapter {
             .notify_send(crate::devmgr::SendToDevice::T2Packet(buf.to_vec()));
         (self.dev.send_to_device)(crate::devmgr::SendToDevice::T2Packet(buf.to_vec()));
     }
+    fn send_ack(&self, buf: &[u8]) {
+        // send_to_device already notifies the monitor. A second notify_send would log the ack twice.
+        (self.dev.send_to_device)(crate::devmgr::SendToDevice::T2Ack(buf.to_vec()));
+    }
     fn send(&self, cmd: &str, msg_type: i32, data: serde_json::Value) {
         let msg = crate::devmgr::SendToDevice::T2Clip {
             cmd: cmd.to_string(),
@@ -193,6 +197,8 @@ impl HaBridge {
 
         let id = thinqdev.id.clone();
         self.ha_devices.lock().insert(id.clone(), hadevice.clone());
+        // Not cleared on drop: this connection is not reused outside the handler.
+        thinqdev.set_managed(true);
         let bridge = self.clone();
         // Only tear down HA when *this* ConnectedDevice closes — not when a
         // superseded reconnect's stale close handler runs after re-accept.

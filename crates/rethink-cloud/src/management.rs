@@ -35,6 +35,8 @@ pub struct FrameEvent {
     pub hex: String,
     pub injected: bool,
     pub ts_ms: u64,
+    /// `packet` or `ack`. Missing on the wire counts as packet; we always set it.
+    pub wire_type: &'static str,
 }
 
 impl FrameEvent {
@@ -44,7 +46,50 @@ impl FrameEvent {
             "injected": self.injected,
             "ts": self.ts_ms,
             "history": true,
+            "type": self.wire_type,
         })
+    }
+}
+
+fn monitor_send_payload(msg: &SendToDevice) -> (String, &'static str) {
+    match msg {
+        SendToDevice::T2Packet(b) => (rethink_util::hex::encode(b), "packet"),
+        SendToDevice::T2Ack(b) => (rethink_util::hex::encode(b), "ack"),
+        SendToDevice::T2Clip { cmd, msg_type, data } => (
+            json!({"cmd": cmd, "type": msg_type, "data": data}).to_string(),
+            "packet",
+        ),
+        SendToDevice::T1Json(v) => (v.to_string(), "packet"),
+    }
+}
+
+fn monitor_tx_json(msg: SendToDevice) -> Value {
+    let ts = FrameLog::now_ms();
+    match msg {
+        SendToDevice::T2Packet(b) => json!({
+            "tx": rethink_util::hex::encode(&b),
+            "injected": false,
+            "ts": ts,
+            "type": "packet",
+        }),
+        SendToDevice::T2Ack(b) => json!({
+            "tx": rethink_util::hex::encode(&b),
+            "injected": false,
+            "ts": ts,
+            "type": "ack",
+        }),
+        SendToDevice::T2Clip { cmd, msg_type, data } => json!({
+            "tx": { "cmd": cmd, "type": msg_type, "data": data },
+            "injected": false,
+            "ts": ts,
+            "type": "packet",
+        }),
+        SendToDevice::T1Json(v) => json!({
+            "tx": v,
+            "injected": false,
+            "ts": ts,
+            "type": "packet",
+        }),
     }
 }
 
@@ -66,12 +111,20 @@ impl FrameLog {
             .unwrap_or(0)
     }
 
-    pub fn push(&self, device_id: &str, dir: &'static str, hex: String, injected: bool) {
+    pub fn push(
+        &self,
+        device_id: &str,
+        dir: &'static str,
+        hex: String,
+        injected: bool,
+        wire_type: &'static str,
+    ) {
         let ev = FrameEvent {
             dir,
             hex,
             injected,
             ts_ms: Self::now_ms(),
+            wire_type: rethink_util::wire::monitor_wire_type(Some(wire_type)),
         };
         let mut map = self.by_device.lock();
         let q = map.entry(device_id.to_string()).or_default();
@@ -94,23 +147,13 @@ impl FrameLog {
         let id = dev.id.clone();
         let log = self.clone();
         dev.add_data_handler(move |buf| {
-            log.push(&id, "rx", rethink_util::hex::encode(buf), false);
+            log.push(&id, "rx", rethink_util::hex::encode(buf), false, "packet");
         });
         let id2 = dev.id.clone();
         let log2 = self.clone();
         dev.add_send_handler(move |msg| {
-            match msg {
-                SendToDevice::T2Packet(b) => {
-                    log2.push(&id2, "tx", rethink_util::hex::encode(b), false);
-                }
-                SendToDevice::T2Clip { cmd, msg_type, data } => {
-                    let s = json!({"cmd": cmd, "type": msg_type, "data": data}).to_string();
-                    log2.push(&id2, "tx", s, false);
-                }
-                SendToDevice::T1Json(v) => {
-                    log2.push(&id2, "tx", v.to_string(), false);
-                }
-            }
+            let (payload, wire_type) = monitor_send_payload(&msg);
+            log2.push(&id2, "tx", payload, false, wire_type);
         });
     }
 }
@@ -162,7 +205,7 @@ fn enum_devices(state: &MgmtState) -> Value {
                     Platform::Thinq1 => "thinq1",
                     Platform::Thinq2 => "thinq2",
                 },
-                "mapped": state.ha_bridge.has_device(&id),
+                "mapped": dev.is_managed(),
                 "bridgeState": bridge_state,
             }),
         );
@@ -318,28 +361,12 @@ async fn handle_device_ws(mut socket: WebSocket, state: MgmtState, id: String) {
                                     "rx": rethink_util::hex::encode(buf),
                                     "injected": false,
                                     "ts": FrameLog::now_ms(),
+                                    "type": "packet",
                                 }).to_string());
                             });
                             let tx2 = data_tx.clone();
                             d.add_send_handler(move |msg| {
-                                let tx_val = match msg {
-                                    SendToDevice::T2Packet(b) => json!({
-                                        "tx": rethink_util::hex::encode(b),
-                                        "injected": false,
-                                        "ts": FrameLog::now_ms(),
-                                    }),
-                                    SendToDevice::T2Clip { cmd, msg_type, data } => json!({
-                                        "tx": { "cmd": cmd, "type": msg_type, "data": data },
-                                        "injected": false,
-                                        "ts": FrameLog::now_ms(),
-                                    }),
-                                    SendToDevice::T1Json(v) => json!({
-                                        "tx": v,
-                                        "injected": false,
-                                        "ts": FrameLog::now_ms(),
-                                    }),
-                                };
-                                let _ = tx2.send(tx_val.to_string());
+                                let _ = tx2.send(monitor_tx_json(msg).to_string());
                             });
                         }
                     } else {
@@ -364,7 +391,7 @@ async fn handle_device_ws(mut socket: WebSocket, state: MgmtState, id: String) {
                                 if let Some(s) = v.get("sendToDevice").and_then(|x| x.as_str()) {
                                     if let Ok(buf) = rethink_util::hex::decode(s) {
                                         // Mark inject in the ring buffer (send handlers also log a live copy).
-                                        state.frame_log.push(&id, "tx", s.to_string(), true);
+                                        state.frame_log.push(&id, "tx", s.to_string(), true, "packet");
                                         (dev.send_to_device)(SendToDevice::T2Packet(buf));
                                     }
                                 }
@@ -373,7 +400,7 @@ async fn handle_device_ws(mut socket: WebSocket, state: MgmtState, id: String) {
                                 }
                                 if let Some(s) = v.get("sendFromDevice").and_then(|x| x.as_str()) {
                                     if let Ok(buf) = rethink_util::hex::decode(s) {
-                                        state.frame_log.push(&id, "rx", s.to_string(), true);
+                                        state.frame_log.push(&id, "rx", s.to_string(), true, "packet");
                                         (dev.emit_data)(buf);
                                     }
                                 }
@@ -991,6 +1018,7 @@ async fn api_device_frames(
                 "hex": e.hex,
                 "injected": e.injected,
                 "ts": e.ts_ms,
+                "type": e.wire_type,
             })
         }).collect::<Vec<_>>(),
     }))
@@ -1075,13 +1103,38 @@ mod tests {
     fn frame_log_ring_keeps_recent() {
         let log = FrameLog::new();
         for i in 0..150 {
-            log.push("dev1", "rx", format!("{i:04x}"), false);
+            log.push("dev1", "rx", format!("{i:04x}"), false, "packet");
         }
         let recent = log.recent("dev1");
         assert_eq!(recent.len(), FRAME_RING_CAP);
         assert!(recent.first().unwrap().hex.contains(&format!("{:04x}", 150 - FRAME_RING_CAP)));
         assert_eq!(recent.last().unwrap().hex, format!("{:04x}", 149));
         assert!(log.recent("other").is_empty());
+    }
+
+    #[test]
+    fn frame_log_and_panel_mark_ack_frames() {
+        let log = FrameLog::new();
+        log.push("dev", "tx", "aa08f0004d04a6bb".into(), false, "ack");
+        log.push("dev", "rx", "aa12".into(), true, "packet");
+        let recent = log.recent("dev");
+        let ack = recent[0].to_json();
+        assert_eq!(ack["type"], "ack");
+        assert_eq!(ack["tx"], "aa08f0004d04a6bb");
+        assert_eq!(ack["injected"], false);
+        assert_eq!(recent[1].to_json()["type"], "packet");
+        assert_eq!(recent[1].to_json()["rx"], "aa12");
+
+        let live = monitor_tx_json(SendToDevice::T2Ack(vec![0xaa, 0x08]));
+        assert_eq!(live["type"], "ack");
+        assert_eq!(live["tx"], "aa08");
+
+        let panel = include_str!("../../../html/panel.js");
+        assert!(panel.contains("typeLabel"), "panel labels non-packet frames");
+        assert!(panel.contains("json.type"));
+        let monitor = include_str!("../../../html/monitor.js");
+        assert!(monitor.contains("typeLabel"));
+        assert!(monitor.contains("json.type === 'packet'"));
     }
 
     fn re_decode_for_test(hex: &str, direction: Option<&str>) -> Result<Value, String> {

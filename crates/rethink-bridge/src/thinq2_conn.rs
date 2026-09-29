@@ -1,7 +1,7 @@
 //! ThinQ2 upstream MQTT connection to LG cloud (port of bridge/thinq2connection.ts).
 
 use crate::pair::{
-    format_device_packet, parse_lg_packet_payload, upstream_pre_deploy, Thinq2DeviceState,
+    classify_lg_downlink, format_device_packet, upstream_pre_deploy, LgDownlink, Thinq2DeviceState,
 };
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, TlsConfiguration, Transport};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -43,13 +43,20 @@ impl Thinq2Handle {
     }
 }
 
-/// Open LG MQTT; returns handle + channel of LG→local raw packets.
+/// LG → appliance message after the connection has answered provisioning itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LgToDevice {
+    Packet(Vec<u8>),
+    Ack(Vec<u8>),
+}
+
+/// Open LG MQTT; returns handle + channel of LG→local packets and delivery acks.
 pub async fn connect_thinq2(
     state: &Thinq2DeviceState,
     device_id: &str,
     model_name: &str,
     deploy: Option<serde_json::Value>,
-) -> anyhow::Result<(Thinq2Handle, mpsc::UnboundedReceiver<Vec<u8>>)> {
+) -> anyhow::Result<(Thinq2Handle, mpsc::UnboundedReceiver<LgToDevice>)> {
     let mqtt_url = state.mqtt_server.replace("ssl://", "mqtts://");
     let url = url::Url::parse(&mqtt_url)
         .or_else(|_| url::Url::parse(&format!("mqtts://{}", state.mqtt_server)))?;
@@ -108,21 +115,40 @@ pub async fn connect_thinq2(
                     let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
                         continue;
                     };
-                    if payload.get("cmd").and_then(|v| v.as_str()) == Some("completeProvisioning") {
-                        let m = mid_c.fetch_add(1, Ordering::SeqCst) + 1;
-                        let ack = serde_json::json!({
-                            "mid": m, "did": did, "kind": model,
-                            "cmd": "completeProvisioning_ack",
-                            "rssi": -48, "fs": "idle", "data": null, "type": 1,
-                        });
-                        let _ = client_c
-                            .publish(&pub_topic, QoS::AtMostOnce, false, ack.to_string())
-                            .await;
-                    }
-                    if let Some(buf) = parse_lg_packet_payload(&payload) {
-                        eprintln!("[bridge] {did} <- {}", rethink_util::hex::encode(&buf));
-                        if tx.send(buf).is_err() {
-                            break;
+                    match classify_lg_downlink(&payload) {
+                        LgDownlink::CompleteProvisioning => {
+                            let m = mid_c.fetch_add(1, Ordering::SeqCst) + 1;
+                            let ack = serde_json::json!({
+                                "mid": m, "did": did, "kind": model,
+                                "cmd": "completeProvisioning_ack",
+                                "rssi": -48, "fs": "idle", "data": null, "type": 1,
+                            });
+                            let _ = client_c
+                                .publish(&pub_topic, QoS::AtMostOnce, false, ack.to_string())
+                                .await;
+                        }
+                        LgDownlink::Packet(buf) => {
+                            eprintln!("[bridge] {did} <- {}", rethink_util::hex::encode(&buf));
+                            if tx.send(LgToDevice::Packet(buf)).is_err() {
+                                break;
+                            }
+                        }
+                        LgDownlink::Ack(buf) => {
+                            let shown = payload
+                                .get("data")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            eprintln!("[bridge] {did} <- ack {shown}");
+                            if tx.send(LgToDevice::Ack(buf)).is_err() {
+                                break;
+                            }
+                        }
+                        LgDownlink::Dropped(_) => {
+                            let cmd = payload
+                                .get("cmd")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            eprintln!("[bridge] {did} <- dropped {cmd}: {text}");
                         }
                     }
                 }

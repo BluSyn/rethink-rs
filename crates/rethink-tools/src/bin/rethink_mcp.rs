@@ -129,7 +129,8 @@ fn tool_list() -> Value {
                 "properties": {
                     "path": { "type": "string" },
                     "offset": { "type": "integer" },
-                    "limit": { "type": "integer" }
+                    "limit": { "type": "integer" },
+                    "type": { "type": "string", "description": "packet or ack. Missing type on an event counts as packet. Non-wire events are excluded when type is set." }
                 },
                 "required": ["path"]
             }
@@ -260,13 +261,15 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("path required"))?;
             let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
             let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+            let want_type = args.get("type").and_then(|t| t.as_str());
             let file = File::open(Path::new(path)).with_context(|| format!("open {path}"))?;
             let lines: Vec<String> = BufReader::new(file).lines().collect::<std::io::Result<_>>()?;
             let slice: Vec<Value> = lines
                 .into_iter()
+                .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
+                .filter(|ev| rethink_util::wire::capture_event_matches_type(ev, want_type))
                 .skip(offset)
                 .take(limit)
-                .filter_map(|l| serde_json::from_str(&l).ok())
                 .collect();
             Ok(json!({"offset": offset, "count": slice.len(), "events": slice}))
         }

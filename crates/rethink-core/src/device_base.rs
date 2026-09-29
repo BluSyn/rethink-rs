@@ -78,16 +78,29 @@ pub struct AabbDeviceCore {
     pub thinq: Arc<dyn Thinq2Device>,
     pub publish_cache: Mutex<HashMap<String, String>>,
     pub config: Mutex<Option<DeviceDiscovery>>,
+    /// Ack every frame the way the cloud does. Existing handlers leave this off.
+    auto_ack: bool,
 }
 
 impl AabbDeviceCore {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>) -> Arc<Self> {
+        Self::with_auto_ack(ha, thinq, false)
+    }
+
+    /// `auto_ack` should be true for new handlers. Pre-existing ones pass false so their
+    /// traffic is unchanged; a bridged appliance with a handler does not also get cloud acks.
+    pub fn with_auto_ack(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        auto_ack: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: thinq.id().to_string(),
             ha,
             thinq,
             publish_cache: Mutex::new(HashMap::new()),
             config: Mutex::new(None),
+            auto_ack,
         })
     }
 
@@ -96,7 +109,13 @@ impl AabbDeviceCore {
     }
 
     pub fn process_data_envelope<'a>(&self, buf: &'a [u8]) -> Option<&'a [u8]> {
-        unwrap_aabb(buf)
+        let inner = unwrap_aabb(buf)?;
+        if self.auto_ack {
+            if let Some(ack) = aabb_delivery_ack(inner, buf[1] == 0xff) {
+                self.thinq.send_ack(&ack);
+            }
+        }
+        Some(inner)
     }
 
     pub fn publish_on_off(&self, prop: &str, on: bool) {
@@ -598,6 +617,35 @@ impl TlvDeviceCore {
     }
 }
 
+// Frame types the cloud does not ack: the appliance's own acks, the c3 heartbeat, and eb/ec
+// status records outside an envelope.
+const UNACKED_TYPES: [u8; 4] = [0x00, 0xc3, 0xeb, 0xec];
+const FRAME_TYPE_ENVELOPE: u8 = 0x0a;
+const ENVELOPE_SEQ_OFFSET: usize = 5;
+const ENVELOPE_MIN_LEN: usize = 13;
+
+/// `f0 00 <type> 04 [<seq16>]` wrapped as an AABB frame, or `None` when the cloud would not ack.
+///
+/// `long_frame` is the `AA FF` form, whose 16-bit checksum leaves one extra byte on `inner`.
+pub fn aabb_delivery_ack(inner: &[u8], long_frame: bool) -> Option<Vec<u8>> {
+    if inner.len() < 2 {
+        return None;
+    }
+    let ty = inner[1];
+    if UNACKED_TYPES.contains(&ty) {
+        return None;
+    }
+    let mut body = vec![0xf0, 0x00, ty, 0x04];
+    if ty == FRAME_TYPE_ENVELOPE {
+        let header_len = inner.len() - usize::from(long_frame);
+        if header_len < ENVELOPE_MIN_LEN || inner.len() < ENVELOPE_SEQ_OFFSET + 2 {
+            return None;
+        }
+        body.extend_from_slice(&inner[ENVELOPE_SEQ_OFFSET..ENVELOPE_SEQ_OFFSET + 2]);
+    }
+    Some(wrap_aabb(&body))
+}
+
 /// Wrap an AABB inner body as `AA <len> <inner> <csum> BB`.
 pub fn wrap_aabb(inner: &[u8]) -> Vec<u8> {
     let mut packet = Vec::with_capacity(inner.len() + 4);
@@ -780,5 +828,143 @@ mod tests {
         core.set_raw(0x400, 1);
         assert_eq!(core.get_raw(0x400), None);
         assert_eq!(core.get_raw(0xffff), None);
+    }
+
+    /// Drive the same path a handler uses: `on_data` → `process_data_envelope`.
+    struct AckProbe {
+        thinq: Arc<crate::MockThinq2Device>,
+        processed: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn ack_probe(auto_ack: bool) -> AckProbe {
+        let ha = Arc::new(CountingHa {
+            pubs: Mutex::new(Vec::new()),
+        });
+        let thinq =
+            crate::MockThinq2Device::new("test-id", crate::Metadata::new("AABB", "AABB", "0.0.0"));
+        let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), auto_ack);
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let seen = processed.clone();
+        let core2 = core.clone();
+        thinq.on_data(Box::new(move |buf| {
+            if let Some(inner) = core2.process_data_envelope(buf) {
+                seen.lock().push(crate::hex_encode(inner));
+            }
+        }));
+        AckProbe { thinq, processed }
+    }
+
+    fn ack_hexes(thinq: &crate::MockThinq2Device) -> Vec<String> {
+        thinq
+            .sent()
+            .into_iter()
+            .filter(|m| m.cmd == "ack")
+            .map(|m| m.data.as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn auto_ack_matches_cloud_delivery_acks() {
+        // Captured cloud ack of a dryer's `30 4d 01` course-list request.
+        let probe = ack_probe(true);
+        probe.thinq.emit_data(&wrap_aabb(&[0x30, 0x4d, 0x01]));
+        assert_eq!(ack_hexes(&probe.thinq), vec!["AA08F0004D04A6BB".to_string()]);
+        assert!(
+            probe.thinq.outbox().is_empty(),
+            "acks do not go out as packets"
+        );
+        assert_eq!(probe.processed.lock().clone(), vec!["304D01".to_string()]);
+
+        // Status envelopes, as captured: ack is the sequence at inner[5..7].
+        let probe = ack_probe(true);
+        probe.thinq.emit_data(&crate::hex_decode(
+            "aaff310a00230053ed000101030011100b0306100000008a00000000000000059317bb",
+        ));
+        probe.thinq.emit_data(&crate::hex_decode(
+            "aaff200a00a2001002000100ec00900aff000e00000000bb",
+        ));
+        assert_eq!(
+            ack_hexes(&probe.thinq),
+            vec![
+                crate::hex_encode(&wrap_aabb(&[0xf0, 0x00, 0x0a, 0x04, 0x53, 0xed])),
+                crate::hex_encode(&wrap_aabb(&[0xf0, 0x00, 0x0a, 0x04, 0x10, 0x02])),
+            ]
+        );
+
+        // Truncated envelope is processed and not acked.
+        let probe = ack_probe(true);
+        probe
+            .thinq
+            .emit_data(&crate::hex_decode("AA08200A01020304BB"));
+        assert!(ack_hexes(&probe.thinq).is_empty());
+        assert_eq!(probe.processed.lock().clone(), vec!["200A010203".to_string()]);
+
+        // 13-byte envelope header is required, in either framing. Expected bytes are the cloud's replies.
+        let probe = ack_probe(true);
+        probe.thinq.emit_data(&crate::hex_decode(
+            "aaff200a00120010130001007f0000e91dbb",
+        ));
+        probe.thinq.emit_data(&crate::hex_decode(
+            "aaff200a00110010120001007f00decabb",
+        ));
+        probe.thinq.emit_data(&crate::hex_decode(
+            "aa11200a00110010b00001007f000063bb",
+        ));
+        probe
+            .thinq
+            .emit_data(&crate::hex_decode("aa10200a00100010c00001007f0011bb"));
+        assert_eq!(
+            ack_hexes(&probe.thinq),
+            vec![
+                "AA0AF0000A04101380BB".to_string(),
+                "AA0AF0000A0410B027BB".to_string(),
+            ]
+        );
+
+        let probe = ack_probe(true);
+        probe
+            .thinq
+            .emit_data(&crate::hex_decode("aa0720d801ffbb"));
+        probe
+            .thinq
+            .emit_data(&crate::hex_decode("aa0720720111bb"));
+        probe
+            .thinq
+            .emit_data(&crate::hex_decode("aa0720e901eebb"));
+        assert_eq!(
+            ack_hexes(&probe.thinq),
+            vec![
+                "AA08F000D8042BBB".to_string(),
+                "AA08F00072044DBB".to_string(),
+                "AA08F000E904DABB".to_string(),
+            ]
+        );
+
+        // Appliance acks, c3 heartbeat, and bare eb/ec records are not acked.
+        let probe = ack_probe(true);
+        for frame in [
+            "AA084000430060BB",
+            "aa0731c302f2bb",
+            "aa0720eb01e8bb",
+            "aa0720ec01ebbb",
+            "aa5420ec002501000000000000000000000000000000000000000001006400000000000000000000000000002501033a033a0100030b04010000000000010002000001006400000400000000000000000000e0bb",
+        ] {
+            probe.thinq.emit_data(&crate::hex_decode(frame));
+        }
+        assert!(ack_hexes(&probe.thinq).is_empty());
+        assert_eq!(probe.processed.lock().len(), 5);
+
+        let probe = ack_probe(true);
+        probe.thinq.emit_data(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+        assert!(ack_hexes(&probe.thinq).is_empty());
+        assert!(probe.processed.lock().is_empty());
+
+        let probe = ack_probe(false);
+        probe.thinq.emit_data(&wrap_aabb(&[0x30, 0x4d, 0x01]));
+        probe.thinq.emit_data(&crate::hex_decode(
+            "aaff200a00a2001002000100ec00900aff000e00000000bb",
+        ));
+        assert!(ack_hexes(&probe.thinq).is_empty());
+        assert_eq!(probe.processed.lock().len(), 2);
     }
 }

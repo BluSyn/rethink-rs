@@ -17,6 +17,8 @@ pub trait Thinq2Device: Send + Sync {
     fn id(&self) -> &str;
     fn meta(&self) -> &Metadata;
     fn send_packet(&self, buf: &[u8]);
+    /// Delivery ack under MQTT `cmd=ack`, not `packet`. Default records nothing.
+    fn send_ack(&self, buf: &[u8]);
     fn send(&self, cmd: &str, msg_type: i32, data: serde_json::Value);
     fn on_data(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>);
     /// Inject a data packet as if received from the appliance (tests + broker).
@@ -87,6 +89,11 @@ impl Thinq2Device for MockThinq2Device {
     fn send_packet(&self, buf: &[u8]) {
         self.outbox.lock().push(buf.to_vec());
         // also notify any send-data listeners if needed
+    }
+
+    fn send_ack(&self, buf: &[u8]) {
+        let hex = crate::hex_encode(buf);
+        self.send("ack", 1, serde_json::Value::String(hex));
     }
 
     fn send(&self, cmd: &str, msg_type: i32, data: serde_json::Value) {
