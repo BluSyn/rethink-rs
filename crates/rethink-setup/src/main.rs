@@ -1,10 +1,14 @@
 //! rethink-setup: SoftAP Wi-Fi provisioning without the LG app.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::Local;
 use base64::Engine;
+use openssl::ssl::{SslConnector, SslMethod, SslOptions, SslVerifyMode, SslVersion};
 use rethink_util::json_splitter;
 use rethink_util::mtosp;
+use rethink_util::whisen::{self, ExchangeCtx, ExchangeRequest, Step};
 use std::env;
+use std::io::{Read, Write};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -28,7 +32,7 @@ fn usage() {
         "Usage:
 \trethink-setup hostname wifi_ssid wifi_password
 
-\thostname is usually 192.168.120.254
+\thostname is usually 192.168.120.254, or 192.168.1.1 for appliances whose SoftAP hands out 192.168.1.x addresses
 \tAlways quote the password (special chars like ! $ etc.):
 \t  rethink-setup 192.168.120.254 'MySSID' 'MyPassword!'
 
@@ -40,7 +44,9 @@ fn usage() {
 \t  SETUP_FREQ=2417                  (force AP frequency MHz; else taken from scan)
 \t  SETUP_AP_BSSID=aa:bb:cc:dd:ee:ff (home AP MAC if known — not the SoftAP IP)
 \t  SETUP_SSID_AS_BSSID=1            (also send B64 SSID in legacy \"bssid\" field; default on)
-\t  SETUP_TRY_THINQ1=1               (try ThinQ1 mTosp first)
+
+\tThinQ1 (port 5500) then ThinQ2 are tried together, in parallel with Whisen HTTP-over-TLS on port 9000.
+\tThe first protocol to succeed wins.
 "
     );
 }
@@ -444,6 +450,140 @@ async fn thinq2_setup(host: &str, ssid: &str, pass: &str) -> Result<()> {
     Ok(())
 }
 
+/// TLS 1.2 only, legacy ciphers, no certificate check. The QCA4002 module needs that profile.
+fn whisen_connector() -> Result<SslConnector> {
+    let mut builder = SslConnector::builder(SslMethod::tls_client())?;
+    builder.set_verify(SslVerifyMode::NONE);
+    builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
+    builder.set_max_proto_version(Some(SslVersion::TLS1_2))?;
+    builder.set_cipher_list("ALL:@SECLEVEL=0")?;
+    // SSL_OP_ALL includes SSL_OP_LEGACY_SERVER_CONNECT. Unsafe renegotiation is not in that mask.
+    builder.set_options(SslOptions::ALL | SslOptions::ALLOW_UNSAFE_LEGACY_RENEGOTIATION);
+    Ok(builder.build())
+}
+
+fn whisen_exchange(host: &str, req: &ExchangeRequest) -> Result<String> {
+    let payload = whisen::encode_exchange_request(req);
+    println!("Request: POST {}", req.path);
+    let connector = whisen_connector()?;
+    let tcp = std::net::TcpStream::connect((host, whisen::WHISEN_PORT))
+        .with_context(|| format!("connect {host}:{}", whisen::WHISEN_PORT))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(15)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let mut stream = connector.connect(host, tcp)?;
+    stream.write_all(payload.as_bytes())?;
+    let mut buf = Vec::new();
+    // The module closes after the reply. A close mid-read is the end of the response.
+    if let Err(e) = stream.read_to_end(&mut buf) {
+        if buf.is_empty() {
+            return Err(e.into());
+        }
+    }
+    let reply = String::from_utf8_lossy(&buf).into_owned();
+    println!(
+        "response: {}",
+        serde_json::to_string(&reply).unwrap_or_default()
+    );
+    Ok(reply)
+}
+
+fn whisen_setup_blocking(host: &str, ssid: &str, pass: &str) -> Result<()> {
+    println!("Connecting to {host}:{}", whisen::WHISEN_PORT);
+    let minutes = Local::now().offset().local_minus_utc() / 60;
+    let tz = whisen::timezone(minutes);
+    let ctx = ExchangeCtx {
+        nation: "DE",
+        regional_code: "rethink",
+        ssid,
+        password: pass,
+        tz: &tz,
+    };
+    let mut step = Step::Start;
+    let mut last_reply: Option<String> = None;
+    loop {
+        if step == Step::AfterInfo {
+            if let Some(info) = last_reply.as_deref().and_then(whisen::parse_members) {
+                println!("device info: {info:?}");
+            }
+        }
+        let (next, req) =
+            whisen::advance(step, last_reply.as_deref(), &ctx).map_err(|e| anyhow!(e))?;
+        let Some(req) = req else {
+            break;
+        };
+        let reply = whisen_exchange(host, &req)?;
+        step = next;
+        last_reply = Some(reply);
+    }
+    println!("Whisen setup successful, see rethink-cloud logs for a follow-up");
+    Ok(())
+}
+
+/// ThinQ1 first, then ThinQ2. An appliance speaks only one of them.
+async fn thinq_setup(host: &str, ssid: &str, pass: &str) -> Result<()> {
+    println!("Trying ThinQ 1 setup");
+    match thinq1_setup(host, ssid, pass).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            println!("ThinQ 1 setup failed {e}");
+            println!("Trying ThinQ 2 setup");
+            thinq2_setup(host, ssid, pass).await
+        }
+    }
+}
+
+/// First success wins. A failure does not cancel the attempt that is still running.
+async fn run_setups(host: &str, ssid: &str, pass: &str) -> Result<()> {
+    let host_w = host.to_string();
+    let ssid_w = ssid.to_string();
+    let pass_w = pass.to_string();
+    let whisen_task = tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || whisen_setup_blocking(&host_w, &ssid_w, &pass_w))
+            .await
+            .map_err(|e| anyhow!("whisen task: {e}"))?
+    });
+
+    let host_t = host.to_string();
+    let ssid_t = ssid.to_string();
+    let pass_t = pass.to_string();
+    let thinq_task = tokio::spawn(async move { thinq_setup(&host_t, &ssid_t, &pass_t).await });
+
+    tokio::pin!(whisen_task);
+    tokio::pin!(thinq_task);
+    tokio::select! {
+        w = &mut whisen_task => match w {
+            Ok(Ok(())) => {
+                thinq_task.abort();
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                println!("Whisen setup failed {e}");
+                match thinq_task.await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e2)) => bail!("Setup failed: whisen: {e}; thinq: {e2}"),
+                    Err(e2) => bail!("Setup failed: whisen: {e}; thinq task: {e2}"),
+                }
+            }
+            Err(e) => bail!("whisen task: {e}"),
+        },
+        t = &mut thinq_task => match t {
+            Ok(Ok(())) => {
+                whisen_task.abort();
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                println!("ThinQ setup failed {e}");
+                match whisen_task.await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e2)) => bail!("Setup failed: thinq: {e}; whisen: {e2}"),
+                    Err(e2) => bail!("Setup failed: thinq: {e}; whisen task: {e2}"),
+                }
+            }
+            Err(e) => bail!("thinq task: {e}"),
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -456,19 +596,26 @@ async fn main() -> Result<()> {
     let ssid = &args[2];
     let pass = &args[3];
 
-    if env::var("SETUP_TRY_THINQ1").as_deref() == Ok("1") {
-        match thinq1_setup(host, ssid, pass).await {
-            Ok(()) => {
-                print_footer();
-                return Ok(());
-            }
-            Err(e) => println!("ThinQ 1 setup failed {e}"),
+    match run_setups(host, ssid, pass).await {
+        Ok(()) => {
+            print_footer();
+            Ok(())
+        }
+        Err(e) => {
+            println!("Setup failed {e}");
+            std::process::exit(1);
         }
     }
-    println!("Trying ThinQ 2 setup");
-    thinq2_setup(host, ssid, pass).await?;
-    print_footer();
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn whisen_connector_uses_port_9000() {
+        assert_eq!(rethink_util::whisen::WHISEN_PORT, 9000);
+        let connector = super::whisen_connector().expect("legacy TLS profile builds");
+        let _ = connector;
+    }
 }
 
 fn print_footer() {

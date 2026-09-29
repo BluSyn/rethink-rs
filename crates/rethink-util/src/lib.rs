@@ -13,6 +13,7 @@ pub mod sync;
 pub mod tlv;
 pub mod tlv_catalog;
 pub mod uart_binary;
+pub mod whisen;
 pub mod wire;
 
 pub use aabb_analysis::{aabb_export_text, analyze_aabb_body, AabbAnalysis};
