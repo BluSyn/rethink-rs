@@ -1,7 +1,8 @@
 //! RV13U6AM8W_D_US_WIFI dryer (AABB).
 
 use crate::device_trait::DeviceHandler;
-use rethink_core::device_base::{default_config, AabbDeviceCore};
+use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
+use rethink_core::hex_decode;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::{json, Map};
 use std::collections::{HashMap, HashSet};
@@ -19,6 +20,7 @@ fn map_status() -> HashMap<u8, &'static str> {
 }
 fn map_cycles() -> HashMap<u8, &'static str> {
     HashMap::from([
+        (0x00, "Off"),
         (0x01, "Heavy Duty"),
         (0x03, "Normal"),
         (0x04, "Perm. Press"),
@@ -41,7 +43,7 @@ fn map_temps() -> HashMap<u8, &'static str> {
 }
 fn map_dry() -> HashMap<u8, &'static str> {
     HashMap::from([
-        (0x00, "None"),
+        (0x00, "Off"),
         (0x01, "Damp"),
         (0x02, "Less"),
         (0x03, "Normal"),
@@ -69,7 +71,7 @@ pub struct Device {
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
-        let core = AabbDeviceCore::new(ha, thinq.clone());
+        let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
         let this = Arc::new(Self { core: core.clone() });
 
         let status = map_status();
@@ -176,20 +178,25 @@ impl Device {
             return;
         }
         let phase = rec[2];
-        let mins = rec[4] as i64;
+        // Off and Finishing keep a stale countdown in rec[4].
+        let mins = if phase == 0x00 || phase == 0x04 {
+            0
+        } else {
+            rec[4] as i64
+        };
         self.core.publish_property(
             "status",
-            map_status().get(&phase).copied().unwrap_or("unknown").into(),
+            map_status().get(&phase).copied().unwrap_or("None").into(),
         );
         self.core.publish_property("remaining_time", mins.into());
         self.core.publish_on_off("power", phase != 0);
-        self.core.publish_on_off("drum_running", rec[17] == 0xa9);
+        self.core.publish_on_off("drum_running", rec[17] & 0x01 != 0);
         self.core.publish_property(
             "cycle",
             map_cycles()
                 .get(&rec[7])
                 .copied()
-                .unwrap_or("unknown")
+                .unwrap_or("None")
                 .into(),
         );
         self.core.publish_property(
@@ -197,23 +204,19 @@ impl Device {
             map_temps()
                 .get(&rec[10])
                 .copied()
-                .unwrap_or("unknown")
+                .unwrap_or("None")
                 .into(),
         );
         self.core.publish_property(
             "dry_level",
-            map_dry().get(&rec[9]).copied().unwrap_or("unknown").into(),
+            map_dry().get(&rec[9]).copied().unwrap_or("None").into(),
         );
     }
 
     fn process_aabb(&self, buf: &[u8]) {
-        if buf.is_empty() || buf[0] != 0x30 {
-            return;
-        }
-        if buf.len() > 1 && buf[1] == 0xec && buf.len() == 60 {
-            self.process_record(&buf[2..31]);
-        } else if buf.len() > 1 && buf[1] == 0xeb && buf.len() == 31 {
-            self.process_record(&buf[2..31]);
+        // 29-byte records. 0xEC is previous then current.
+        if let Some(rec) = process_common_status(buf, 0x30, 29) {
+            self.process_record(rec);
         }
     }
 
@@ -224,7 +227,9 @@ impl DeviceHandler for Device {
     fn id(&self) -> &str {
         &self.core.id
     }
-    fn start(&self) {}
+    fn start(&self) {
+        self.core.send(&hex_decode("F0ED1121010000001800"));
+    }
     fn drop_device(&self) {
         self.core.drop_device();
     }
@@ -281,7 +286,7 @@ mod tests {
             "AA4030EC001B320036003601000305000100000000A90000000100000064000000001B320035003601000305000100000000A90000530100000064000000AFBB"
         ));
         assert_eq!(prop(&ha, "status").as_deref(), Some("Drying"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("54"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("53"));
         assert_eq!(prop(&ha, "cycle").as_deref(), Some("Heavy Duty"));
         assert_eq!(prop(&ha, "drum_running").as_deref(), Some("ON"));
     }

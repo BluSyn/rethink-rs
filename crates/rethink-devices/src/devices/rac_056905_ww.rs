@@ -15,7 +15,7 @@ type PowerModeChangeHook = Box<dyn Fn() + Send + Sync>;
 
 /// EEPROM checksums at 0x2da that both report and accept display light (0x21f) with
 /// 0 = off, 1 = on. Negative cases that must stay hidden: 0x4dda, 0x4d81, 0x4dfa.
-const DISPLAY_LIGHT_EEPROM_CHECKSUMS: [u32; 3] = [0x4e88, 0x551d, 0x4c19];
+const DISPLAY_LIGHT_EEPROM_CHECKSUMS: [u32; 5] = [0x4e88, 0x551d, 0x4c19, 0x4f58, 0x4e95];
 
 fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
     (cap_2d6 & 2) != 0 && DISPLAY_LIGHT_EEPROM_CHECKSUMS.contains(&eeprom_checksum)
@@ -1326,6 +1326,8 @@ mod tests {
         assert!(display_light_supported(2, 0x4e88));
         assert!(display_light_supported(2, 0x551d));
         assert!(display_light_supported(2, 0x4c19));
+        assert!(display_light_supported(2, 0x4f58));
+        assert!(display_light_supported(2, 0x4e95));
         assert!(display_light_supported(0x6, 0x4e88));
         // Negative checksums, and a positive checksum with the capability bit clear.
         assert!(!display_light_supported(2, 0x4dda));

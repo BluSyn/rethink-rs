@@ -673,6 +673,44 @@ pub fn unwrap_aabb(buf: &[u8]) -> Option<&[u8]> {
     }
 }
 
+/// `XX EB` is one status block. `XX EC` is previous then current; the current block is returned.
+///
+/// `status_length` is the size of one record. Returns the record the handler should read.
+pub fn process_common_status(buf: &[u8], class_byte: u8, status_length: usize) -> Option<&[u8]> {
+    if buf.len() < 2 || buf[0] != class_byte {
+        return None;
+    }
+    if buf[1] == 0xeb && buf.len() == 2 + status_length {
+        return Some(&buf[2..]);
+    }
+    if buf[1] == 0xec && buf.len() == 2 + status_length * 2 {
+        return Some(&buf[2 + status_length..]);
+    }
+    None
+}
+
+/// EB/EC records wrapped in a `<class> 0a` envelope. Same current-record rule as
+/// [`process_common_status`]. A single trailing checksum byte is allowed.
+pub fn process_enveloped_status(buf: &[u8], class_byte: u8, status_length: usize) -> Option<&[u8]> {
+    const ENVELOPE_MIN_LEN: usize = 13;
+    const INNER_TYPE_OFFSET: usize = 10;
+    const INNER_LEN_OFFSET: usize = 11;
+    if buf.len() < ENVELOPE_MIN_LEN || buf[0] != class_byte || buf[1] != 0x0a {
+        return None;
+    }
+    let inner_len = u16::from_be_bytes([buf[INNER_LEN_OFFSET], buf[INNER_LEN_OFFSET + 1]]) as usize;
+    let trailing = buf.len() - ENVELOPE_MIN_LEN - inner_len;
+    if trailing != 0 && trailing != 1 {
+        return None;
+    }
+    let records = &buf[ENVELOPE_MIN_LEN..ENVELOPE_MIN_LEN + inner_len];
+    match buf[INNER_TYPE_OFFSET] {
+        0xeb if inner_len == status_length => Some(records),
+        0xec if inner_len == status_length * 2 => Some(&records[status_length..]),
+        _ => None,
+    }
+}
+
 fn republish_config(ha: &dyn HaConnection, id: &str, config: &Mutex<Option<DeviceDiscovery>>) {
     if let Some(cfg) = config.lock().clone() {
         ha.publish_property(id, "availability", "online".into());

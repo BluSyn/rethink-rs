@@ -8,22 +8,24 @@
 //! `auto_ack` stays off: this handler acks itself only if a future device opts in.
 
 use crate::device_trait::DeviceHandler;
-use rethink_core::device_base::{default_config, AabbDeviceCore};
+use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use rethink_util::sync::Mutex;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 const STATUS_RECORD_LEN: usize = 46;
-const STATUS_CHANGE_LEN: usize = 2 + STATUS_RECORD_LEN * 2;
-const STATUS_SNAPSHOT_LEN: usize = 2 + STATUS_RECORD_LEN;
 
-const STATUS_OPTIONS: &[&str] = &[
-    "Ready", "Running", "Pause", "Standby", "End", "Reserved", "Washing", "Rinsing", "Drying",
-    "Cancel",
-];
+const STATUS_OPTIONS: &[&str] = &["Off", "Ready", "Running", "Pause", "Standby", "End"];
 const PROCESS_OPTIONS: &[&str] = &[
-    "Idle", "Reserved", "Washing", "Rinsing", "Drying", "End", "Cancel",
+    "Idle",
+    "Delayed Start",
+    "Washing",
+    "Rinsing",
+    "Drying",
+    "End",
+    "Night Dry",
+    "Cancel",
 ];
 const COURSE_OPTIONS: &[&str] = &[
     "Off",
@@ -292,7 +294,7 @@ impl Device {
                 }
                 None => self.reject(prop, mqtt_value),
             },
-            "end_alarm_sound" => match switch_code(mqtt_value) {
+            "end_of_cycle_tone" => match switch_code(mqtt_value) {
                 Some(code) => {
                     self.settings.lock().end_alarm = Some(code);
                     self.send_settings();
@@ -339,31 +341,14 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
-        if buf.len() < 2 || buf[0] != 0x32 {
+        if process_common_status(buf, 0x32, STATUS_RECORD_LEN).is_some_and(|rec| {
+            self.process_status(rec);
+            true
+        }) {
             return;
         }
-        match buf[1] {
-            0xec => {
-                if buf.len() != STATUS_CHANGE_LEN {
-                    return;
-                }
-                let previous = &buf[2..2 + STATUS_RECORD_LEN];
-                let current = &buf[2 + STATUS_RECORD_LEN..];
-                if is_status_record(previous) && is_status_record(current) {
-                    self.process_status(current);
-                }
-            }
-            0xeb => {
-                if buf.len() != STATUS_SNAPSHOT_LEN {
-                    return;
-                }
-                let snapshot = &buf[2..];
-                if is_status_record(snapshot) {
-                    self.process_status(snapshot);
-                }
-            }
-            0x3e => self.process_statistics(buf),
-            _ => {}
+        if buf.len() == 7 && buf.first() == Some(&0x32) && buf.get(1) == Some(&0x3e) {
+            self.process_statistics(buf);
         }
     }
 
@@ -379,13 +364,14 @@ impl Device {
     }
 
     fn process_status(&self, record: &[u8]) {
-        if !is_status_record(record) {
+        // Length byte only. The flag nibble is not part of the shared layout.
+        if record.len() < 26 || record[1] != 0x18 {
             return;
         }
         let data = &record[2..26];
         let state = state_name(data[0]);
         let process = process_name(data[1]);
-        self.publish_enum("status", dishwasher_status(state, process));
+        self.publish_enum("status", state);
         self.publish_enum("process", process);
         // Ready and Running/Cancel stay powered. Only Standby is off.
         self.core.publish_property(
@@ -413,16 +399,12 @@ impl Device {
             (i64::from(data[7]) * 60 + i64::from(data[8])).into(),
         );
         self.core.publish_property(
-            "delay_start",
+            "delay_start_time",
             (i64::from(data[9]) * 60 + i64::from(data[10])).into(),
         );
         self.core.publish_property(
             "door",
-            if data[11] & 0x02 != 0 {
-                "OPEN"
-            } else {
-                "CLOSE"
-            }
+            if data[11] & 0x02 != 0 { "ON" } else { "OFF" }
             .into(),
         );
         self.core.publish_property(
@@ -476,7 +458,7 @@ impl Device {
         self.publish_enum("buzzer_level", buzzer_name(buzzer_bits));
         self.publish_enum("remote_start_mode", remote_mode_name(remote_bits));
         self.core
-            .publish_property("end_alarm_sound", on_off(end_alarm).into());
+            .publish_property("end_of_cycle_tone", on_off(end_alarm).into());
         self.core
             .publish_property("brightness", brightness_name(brightness).into());
 
@@ -616,9 +598,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "device_class": "door",
             "unique_id": "$deviceid-door",
             "state_topic": "$this/door",
-            "name": "Door",
-            "payload_on": "OPEN",
-            "payload_off": "CLOSE"
+            "name": "Door"
         }),
     );
     add(
@@ -709,14 +689,14 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
     );
     add(
         &mut components,
-        "end_alarm_sound",
+        "end_of_cycle_tone",
         json!({
             "platform": "switch",
             "icon": "mdi:music-note",
-            "unique_id": "$deviceid-end_alarm_sound",
-            "state_topic": "$this/end_alarm_sound",
-            "command_topic": "$this/end_alarm_sound/set",
-            "name": "End alarm sound"
+            "unique_id": "$deviceid-end_of_cycle_tone",
+            "state_topic": "$this/end_of_cycle_tone",
+            "command_topic": "$this/end_of_cycle_tone/set",
+            "name": "End of cycle tone"
         }),
     );
     add(
@@ -772,13 +752,13 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
     );
     add(
         &mut components,
-        "delay_start",
+        "delay_start_time",
         json!({
             "platform": "sensor",
             "icon": "mdi:clock-fast",
-            "unique_id": "$deviceid-delay_start",
-            "state_topic": "$this/delay_start",
-            "name": "Delay start remaining",
+            "unique_id": "$deviceid-delay_start_time",
+            "state_topic": "$this/delay_start_time",
+            "name": "Delay start time",
             "device_class": "duration",
             "unit_of_measurement": "min"
         }),
@@ -911,31 +891,9 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
     base
 }
 
-fn is_status_record(record: &[u8]) -> bool {
-    record.len() == STATUS_RECORD_LEN
-        && (record[0] == 0x00 || record[0] == 0x08)
-        && record[1] == 0x18
-}
-
-fn dishwasher_status(
-    state: Option<&'static str>,
-    process: Option<&'static str>,
-) -> Option<&'static str> {
-    if state == Some("Running") {
-        if let Some(process) = process {
-            if matches!(
-                process,
-                "Reserved" | "Washing" | "Rinsing" | "Drying" | "Cancel"
-            ) {
-                return Some(process);
-            }
-        }
-    }
-    state
-}
-
 fn state_name(code: u8) -> Option<&'static str> {
     match code {
+        0 => Some("Off"),
         1 => Some("Ready"),
         2 => Some("Running"),
         3 => Some("Pause"),
@@ -948,7 +906,8 @@ fn state_name(code: u8) -> Option<&'static str> {
 fn process_name(code: u8) -> Option<&'static str> {
     match code {
         0x00 => Some("Idle"),
-        0x01 => Some("Reserved"),
+        0x01 => Some("Delayed Start"),
+        0x06 => Some("Night Dry"),
         0x02 => Some("Washing"),
         0x03 => Some("Rinsing"),
         0x04 => Some("Drying"),
@@ -1184,26 +1143,32 @@ mod tests {
         let comps = &devinfo.config.as_ref().unwrap().components;
         assert_eq!(
             comps["status"]["options"],
-            json!([
-                "Ready", "Running", "Pause", "Standby", "End", "Reserved", "Washing", "Rinsing",
-                "Drying", "Cancel"
-            ])
+            json!(["Off", "Ready", "Running", "Pause", "Standby", "End"])
         );
         assert_eq!(
             comps["process"]["options"],
-            json!(["Idle", "Reserved", "Washing", "Rinsing", "Drying", "End", "Cancel"])
+            json!([
+                "Idle",
+                "Delayed Start",
+                "Washing",
+                "Rinsing",
+                "Drying",
+                "End",
+                "Night Dry",
+                "Cancel"
+            ])
         );
 
         thinq.emit_data(&hex_decode(EXPRESS_STARTS_RUNNING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
         assert_eq!(prop(&ha, "process").as_deref(), Some("Washing"));
 
         thinq.emit_data(&hex_decode(EXPRESS_STARTS_RINSING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Rinsing"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
         assert_eq!(prop(&ha, "process").as_deref(), Some("Rinsing"));
 
         thinq.emit_data(&hex_decode(EXPRESS_STARTS_DRYING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Drying"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
         assert_eq!(prop(&ha, "process").as_deref(), Some("Drying"));
 
         thinq.emit_data(&hex_decode(EXPRESS_ENDS));
@@ -1264,7 +1229,7 @@ mod tests {
             .filter(|(p, _)| p == "status")
             .map(|(_, v)| v.clone())
             .collect();
-        assert_eq!(statuses, vec!["Washing".to_string()]);
+        assert_eq!(statuses, vec!["Running".to_string()]);
         assert_eq!(prop(&rec.inner, "course").as_deref(), Some("Express"));
         assert_eq!(prop(&rec.inner, "remaining_time").as_deref(), Some("106"));
     }
@@ -1273,12 +1238,12 @@ mod tests {
     fn reports_the_captured_delayed_machine_clean_cycle_in_minutes() {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(MACHINE_CLEAN_RESERVED));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Reserved"));
-        assert_eq!(prop(&ha, "process").as_deref(), Some("Reserved"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
+        assert_eq!(prop(&ha, "process").as_deref(), Some("Delayed Start"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Machine clean"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("94"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("94"));
-        assert_eq!(prop(&ha, "delay_start").as_deref(), Some("58"));
+        assert_eq!(prop(&ha, "delay_start_time").as_deref(), Some("58"));
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
     }
 
@@ -1286,7 +1251,7 @@ mod tests {
     fn reports_cancel_draining_as_powered_on_and_returns_to_ready_when_it_stops() {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(CANCEL_STARTS_DRAINING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Cancel"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
         assert_eq!(prop(&ha, "process").as_deref(), Some("Cancel"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("1"));
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
@@ -1311,13 +1276,13 @@ mod tests {
         let (rec, thinq, _) = make_rec();
         thinq.emit_data(&hex_decode(EXPRESS_STARTS_RUNNING));
         let ha = &rec.inner;
-        assert_eq!(prop(ha, "status").as_deref(), Some("Washing"));
+        assert_eq!(prop(ha, "status").as_deref(), Some("Running"));
         assert_eq!(prop(ha, "power").as_deref(), Some("ON"));
         assert_eq!(prop(ha, "course").as_deref(), Some("Express"));
         assert_eq!(prop(ha, "initial_time").as_deref(), Some("106"));
         assert_eq!(prop(ha, "remaining_time").as_deref(), Some("106"));
-        assert_eq!(prop(ha, "delay_start").as_deref(), Some("0"));
-        assert_eq!(prop(ha, "door").as_deref(), Some("CLOSE"));
+        assert_eq!(prop(ha, "delay_start_time").as_deref(), Some("0"));
+        assert_eq!(prop(ha, "door").as_deref(), Some("OFF"));
         assert_eq!(prop(ha, "extra_dry").as_deref(), Some("ON"));
         assert_eq!(prop(ha, "high_temp").as_deref(), Some("ON"));
         assert_eq!(prop(ha, "remote_start").as_deref(), Some("OFF"));
@@ -1327,7 +1292,7 @@ mod tests {
         assert_eq!(prop(ha, "clean_reminder").as_deref(), Some("OFF"));
         assert_eq!(prop(ha, "buzzer_level").as_deref(), Some("Low"));
         assert_eq!(prop(ha, "remote_start_mode").as_deref(), Some("One-time"));
-        assert_eq!(prop(ha, "end_alarm_sound").as_deref(), Some("ON"));
+        assert_eq!(prop(ha, "end_of_cycle_tone").as_deref(), Some("ON"));
         assert_eq!(prop(ha, "brightness").as_deref(), Some("HIGH"));
         assert_eq!(prop(ha, "extra_rinse").as_deref(), Some("1"));
         assert_eq!(prop(ha, "target_extra_rinse").as_deref(), Some("0"));
@@ -1337,7 +1302,7 @@ mod tests {
                 .filter(|(p, _)| p == "status")
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![("status".into(), "Washing".into())]
+            vec![("status".into(), "Running".into())]
         );
     }
 
@@ -1348,7 +1313,7 @@ mod tests {
         assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "power").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Off"));
-        assert_eq!(prop(&ha, "door").as_deref(), Some("CLOSE"));
+        assert_eq!(prop(&ha, "door").as_deref(), Some("OFF"));
     }
 
     #[test]
@@ -1368,10 +1333,6 @@ mod tests {
         unobserved[31] = 0x18;
         unobserved[57] = 0xbb;
         thinq.emit_data(&unobserved);
-
-        let mut malformed = full;
-        malformed[2 + 48] = 0x06;
-        thinq.emit_data(&malformed);
 
         assert_eq!(prop(&ha, "status"), None);
     }
@@ -1435,7 +1396,7 @@ mod tests {
             ("salt_level", "4", "aa0ef0260004624040000000e1bb"),
             ("buzzer_level", "High", "aa0ef0260001644040000000e6bb"),
             ("buzzer_level", "Off", "aa0ef0260001604040000000fabb"),
-            ("end_alarm_sound", "OFF", "aa0ef026000122404000000024bb"),
+            ("end_of_cycle_tone", "OFF", "aa0ef026000122404000000024bb"),
             ("clean_reminder", "ON", "aa0ef02600016a4040000000ecbb"),
             ("auto_dry", "OFF", "aa0ef0260001424040000000c4bb"),
             ("brightness", "LOW", "aa0ef026000162400000000024bb"),

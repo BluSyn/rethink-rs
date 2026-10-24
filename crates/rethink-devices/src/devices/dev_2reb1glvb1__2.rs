@@ -7,12 +7,14 @@ use crate::fridge_common::{
     ST_EXPRESS_FREEZE, ST_FREEZER_SETPOINT, ST_FRIDGE_SETPOINT, ST_TEMP_UNIT,
 };
 use rethink_util::sync::Mutex;
-use rethink_core::device_base::{default_config, AabbDeviceCore};
+use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::{json, Map};
 use std::sync::Arc;
 
 const STATUS_LENGTH: usize = 17;
+const ECO_FRIENDLY: usize = 12;
+const APP_COMMAND_LENGTH: usize = 41;
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
@@ -100,6 +102,17 @@ impl Device {
             }),
         );
         components.insert(
+            "eco_friendly".into(),
+            json!({
+                "platform": "switch",
+                "unique_id": "$deviceid-eco_friendly",
+                "state_topic": "$this/eco_friendly",
+                "command_topic": "$this/eco_friendly/set",
+                "icon": "mdi:leaf",
+                "name": "Eco Friendly",
+            }),
+        );
+        components.insert(
             "door".into(),
             json!({
                 "platform": "binary_sensor",
@@ -114,11 +127,8 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
-        if buf.len() == 2 + STATUS_LENGTH * 2 && buf[0] == 0x10 && buf[1] == 0xec {
-            self.process_status(&buf[2 + STATUS_LENGTH..2 + STATUS_LENGTH * 2]);
-        }
-        if buf.len() == 2 + STATUS_LENGTH && buf[0] == 0x10 && buf[1] == 0xeb {
-            self.process_status(&buf[2..2 + STATUS_LENGTH]);
+        if let Some(rec) = process_common_status(buf, 0x10, STATUS_LENGTH) {
+            self.process_status(rec);
         }
     }
 
@@ -147,6 +157,21 @@ impl Device {
             "express_freeze",
             status_at(cur_status, ST_EXPRESS_FREEZE) == 2,
         );
+        self.core
+            .publish_on_off("eco_friendly", status_at(cur_status, ECO_FRIENDLY) == 1);
+    }
+
+    /// LG app F017 for Eco Friendly: 41 bytes of 0xFF except the eco byte and a few fixed zeros.
+    fn app_command(&self, eco: u8) {
+        let mut payload = vec![0xffu8; APP_COMMAND_LENGTH];
+        payload[ECO_FRIENDLY] = eco;
+        for index in [21usize, 22, 23, 26, 31] {
+            payload[index] = 0;
+        }
+        let mut pkt = Vec::with_capacity(2 + APP_COMMAND_LENGTH);
+        pkt.extend_from_slice(&CMD_F017);
+        pkt.extend(payload);
+        self.core.send(&pkt);
     }
 
     fn send_setting(&self, setting: &Status) {
@@ -181,6 +206,8 @@ impl Device {
         } else if prop == "express_freeze" {
             setting.insert("expressFreeze", if mqtt_value == "ON" { 2 } else { 1 });
             self.send_setting(&setting);
+        } else if prop == "eco_friendly" {
+            self.app_command(if mqtt_value == "ON" { 1 } else { 0 });
         }
     }
 }
@@ -307,6 +334,33 @@ mod tests {
         thinq.reset_recorder();
         dev.set_property("nonsense", "whatever");
         assert_eq!(thinq.outbox().len(), 0);
+    }
+
+    #[test]
+    fn eco_friendly_reads_the_current_record_and_writes_the_app_command() {
+        let (ha, thinq, dev) = make();
+        thinq.emit_data(&hex_decode(
+            "AA2810EC02070401000000020100010000000000000207040100000002010001000100000000A6BB",
+        ));
+        assert_eq!(prop(&ha, "eco_friendly").as_deref(), Some("ON"));
+        thinq.emit_data(&hex_decode(
+            "AA2810EC02070401000000020100010001000000000207040100000002010001000000000000A6BB",
+        ));
+        assert_eq!(prop(&ha, "eco_friendly").as_deref(), Some("OFF"));
+
+        thinq.reset_recorder();
+        dev.set_property("eco_friendly", "ON");
+        dev.set_property("eco_friendly", "OFF");
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(
+            sent,
+            vec![
+                "AA2FF017FFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFF000000FFFF00FFFFFFFF00FFFFFFFFFFFFFFFFFFEBBB"
+                    .to_string(),
+                "AA2FF017FFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFF000000FFFF00FFFFFFFF00FFFFFFFFFFFFFFFFFFE8BB"
+                    .to_string(),
+            ]
+        );
     }
 
     // silence unused

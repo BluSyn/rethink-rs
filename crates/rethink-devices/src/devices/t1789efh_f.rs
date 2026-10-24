@@ -1,7 +1,8 @@
 //! T1789EFH_F top-load washer (AABB).
 
 use crate::device_trait::DeviceHandler;
-use rethink_core::device_base::{default_config, AabbDeviceCore};
+use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
+use rethink_core::hex_decode;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::{json, Map};
 use std::collections::HashMap;
@@ -26,7 +27,8 @@ pub struct Device {
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
-        let core = AabbDeviceCore::new(ha, thinq.clone());
+        // Unacked, the WT7300CW repeats frames and never streams 0xEC records.
+        let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
         let this = Arc::new(Self { core: core.clone() });
 
         let mut options: Vec<&str> = status_map().values().copied().collect();
@@ -102,7 +104,7 @@ impl Device {
         }
         let phase = rec[2];
         let mins = rec[4];
-        let status = status_map().get(&phase).copied().unwrap_or("unknown");
+        let status = status_map().get(&phase).copied().unwrap_or("None");
         self.core.publish_on_off("power", phase != 0);
         self.core.publish_property("status", status.into());
         self.core
@@ -110,13 +112,9 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
-        if buf.is_empty() || buf[0] != 0x20 {
-            return;
-        }
-        if buf.len() > 1 && buf[1] == 0xec && buf.len() == 56 {
-            self.process_record(&buf[2..29]);
-        } else if buf.len() > 1 && buf[1] == 0xeb && buf.len() == 29 {
-            self.process_record(&buf[2..29]);
+        // 27-byte records. 0xEC carries previous then current; read the current one.
+        if let Some(rec) = process_common_status(buf, 0x20, 27) {
+            self.process_record(rec);
         }
     }
 
@@ -127,7 +125,10 @@ impl DeviceHandler for Device {
     fn id(&self) -> &str {
         &self.core.id
     }
-    fn start(&self) {}
+    fn start(&self) {
+        // Read-only family status query. Actuating commands are 0xF0E5.
+        self.core.send(&hex_decode("F0ED1121010000001800"));
+    }
     fn drop_device(&self) {
         self.core.drop_device();
     }
@@ -150,7 +151,9 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{Thinq2Device, hex_decode, MockHaConnection, MockThinq2Device, Metadata};
+    use rethink_core::{
+        hex_decode, hex_encode, Metadata, MockHaConnection, MockThinq2Device, Thinq2Device,
+    };
 
     const DEVICE_ID: &str = "test-id";
 
@@ -193,8 +196,8 @@ mod tests {
         thinq.emit_data(&hex_decode(
             "AA3C20EC0019050018011A0200050304000000000410000000050000006400001906001D011E0200000304000000000410000000050000006400FABB"
         ));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Wash (main)"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("24"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Rinse / Drain"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("29"));
 
         thinq.emit_data(&hex_decode(
             "AA3C20EC001902002B00340800030104000000000410000000050000006400001902002B00340800030104000000000010000000050000006400A9BB"
@@ -211,6 +214,45 @@ mod tests {
         thinq.emit_data(&hex_decode("AA0720D80EE2BB"));
         assert!(prop(&ha, "power").is_none());
         thinq.emit_data(&hex_decode("AA2120EB0000FF00000000000000000000000000000000000000000000000000BB"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("unknown"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn start_requests_status() {
+        let (_ha, thinq, dev) = make();
+        DeviceHandler::start(dev.as_ref());
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(sent, vec!["AA0EF0ED1121010000001800B5BB".to_string()]);
+    }
+
+    #[test]
+    fn acks_heartbeat_and_settings_but_not_status_records() {
+        let (_ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode("AA09207200000010BB"));
+        thinq.emit_data(&hex_decode("AA0720D8219FBB"));
+        thinq.emit_data(&hex_decode(
+            "AA2120E2031903003B003A010003030400000000400000000201000000640046BB",
+        ));
+        let acks: Vec<String> = thinq
+            .sent()
+            .iter()
+            .filter(|m| m.cmd == "ack")
+            .map(|m| m.data.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            acks,
+            vec![
+                "AA08F00072044DBB".to_string(),
+                "AA08F000D8042BBB".to_string(),
+                "AA08F000E204DDBB".to_string(),
+            ]
+        );
+        assert!(thinq.outbox().is_empty());
+
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(
+            "AA3C20EC0019050018011A0200050304000000000410000000050000006400001906001D011E0200000304000000000410000000050000006400FABB",
+        ));
+        assert!(thinq.sent().iter().all(|m| m.cmd != "ack"));
     }
 }
