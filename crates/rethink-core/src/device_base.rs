@@ -699,7 +699,13 @@ pub fn process_enveloped_status(buf: &[u8], class_byte: u8, status_length: usize
         return None;
     }
     let inner_len = u16::from_be_bytes([buf[INNER_LEN_OFFSET], buf[INNER_LEN_OFFSET + 1]]) as usize;
-    let trailing = buf.len() - ENVELOPE_MIN_LEN - inner_len;
+    let Some(body_end) = ENVELOPE_MIN_LEN.checked_add(inner_len) else {
+        return None;
+    };
+    if buf.len() < body_end {
+        return None;
+    }
+    let trailing = buf.len() - body_end;
     if trailing != 0 && trailing != 1 {
         return None;
     }
