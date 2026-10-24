@@ -78,6 +78,7 @@ register_devices! {
         t17a1efhu_f => { "T17A1EFHU_F" },
         rv13u6am8w_d_us_wifi => { "RV13U6AM8W_D_US_WIFI" },
         f3l2cyu__ => { "F3L2CYU__" },
+        f3p3cyk2_ => { "F3P3CYK2_" },
         f3l7cyk5w_us_wifi => { "F3L7CYK5W_US_WIFI" },
         rv13b6bsd_d_us_wifi => { "RV13B6BSD_D_US_WIFI" },
         rv13b6es_d_us_wifi => { "RV13B6ES_D_US_WIFI" },
