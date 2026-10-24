@@ -72,6 +72,7 @@ register_devices! {
         h11 => { "H11" },
         n17 => { "N17" },
         d0211 => { "D0211" | "D2211" },
+        d30 => { "D30" },
         t1789efh_f => { "T1789EFH_F" },
         t17a1efhu_f => { "T17A1EFHU_F" },
         rv13u6am8w_d_us_wifi => { "RV13U6AM8W_D_US_WIFI" },
