@@ -97,6 +97,7 @@ register_devices! {
         y_vb_y___w_b32qeuk => { "Y_VB_Y___W.B32QEUK" },
         sdh_gvx5_6211 => { "SDH_GVX5_6211" },
         tlve5bb => { "TLVE5BB" },
+        dev_2reft1dic4p_u => { "2REFT1DIC4P_U" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
