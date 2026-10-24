@@ -13,12 +13,33 @@ use std::sync::Arc;
 
 type PowerModeChangeHook = Box<dyn Fn() + Send + Sync>;
 
-/// EEPROM checksums at 0x2da that both report and accept display light (0x21f) with
-/// 0 = off, 1 = on. Negative cases that must stay hidden: 0x4dda, 0x4d81, 0x4dfa.
-const DISPLAY_LIGHT_EEPROM_CHECKSUMS: [u32; 5] = [0x4e88, 0x551d, 0x4c19, 0x4f58, 0x4e95];
+/// EEPROM checksum at 0x2da -> the 0x21f value that means the display is on.
+/// Negative cases that must stay hidden: 0x4dda, 0x4d81, 0x4dfa, 0x4d87.
+fn display_light_on_value(eeprom_checksum: u32) -> Option<u32> {
+    match eeprom_checksum {
+        0x4e88 | 0x551d | 0x4c19 | 0x4f58 | 0x4e95 => Some(1),
+        // H09S1D, firmware 0x55703: 0 = on, as the ThinQ app shows it.
+        0x4eb9 => Some(0),
+        _ => None,
+    }
+}
 
 fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
-    (cap_2d6 & 2) != 0 && DISPLAY_LIGHT_EEPROM_CHECKSUMS.contains(&eeprom_checksum)
+    // Bit 1 is brightness control. Bit 15 is the H09S1DA display control.
+    (cap_2d6 & 0x8002) != 0 && display_light_on_value(eeprom_checksum).is_some()
+}
+
+const MODE_PURIFY_ONLY: u32 = 46;
+const MOMENTARY_INOUTDOOR: u32 = 0x2;
+const MOMENTARY_OUTDOOR: u32 = 0x4;
+
+#[derive(Clone)]
+struct Feature {
+    name: String,
+    description: String,
+    /// `None` is always available. `Some((text, modes))` requires the AC on,
+    /// and `modes` limits that to those operating modes (46 counts as fan).
+    requirement: Option<(String, Option<Vec<u32>>)>,
 }
 
 struct Inner {
@@ -39,6 +60,8 @@ struct Inner {
     filter_do_reset: bool,
     /// Last published filter-exhausted condition (for device trigger edge).
     filter_needs_change: bool,
+    features: Vec<Feature>,
+    remembered: std::collections::HashMap<String, String>,
 }
 
 pub struct Device {
@@ -66,6 +89,8 @@ impl Device {
                 filter_changed_date: 0,
                 filter_do_reset: false,
                 filter_needs_change: false,
+                features: Vec::new(),
+                remembered: std::collections::HashMap::new(),
             }),
         });
 
@@ -260,6 +285,8 @@ impl Device {
         } else if (mode_tlv == 0 || mode_tlv == 1 || mode_tlv == 4 || mode_tlv == 6) && !idu_running
         {
             action = Some("idle");
+        } else if mode_tlv == MODE_PURIFY_ONLY {
+            action = Some("fan");
         } else if mode_tlv == 6 {
             action = Some("None");
         } else if (mode_tlv as usize) < modes2ha.len() && !modes2ha[mode_tlv as usize].is_empty() {
@@ -294,8 +321,8 @@ impl Device {
                 "temperature_unit": "C",
                 "temp_step": 0.5,
                 "precision": 0.5,
-                "min_temp": 18,
-                "max_temp": 30,
+                "min_temp": self.temp_limit(&[0x2e1, 0x2e3, 0x2eb], false).unwrap_or(18.0),
+                "max_temp": self.temp_limit(&[0x2e2, 0x2e4, 0x2ec], true).unwrap_or(30.0),
                 "fan_modes": ["auto", "very low", "low", "medium", "high", "very high"],
             }),
         );
@@ -310,8 +337,40 @@ impl Device {
             self.core.add_field(&mut config, f, true);
         }
 
-        // humidity
-        if self.has_tag(0x336) {
+        // humidity: the H09 capability bit publishes the raw percent on the climate
+        // entity. Older units that only carry tag 0x336 keep the 0.1% sensor.
+        if self.core.get_raw(0x2dd).unwrap_or(0) & 0x20 != 0 && self.has_tag(0x336) {
+            if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
+                climate.insert(
+                    "current_humidity_topic".into(),
+                    json!("$this/climate-current_humidity"),
+                );
+            }
+            config.components.insert(
+                "humidity".into(),
+                json!({
+                    "platform": "sensor",
+                    "unique_id": "$deviceid-humidity",
+                    "state_topic": "$this/humidity",
+                    "name": "Humidity",
+                    "device_class": "humidity",
+                    "unit_of_measurement": "%",
+                    "state_class": "measurement",
+                }),
+            );
+            let this = self.clone();
+            let mut f = FieldDefinition::new("climate", "current_humidity")
+                .with_id(0x336)
+                .read_only();
+            f.read_xform = Some(Box::new(|raw| Some(PropertyValue::Int(raw as i64))));
+            f.read_callback = Some(Box::new(move |val| {
+                this.core
+                    .ha
+                    .publish_property(&this.core.id, "humidity", val.clone());
+                true
+            }));
+            self.core.add_field(&mut config, f, true);
+        } else if self.has_tag(0x336) {
             if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
                 climate.insert(
                     "current_humidity_topic".into(),
@@ -389,6 +448,9 @@ impl Device {
             mode.read_xform = Some(Box::new(move |raw| {
                 if this_r.get_power_tlv() == Some(0) {
                     return Some("off".into());
+                }
+                if raw == MODE_PURIFY_ONLY {
+                    return Some("fan_only".into());
                 }
                 let modes2ha: [Option<&str>; 7] = [
                     Some("cool"),
@@ -690,7 +752,7 @@ impl Device {
         if self.has_cap_or_tag(0x2d3, 1, 0x21a) {
             self.add_timer_field(&mut config, 0x21a, "sleeptimer", "Sleep timer", "mdi:bed-clock", 15);
         }
-        if self.has_cap_or_tag(0x2d3, 4, 0x21c) || self.has_tag(0x21b) {
+        if self.has_cap_or_tag(0x2d3, 0x4 | 0x10, 0x21c) || self.has_tag(0x21b) {
             self.add_timer_field(
                 &mut config,
                 0x21c,
@@ -709,7 +771,10 @@ impl Device {
             );
         }
 
-        if self.has_cap_or_tag(0x2cc, 2, 0x20d) {
+        let active_energy = self.core.get_raw(0x34f).unwrap_or(0) & 0x400 != 0;
+        if active_energy {
+            self.add_energy_limit(&mut config);
+        } else if self.has_cap_or_tag(0x2cc, 2, 0x20d) {
             self.add_mode_dependent_config_switch(
                 &mut config,
                 0x20d,
@@ -725,17 +790,51 @@ impl Device {
         // so only the firmwares verified to report and accept this polarity expose it.
         let cap_2d6 = self.core.get_raw(0x2d6).unwrap_or(0);
         let eeprom = self.core.get_raw(0x2da).unwrap_or(0);
-        if display_light_supported(cap_2d6, eeprom) {
-            self.add_config_switch_field(
+        if let Some(on) = display_light_on_value(eeprom).filter(|_| display_light_supported(cap_2d6, eeprom))
+        {
+            self.add_config_switch_values(
                 &mut config,
                 0x21f,
                 "displaylight",
                 "Display light",
                 "mdi:lightbulb-outline",
+                on,
+                1 - on,
             );
         }
 
-        if self.has_cap_or_tag(0x2cc, 4, 0x20e) {
+        let auto_dry_setting = self.core.get_raw(0x350).unwrap_or(0) & 0x10 != 0;
+        if self.has_cap_or_tag(0x2cc, 4, 0x20e) && auto_dry_setting {
+            config
+                .components
+                .insert("autodry".into(), json!({"platform": "binary_sensor"}));
+            self.add_config_switch_values(
+                &mut config,
+                0x20e,
+                "autodrysetting",
+                "Auto dry",
+                "mdi:hair-dryer",
+                255,
+                0,
+            );
+            config.components.insert(
+                "autodryremain".into(),
+                json!({
+                    "platform": "sensor",
+                    "unique_id": "$deviceid-autodryremain",
+                    "name": "Auto dry remaining",
+                    "icon": "mdi:hair-dryer-outline",
+                    "unit_of_measurement": "%",
+                    "suggested_display_precision": 0,
+                    "entity_category": "diagnostic",
+                }),
+            );
+            let f = FieldDefinition::new("autodryremain", "")
+                .with_id(0x225)
+                .read_only();
+            self.core.add_field(&mut config, f, true);
+            self.add_autodry_fan(&mut config);
+        } else if self.has_cap_or_tag(0x2cc, 4, 0x20e) {
             self.add_config_switch_field(&mut config, 0x20e, "autodry", "Auto dry", "mdi:hair-dryer");
             config.components.insert(
                 "autodryremain".into(),
@@ -849,30 +948,31 @@ impl Device {
                 .insert("filterreset".into(), fr);
         }
 
-        if let Some(v) = self.core.get_raw(0x2b3) {
-            if v != 0 {
-                config.components.insert(
-                    "energy_current".into(),
-                    json!({
-                        "platform": "sensor",
-                        "unique_id": "$deviceid-energy_current",
-                        "state_topic": "$this/energy_current",
-                        "name": "Power",
-                        "device_class": "power",
-                        "unit_of_measurement": "W",
-                        "state_class": "measurement",
-                        "suggested_display_precision": 0,
-                    }),
-                );
-                let mut f = FieldDefinition::new("energy_current", "")
-                    .with_id(0x2b3)
-                    .read_only();
+        let accum = self.core.get_raw(0x2d5).unwrap_or(0);
+        if accum & (MOMENTARY_INOUTDOOR | MOMENTARY_OUTDOOR) != 0 {
+            config.components.insert(
+                "energy_current".into(),
+                json!({
+                    "platform": "sensor",
+                    "unique_id": "$deviceid-energy_current",
+                    "state_topic": "$this/energy_current",
+                    "name": "Power",
+                    "device_class": "power",
+                    "unit_of_measurement": "W",
+                    "state_class": "measurement",
+                    "suggested_display_precision": 0,
+                }),
+            );
+            let mut f = FieldDefinition::new("energy_current", "")
+                .with_id(0x2b3)
+                .read_only();
+            if accum & MOMENTARY_OUTDOOR == 0 {
                 f.read_xform = Some(Box::new(|raw| {
                     let w = (raw as i64) - 60;
                     Some(PropertyValue::Int(w.max(5)))
                 }));
-                self.core.add_field(&mut config, f, true);
             }
+            self.core.add_field(&mut config, f, true);
         }
 
         // Entity-based notifications (device_automation triggers are unreliable in HA UI).
@@ -889,7 +989,21 @@ impl Device {
         );
         config.components.insert(k, v);
 
+        self.add_extended_features(&mut config);
+        self.describe_standard_features(&mut config, jet_cool, jet_heat);
+        {
+            let this = self.clone();
+            self.inner.lock().mode_change_hooks.push(Box::new(move || {
+                this.publish_feature_availability();
+            }));
+            let this = self.clone();
+            self.inner.lock().power_change_hooks.push(Box::new(move || {
+                this.publish_feature_availability();
+            }));
+        }
+
         self.core.set_config(config);
+        self.publish_feature_info();
 
         if filter_life != 0 {
             self.publish_filter_data();
@@ -899,7 +1013,7 @@ impl Device {
     }
 
     fn add_timer_field(
-        &self,
+        self: &Arc<Self>,
         config: &mut DeviceDiscovery,
         id: u16,
         name: &str,
@@ -931,6 +1045,10 @@ impl Device {
             let n: f64 = val.parse().ok()?;
             Some(PropertyValue::Int((n * 60.0).round() as i64))
         }));
+        if name == "sleeptimer" {
+            let this = self.clone();
+            f.write_callback = Some(Box::new(move |_| this.get_power_tlv().unwrap_or(0) != 0));
+        }
         self.core.add_field(config, f, true);
     }
 
@@ -1094,6 +1212,37 @@ impl Device {
         );
     }
 
+    fn temp_limit(&self, tags: &[u16], max: bool) -> Option<f64> {
+        let mut values = Vec::new();
+        for tag in tags {
+            if let Some(v) = self.core.get_raw(*tag) {
+                if v != 0 {
+                    values.push(v);
+                }
+            }
+        }
+        let picked = if max {
+            values.into_iter().max()
+        } else {
+            values.into_iter().min()
+        }?;
+        Some(picked as f64 / 2.0)
+    }
+
+    fn requirement_met(&self, modes: Option<&[u32]>) -> bool {
+        if self.get_power_tlv().unwrap_or(0) == 0 {
+            return false;
+        }
+        let mut mode = self.get_mode_tlv().unwrap_or(0);
+        if mode == MODE_PURIFY_ONLY {
+            mode = 2;
+        }
+        match modes {
+            None => true,
+            Some(list) => list.contains(&mode),
+        }
+    }
+
     fn add_config_switch_field(
         &self,
         config: &mut DeviceDiscovery,
@@ -1101,6 +1250,19 @@ impl Device {
         name: &str,
         desc: &str,
         icon: &str,
+    ) {
+        self.add_config_switch_values(config, id, name, desc, icon, 1, 0);
+    }
+
+    fn add_config_switch_values(
+        &self,
+        config: &mut DeviceDiscovery,
+        id: u16,
+        name: &str,
+        desc: &str,
+        icon: &str,
+        on_value: u32,
+        off_value: u32,
     ) {
         config.components.insert(
             name.into(),
@@ -1114,15 +1276,472 @@ impl Device {
             }),
         );
         let mut f = FieldDefinition::new(name, "").with_id(id);
-        f.write_xform = Some(Box::new(|val| {
+        f.write_xform = Some(Box::new(move |val| {
             Some(if val == "ON" {
-                1i64.into()
+                i64::from(on_value).into()
             } else {
-                0i64.into()
+                i64::from(off_value).into()
             })
         }));
+        f.read_xform = Some(Box::new(move |raw| {
+            Some(if raw == off_value {
+                "OFF".into()
+            } else {
+                "ON".into()
+            })
+        }));
+        self.core.add_field(config, f, true);
+    }
+
+    fn describe_feature(
+        &self,
+        config: &mut DeviceDiscovery,
+        name: &str,
+        description: &str,
+        requirement: Option<(String, Option<Vec<u32>>)>,
+    ) {
+        let Some(Value::Object(comp)) = config.components.get_mut(name) else {
+            return;
+        };
+        comp.insert(
+            "json_attributes_topic".into(),
+            json!(format!("$this/{name}-attributes")),
+        );
+        if requirement.is_some() {
+            comp.insert("availability_mode".into(), json!("all"));
+            comp.insert(
+                "availability".into(),
+                json!([
+                    {"topic": "$this/availability"},
+                    {"topic": "$rethink/availability"},
+                    {"topic": format!("$this/{name}-available")},
+                ]),
+            );
+        }
+        self.inner.lock().features.push(Feature {
+            name: name.into(),
+            description: description.into(),
+            requirement,
+        });
+    }
+
+    fn publish_feature_info(&self) {
+        let features = self.inner.lock().features.clone();
+        for feature in &features {
+            let requires = feature
+                .requirement
+                .as_ref()
+                .map(|(text, _)| text.as_str())
+                .unwrap_or("nothing, always available");
+            let body = json!({
+                "description": feature.description,
+                "requires": requires,
+            })
+            .to_string();
+            self.core.ha.publish_property(
+                &self.core.id,
+                &format!("{}-attributes", feature.name),
+                body.into(),
+            );
+        }
+        self.publish_feature_availability();
+    }
+
+    fn publish_feature_availability(&self) {
+        let features = self.inner.lock().features.clone();
+        for feature in &features {
+            let Some((_, modes)) = &feature.requirement else {
+                continue;
+            };
+            let online = self.requirement_met(modes.as_deref());
+            self.core.ha.publish_property(
+                &self.core.id,
+                &format!("{}-available", feature.name),
+                (if online { "online" } else { "offline" }).into(),
+            );
+        }
+        self.replay_remembered();
+    }
+
+    fn replay_remembered(&self) {
+        let pending: Vec<(String, String, Option<Vec<u32>>)> = {
+            let inner = self.inner.lock();
+            inner
+                .remembered
+                .iter()
+                .filter_map(|(name, value)| {
+                    let feature = inner.features.iter().find(|f| f.name == *name)?;
+                    let modes = feature.requirement.as_ref().and_then(|(_, m)| m.clone());
+                    Some((name.clone(), value.clone(), modes))
+                })
+                .collect()
+        };
+        for (name, value, modes) in pending {
+            if self.requirement_met(modes.as_deref()) {
+                self.core.set_property(&format!("{name}-"), &value);
+            }
+        }
+    }
+
+    fn add_extended_features(self: &Arc<Self>, config: &mut DeviceDiscovery) {
+        let caps = |tag: u16, mask: u32| self.core.get_raw(tag).unwrap_or(0) & mask != 0;
+        if caps(0x2ca, 0x30000) {
+            let modes = vec![0, 4];
+            self.add_running_switch(config, 0x23e, "aiair", "AI Air", "mdi:robot-outline", modes.clone(), false);
+            self.describe_feature(
+                config,
+                "aiair",
+                "AI Air adjusts the fan and airflow while cooling or heating.",
+                Some(("AC on, in Cooling or Heating".into(), Some(modes))),
+            );
+        }
+        if caps(0x34f, 0x100000) && self.has_tag(0x3c9) {
+            self.add_masked_switch(config, 0x3c9, "windowdetection", "Window detection", "mdi:window-open-variant", 1);
+            self.describe_feature(
+                config,
+                "windowdetection",
+                "Window Open Detection switches the AC to Energy Control when the room temperature changes suddenly.",
+                None,
+            );
+        }
+        if caps(0x2cc, 0x200) {
+            let modes = vec![4];
+            self.add_running_switch(config, 0x22d, "lowheating", "Low heating", "mdi:snowflake-thermometer", modes.clone(), false);
+            self.describe_feature(
+                config,
+                "lowheating",
+                "Low Heating keeps the room at about 10 °C.",
+                Some(("AC on, in Heating".into(), Some(modes))),
+            );
+        }
+        if caps(0x374, 0x4) && self.has_tag(0x3a0) {
+            self.add_config_switch_values(config, 0x3a0, "beep", "Beep", "mdi:volume-high", 0, 1);
+            self.describe_feature(
+                config,
+                "beep",
+                "The beep when a setting changes. Off is the Mute function.",
+                None,
+            );
+        }
+        if caps(0x2f0, 0x8) && self.has_tag(0x12d) {
+            let while_on = Some(("AC on".into(), None));
+            for (id, name, desc, text) in [
+                (0x12du16, "goodsleep", "GoodSleep", "Sleep+ adjusts the temperature and fan while the Sleep timer runs."),
+                (0x12f, "goodsleepop", "GoodSleep adjusts operation", "Lets Sleep+ adjust the fan and operation."),
+                (0x133, "goodsleeptemp", "GoodSleep adjusts temperature", "Lets Sleep+ adjust the set temperature."),
+            ] {
+                if !self.has_tag(id) {
+                    continue;
+                }
+                self.add_config_switch_field(config, id, name, desc, "mdi:sleep");
+                self.describe_feature(config, name, text, while_on.clone());
+            }
+        }
+        if self.has_tag(0x351) {
+            let modes = vec![0, 2];
+            self.add_masked_running_switch(config, 0x351, "softair", "Soft Air", "mdi:weather-windy", 0x10000, modes.clone());
+            self.describe_feature(
+                config,
+                "softair",
+                "Soft Air directs the airflow upwards and runs the fan low.",
+                Some(("AC on, in Cooling or Fan".into(), Some(modes))),
+            );
+        }
+    }
+
+    fn describe_standard_features(
+        &self,
+        config: &mut DeviceDiscovery,
+        jet_cool: bool,
+        jet_heat: bool,
+    ) {
+        self.describe_feature(
+            config,
+            "autodrysetting",
+            "Auto Clean+ dries the indoor unit after Cooling or Dry.",
+            None,
+        );
+        self.describe_feature(
+            config,
+            "autodryfan",
+            "Fan speed used while Auto Clean+ dries the indoor unit.",
+            None,
+        );
+        if config.components.contains_key("displaylight") {
+            self.describe_feature(
+                config,
+                "displaylight",
+                "The indoor unit display.",
+                None,
+            );
+        }
+        if config.components.contains_key("sleeptimer") {
+            self.describe_feature(
+                config,
+                "sleeptimer",
+                "Turns the AC off after the set time.",
+                Some(("AC on".into(), None)),
+            );
+        }
+        for name in ["starttimer", "stoptimer"] {
+            self.describe_feature(
+                config,
+                name,
+                "Turns the AC on or off after the set time (up to 24 h).",
+                None,
+            );
+        }
+        let mut jet_modes = Vec::new();
+        if jet_cool {
+            jet_modes.push(0);
+        }
+        if jet_heat {
+            jet_modes.push(4);
+        }
+        if !jet_modes.is_empty() && config.components.contains_key("jet") {
+            let text = if jet_modes.len() == 2 {
+                "AC on, in Cooling or Heating"
+            } else if jet_modes[0] == 0 {
+                "AC on, in Cooling"
+            } else {
+                "AC on, in Heating"
+            };
+            self.describe_feature(
+                config,
+                "jet",
+                "Jet runs strong airflow for 30 minutes.",
+                Some((text.into(), Some(jet_modes))),
+            );
+        }
+        if config.components.contains_key("energysave") {
+            self.describe_feature(
+                config,
+                "energysave",
+                "Energy saving reduces the power input.",
+                Some(("AC on, in Cooling".into(), Some(vec![0]))),
+            );
+        }
+        if config.components.contains_key("airclean") {
+            self.describe_feature(
+                config,
+                "airclean",
+                "Air purify runs the ionizer. It can be set at any time.",
+                None,
+            );
+        }
+    }
+
+    fn add_running_switch(
+        self: &Arc<Self>,
+        config: &mut DeviceDiscovery,
+        id: u16,
+        name: &str,
+        desc: &str,
+        icon: &str,
+        modes: Vec<u32>,
+        remember: bool,
+    ) {
+        self.add_gated_field(config, id, name, desc, icon, modes, remember, false, 0, None);
+    }
+
+    fn add_masked_running_switch(
+        self: &Arc<Self>,
+        config: &mut DeviceDiscovery,
+        id: u16,
+        name: &str,
+        desc: &str,
+        icon: &str,
+        mask: u32,
+        modes: Vec<u32>,
+    ) {
+        self.add_gated_field(config, id, name, desc, icon, modes, false, true, mask, None);
+    }
+
+    fn add_masked_switch(
+        &self,
+        config: &mut DeviceDiscovery,
+        id: u16,
+        name: &str,
+        desc: &str,
+        icon: &str,
+        mask: u32,
+    ) {
+        config.components.insert(
+            name.into(),
+            json!({
+                "platform": "switch",
+                "unique_id": format!("$deviceid-{name}"),
+                "name": desc,
+                "icon": icon,
+                "entity_category": "config",
+                "optimistic": true,
+            }),
+        );
+        let this_w = self.core.clone();
+        let this_r = self.core.clone();
+        let mut f = FieldDefinition::new(name, "").with_id(id);
+        f.write_xform = Some(Box::new(move |val| {
+            let current = this_w.get_raw(id).unwrap_or(0);
+            let next = if val == "ON" {
+                current | mask
+            } else {
+                current & !mask
+            };
+            Some(i64::from(next).into())
+        }));
+        f.read_xform = Some(Box::new(move |raw| {
+            Some(if raw & mask != 0 { "ON".into() } else { "OFF".into() })
+        }));
+        let _ = this_r;
+        self.core.add_field(config, f, true);
+    }
+
+    fn add_energy_limit(self: &Arc<Self>, config: &mut DeviceDiscovery) {
+        config.components.insert(
+            "energylimit".into(),
+            json!({
+                "platform": "select",
+                "unique_id": "$deviceid-energylimit",
+                "name": "Active energy control",
+                "icon": "mdi:flash",
+                "entity_category": "config",
+                "options": ["off", "80%", "60%", "40%"],
+            }),
+        );
+        let modes = vec![0u32];
+        let this = self.clone();
+        let mut f = FieldDefinition::new("energylimit", "").with_id(0x20d);
+        f.write_xform = Some(Box::new(move |val| {
+            this.inner.lock().remembered.insert("energylimit".into(), val.into());
+            let code = match val {
+                "off" => 0,
+                "80%" => 80,
+                "60%" => 60,
+                "40%" => 40,
+                _ => return None,
+            };
+            Some(i64::from(code).into())
+        }));
         f.read_xform = Some(Box::new(|raw| {
-            Some(if raw != 0 { "ON".into() } else { "OFF".into() })
+            let label = match raw {
+                0 => "off",
+                80 => "80%",
+                60 => "60%",
+                40 => "40%",
+                _ => return None,
+            };
+            Some(label.into())
+        }));
+        let this_w = self.clone();
+        let modes_w = modes.clone();
+        f.write_callback = Some(Box::new(move |_| this_w.requirement_met(Some(&modes_w))));
+        let this_r = self.clone();
+        let modes_r = modes.clone();
+        f.read_callback = Some(Box::new(move |_| this_r.requirement_met(Some(&modes_r))));
+        self.core.add_field(config, f, true);
+        self.describe_feature(
+            config,
+            "energylimit",
+            "Energy Control limits the power input to 80, 60 or 40 percent.",
+            Some(("AC on, in Cooling".into(), Some(modes))),
+        );
+    }
+
+    fn add_gated_field(
+        self: &Arc<Self>,
+        config: &mut DeviceDiscovery,
+        id: u16,
+        name: &str,
+        desc: &str,
+        icon: &str,
+        modes: Vec<u32>,
+        remember: bool,
+        masked: bool,
+        mask: u32,
+        _select: Option<()>,
+    ) {
+        config.components.insert(
+            name.into(),
+            json!({
+                "platform": "switch",
+                "unique_id": format!("$deviceid-{name}"),
+                "name": desc,
+                "icon": icon,
+                "entity_category": "config",
+                "optimistic": true,
+            }),
+        );
+        let this_w = self.clone();
+        let name_w = name.to_string();
+        let mut f = FieldDefinition::new(name, "").with_id(id);
+        f.write_xform = Some(Box::new(move |val| {
+            if remember {
+                this_w.inner.lock().remembered.insert(name_w.clone(), val.into());
+            }
+            if masked {
+                let current = this_w.core.get_raw(id).unwrap_or(0);
+                let next = if val == "ON" { current | mask } else { current & !mask };
+                Some(i64::from(next).into())
+            } else {
+                Some(if val == "ON" { 1i64.into() } else { 0i64.into() })
+            }
+        }));
+        f.read_xform = Some(Box::new(move |raw| {
+            let on = if masked { raw & mask != 0 } else { raw != 0 };
+            Some(if on { "ON".into() } else { "OFF".into() })
+        }));
+        let this_gate = self.clone();
+        let modes_gate = modes.clone();
+        f.write_callback = Some(Box::new(move |_| this_gate.requirement_met(Some(&modes_gate))));
+        let this_read = self.clone();
+        let modes_read = modes;
+        f.read_callback = Some(Box::new(move |_| this_read.requirement_met(Some(&modes_read))));
+        self.core.add_field(config, f, true);
+    }
+
+    fn add_autodry_fan(&self, config: &mut DeviceDiscovery) {
+        let mask = self.core.get_raw(0x192).unwrap_or(0);
+        if mask == 0 {
+            return;
+        }
+        let table = [(2u32, "low"), (4, "medium"), (6, "high")];
+        let options: Vec<&str> = table
+            .iter()
+            .filter(|(code, _)| mask & (1 << code) != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        if options.is_empty() {
+            return;
+        }
+        config.components.insert(
+            "autodryfan".into(),
+            json!({
+                "platform": "select",
+                "unique_id": "$deviceid-autodryfan",
+                "name": "Auto dry fan",
+                "icon": "mdi:fan",
+                "entity_category": "config",
+                "options": options,
+            }),
+        );
+        let mut f = FieldDefinition::new("autodryfan", "").with_id(0x1f2);
+        f.read_xform = Some(Box::new(|raw| {
+            let label = match raw {
+                2 => "low",
+                4 => "medium",
+                6 => "high",
+                _ => return None,
+            };
+            Some(label.into())
+        }));
+        f.write_xform = Some(Box::new(|val| {
+            let code = match val {
+                "low" => 2,
+                "medium" => 4,
+                "high" => 6,
+                _ => return None,
+            };
+            Some(i64::from(code).into())
         }));
         self.core.add_field(config, f, true);
     }
@@ -1625,5 +2244,207 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(",")
         );
+    }
+
+    fn h09_ready() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        const CAPS: &str = "000004000000870201139FB001E180B05077B0A0017CD41012D3F0100400B85024B8903CB8D020B9103CBAD024BB103CB0C1B1101FB3200205B2B0030000B2C0BC08B34FABC0B4B0041020B4F0045011B5A08000B54EB6A04EB9B6F0055703B701B75020BC40BD30080000EA01BD7040480BFB0FDD046440649054FA016C81B5C0B61028B642B5C1B61020B642B5C2B61020B642B5C4B61028B642B5D02EB61020B642B5C6B6102CB6429A18";
+        const QUERY: &str = "00000400000087020419B27E407DC07E827F50347F90287EC17F00C840C8847BD0147C00C8C083408390FF83C0A880868086C0870087C18F8089407C82E8805940CD903688408A10FF8A408A80ADA00205ACC0AD4059C0A0406D4168816901D440F2700A50018200D540D580D5D03CD61020C900CAC0CB1092CB40CB89CBC0CC10CCCC40CC90908B40E801FA80BF40BFE00355BF80C0200355BE508FBE908E6240BEC0C340C0C0EE40C380CCC0CD00CD4090004B414BC14CC152C053404A4C";
+        let (ha, thinq, dev) = make_device();
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(CAPS));
+        thinq.emit_data(&hex_decode(QUERY));
+        thinq.emit_data(&hex_decode(QUERY));
+        thinq.reset_recorder();
+        (ha, thinq, dev)
+    }
+
+    fn notify(pairs: &[(u16, u32)]) -> Vec<u8> {
+        use rethink_util::packet_codec::{encode_packet, Direction, EncodeInput, TlvEncodeInput};
+        use rethink_util::tlv::Tlv;
+        encode_packet(&EncodeInput::Tlv(TlvEncodeInput {
+            direction: Direction::FromDevice,
+            tlv: pairs.iter().copied().map(|(t, v)| Tlv::new(t, v)).collect(),
+            a: None,
+            s: None,
+            byte5: None,
+            byte6: None,
+            byte7: None,
+        }))
+        .unwrap()
+        .1
+    }
+
+    #[test]
+    fn h09s1d_exposes_advertised_features_and_inverted_display_light() {
+        let (ha, thinq, dev) = h09_ready();
+        let info = ha.device(DEVICE_ID).unwrap();
+        let c = &info.config.as_ref().unwrap().components;
+        assert_eq!(c["climate"]["min_temp"].as_f64(), Some(16.0));
+        assert_eq!(c["climate"]["max_temp"].as_f64(), Some(30.0));
+        assert_eq!(
+            c["climate"]["current_humidity_topic"],
+            "$this/climate-current_humidity"
+        );
+        assert_eq!(c["humidity"]["device_class"], "humidity");
+        assert_eq!(c["energylimit"]["platform"], "select");
+        assert_eq!(c["energylimit"]["options"], json!(["off", "80%", "60%", "40%"]));
+        assert_eq!(c["autodryfan"]["options"], json!(["low", "medium", "high"]));
+        assert_eq!(
+            c["energylimit"]["availability"][2]["topic"],
+            "$this/energylimit-available"
+        );
+        assert!(c["beep"].get("availability").is_none());
+        assert_eq!(c["beep"]["json_attributes_topic"], "$this/beep-attributes");
+        assert!(c.contains_key("starttimer"));
+        assert!(c.contains_key("stoptimer"));
+        assert_eq!(c["autodry"], json!({"platform": "binary_sensor"}));
+        assert!(!c.contains_key("energysave"));
+        assert_eq!(c["energy_current"]["device_class"], "power");
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "current_humidity"),
+            Some(PropertyValue::Int(54))
+        );
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "humidity", "state"),
+            Some(PropertyValue::Int(54))
+        );
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "windowdetection", "state"),
+            Some("ON".into())
+        );
+        assert_eq!(ha.get_property(DEVICE_ID, "beep", "state"), Some("OFF".into()));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "goodsleep", "state"),
+            Some("ON".into())
+        );
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "autodrysetting", "state"),
+            Some("ON".into())
+        );
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "autodryfan", "state"),
+            Some("low".into())
+        );
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "displaylight", "state"),
+            Some("OFF".into())
+        );
+
+        thinq.emit_data(&notify(&[(0x2b3, 223)]));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "energy_current", "state"),
+            Some(PropertyValue::Int(223))
+        );
+
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "displaylight", "command", "ON");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), "010104000000650201010287C0F97C");
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "beep", "command", "OFF");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), "0101040000006502010102E8012B05");
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "autodrysetting", "command", "ON");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), "01010400000065020101038390FFB80D");
+        let _ = dev;
+    }
+
+    #[test]
+    fn h09s1d_gates_writes_and_publishes_availability() {
+        let (ha, thinq, _dev) = h09_ready();
+        ha.set_property(DEVICE_ID, "energylimit", "command", "60%");
+        assert!(thinq.outbox().is_empty());
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0)]));
+        assert!(thinq
+            .outbox()
+            .iter()
+            .any(|p| hex_encode(p) == "010104000000650201010383503C4776"));
+
+        let (ha, thinq, _dev) = h09_ready();
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 46), (0x20f, 1)]));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "mode_state"),
+            Some("fan_only".into())
+        );
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "action"),
+            Some("fan".into())
+        );
+        let props = &ha.device(DEVICE_ID).unwrap().properties;
+        assert_eq!(
+            props.get("aiair-available").map(|v| v.as_string()),
+            Some("offline".into())
+        );
+        assert_eq!(
+            props.get("softair-available").map(|v| v.as_string()),
+            Some("online".into())
+        );
+        assert!(props
+            .get("beep-attributes")
+            .unwrap()
+            .as_string()
+            .contains("nothing, always available"));
+        assert!(props
+            .get("energylimit-attributes")
+            .unwrap()
+            .as_string()
+            .contains("AC on, in Cooling"));
+
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "softair", "command", "ON");
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "0101040000006502010105D470010000C5B7"
+        );
+
+        let (ha, thinq, _dev) = h09_ready();
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0)]));
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "lowheating", "command", "ON");
+        assert!(thinq.outbox().is_empty());
+        thinq.emit_data(&notify(&[(0x1f9, 4)]));
+        assert!(thinq.outbox().iter().all(|p| hex_encode(p) != "01010400000065020101028B413DB8"));
+        ha.set_property(DEVICE_ID, "lowheating", "command", "ON");
+        assert!(thinq.outbox().iter().any(|p| hex_encode(p) == "01010400000065020101028B413DB8"));
+
+        let (ha, thinq, _dev) = h09_ready();
+        ha.set_property(DEVICE_ID, "sleeptimer", "command", "1");
+        assert!(thinq.outbox().is_empty());
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0)]));
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "sleeptimer", "command", "1");
+        assert_eq!(thinq.outbox().len(), 1);
+    }
+
+    #[test]
+    fn older_units_publish_jet_and_energy_saving_availability() {
+        const CAPS: &str = "0000040000008702017C4EB001B05077B0A0017CB0C1B103B307B34FB4C7B582B6A04D87B6F0690409B701BC40BD46B5C0B61029B642B5C1B6102EB642B5C2B6102EB642B5C4B6102CB642B5C5B6102EB642B5C6B6102CB64294E8";
+        const QUERY: &str = "00000400000087020480697E407DC07E827F50317F9029C840C881C8C08340838183C0868086C0870087C1894088408A008A408A808C808CC0ACC0D540D580C900CAC0CB108BCB40CB8CCBC0CC10CCCC40CC90968B40BF6001C7BFC0BFA001C7C000BE5089BE90881B00BEC0C300C340C0C0C3800C05";
+        let (ha, thinq, _dev) = make_device();
+        thinq.emit_data(&hex_decode(CAPS));
+        thinq.emit_data(&hex_decode(QUERY));
+        thinq.emit_data(&hex_decode(QUERY));
+        let props = &ha.device(DEVICE_ID).unwrap().properties;
+        for name in ["jet", "energysave", "sleeptimer"] {
+            assert_eq!(
+                props.get(&format!("{name}-available")).map(|v| v.as_string()).as_deref(),
+                Some("offline")
+            );
+        }
+        assert!(props.get("airclean-available").is_none());
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0)]));
+        let props = &ha.device(DEVICE_ID).unwrap().properties;
+        assert_eq!(props.get("jet-available").map(|v| v.as_string()).as_deref(), Some("online"));
+        assert_eq!(props.get("energysave-available").map(|v| v.as_string()).as_deref(), Some("online"));
+        thinq.emit_data(&notify(&[(0x1f9, 4)]));
+        let props = &ha.device(DEVICE_ID).unwrap().properties;
+        assert_eq!(props.get("energysave-available").map(|v| v.as_string()).as_deref(), Some("offline"));
+        assert!(props.get("jet-attributes").unwrap().as_string().contains("AC on, in Cooling or Heating"));
+        let c = ha.device(DEVICE_ID).unwrap();
+        let components = &c.config.as_ref().unwrap().components;
+        assert!(!components.contains_key("displaylight"));
+        assert!(!components.contains_key("aiair"));
+        assert_eq!(components["energysave"]["platform"], "switch");
+        assert_eq!(components["autodry"]["platform"], "switch");
+        assert!(!components.contains_key("autodrysetting"));
     }
 }
