@@ -112,10 +112,33 @@ struct Pending {
     options: Option<u8>,
 }
 
+pub(crate) struct Extension {
+    pub courses: &'static [(u8, &'static str)],
+    pub extra_courses: &'static [(u8, &'static str)],
+    pub extra_components: Vec<(String, Value)>,
+    pub after_state: Option<Box<dyn Fn(&AabbDeviceCore, &[u8]) + Send + Sync>>,
+    pub patch_command: Option<Box<dyn Fn(&mut [u8; 18]) + Send + Sync>>,
+    pub handle_set: Option<Box<dyn Fn(&AabbDeviceCore, &str, &str) -> bool + Send + Sync>>,
+}
+
+impl Extension {
+    fn base() -> Self {
+        Self {
+            courses: COURSES,
+            extra_courses: &[],
+            extra_components: Vec::new(),
+            after_state: None,
+            patch_command: None,
+            handle_set: None,
+        }
+    }
+}
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     reported: Mutex<Settings>,
     pending: Mutex<Pending>,
+    ext: Extension,
 }
 
 impl Device {
@@ -124,15 +147,29 @@ impl Device {
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
     ) -> Arc<Self> {
+        Self::with_extension(ha, thinq, meta, |_| Extension::base())
+    }
+
+    pub(crate) fn with_extension<F>(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        build: F,
+    ) -> Arc<Self>
+    where
+        F: FnOnce(Arc<AabbDeviceCore>) -> Extension,
+    {
         let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
+        let ext = build(core.clone());
+        let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
+        base.components = components(&ext);
+        core.set_config(base);
         let this = Arc::new(Self {
             core: core.clone(),
             reported: Mutex::new(Settings::default()),
             pending: Mutex::new(Pending::default()),
+            ext,
         });
-        let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
-        base.components = components();
-        core.set_config(base);
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
             if let Some(inner) = dev.core.process_data_envelope(data) {
@@ -142,6 +179,25 @@ impl Device {
             }
         }));
         this
+    }
+
+    fn course_name(&self, code: u8) -> &'static str {
+        self.ext
+            .courses
+            .iter()
+            .chain(self.ext.extra_courses.iter())
+            .find(|(c, _)| *c == code)
+            .map(|(_, n)| *n)
+            .unwrap_or("None")
+    }
+
+    fn course_code(&self, name: &str) -> Option<u8> {
+        self.ext
+            .courses
+            .iter()
+            .chain(self.ext.extra_courses.iter())
+            .find(|(_, n)| *n == name)
+            .map(|(c, _)| *c)
     }
 
     fn process_state(&self, s: &[u8]) {
@@ -158,7 +214,7 @@ impl Device {
         self.core
             .publish_property("status", state_name(status as usize).into());
         self.core
-            .publish_property("course", named(COURSES, s[7]).into());
+            .publish_property("course", self.course_name(s[7]).into());
         self.core
             .publish_property("smart_course", named(SMART, s[22]).into());
         self.core
@@ -218,6 +274,9 @@ impl Device {
             options,
         };
         self.publish_settings();
+        if let Some(hook) = &self.ext.after_state {
+            hook(&self.core, s);
+        }
     }
 
     fn effective(&self) -> Settings {
@@ -237,7 +296,7 @@ impl Device {
     fn publish_settings(&self) {
         let s = self.effective();
         self.core
-            .publish_property("set_course", named(COURSES, s.course).into());
+            .publish_property("set_course", self.course_name(s.course).into());
         self.core.publish_property(
             "set_temp",
             temperature_value(s.temp as usize).unwrap_or("None").into(),
@@ -270,7 +329,7 @@ impl Device {
 
     fn programme_command(&self) -> [u8; 18] {
         let s = self.effective();
-        [
+        let mut cmd = [
             0xf0,
             0x26,
             s.course,
@@ -289,7 +348,11 @@ impl Device {
             0,
             0,
             0,
-        ]
+        ];
+        if let Some(patch) = &self.ext.patch_command {
+            patch(&mut cmd);
+        }
+        cmd
     }
 
     fn set_option(&self, bit: u8, on: bool) {
@@ -299,6 +362,14 @@ impl Device {
     }
 
     pub fn set_property(&self, prop: &str, mqtt_value: &str) {
+        if self
+            .ext
+            .handle_set
+            .as_ref()
+            .is_some_and(|hook| hook(&self.core, prop, mqtt_value))
+        {
+            return;
+        }
         set_power_start_pause(&self.core, prop, mqtt_value);
         match prop {
             "run_programme" => {
@@ -307,7 +378,7 @@ impl Device {
                 self.core.send(&cmd);
             }
             "set_course" => {
-                if let Some(code) = code_of(COURSES, mqtt_value) {
+                if let Some(code) = self.course_code(mqtt_value) {
                     self.pending.lock().course = Some(code);
                 }
                 self.publish_settings();
@@ -387,16 +458,20 @@ pub fn create(
     Device::new(ha, thinq, meta)
 }
 
+pub(crate) fn dial_courses() -> &'static [(u8, &'static str)] {
+    COURSES
+}
+
+pub(crate) fn smart_course_name(code: u8) -> &'static str {
+    named(SMART, code)
+}
+
 fn named(table: &'static [(u8, &'static str)], code: u8) -> &'static str {
     table
         .iter()
         .find(|(c, _)| *c == code)
         .map(|(_, n)| *n)
         .unwrap_or("None")
-}
-
-fn code_of(table: &'static [(u8, &'static str)], name: &str) -> Option<u8> {
-    table.iter().find(|(_, n)| *n == name).map(|(c, _)| *c)
 }
 
 fn indexed(table: &'static [&'static str], code: u8) -> &'static str {
@@ -419,7 +494,13 @@ fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
     table.iter().map(|(_, n)| *n).collect()
 }
 
-fn components() -> std::collections::HashMap<String, Value> {
+fn components(ext: &Extension) -> std::collections::HashMap<String, Value> {
+    let course_names: Vec<&str> = ext
+        .courses
+        .iter()
+        .chain(ext.extra_courses.iter())
+        .map(|(_, n)| *n)
+        .collect();
     let mut c = Map::new();
     let add = |c: &mut Map<String, Value>, k: &str, v: Value| {
         c.insert(k.into(), v);
@@ -522,7 +603,7 @@ fn components() -> std::collections::HashMap<String, Value> {
     add(
         &mut c,
         "set_course",
-        json!({"platform":"select","unique_id":"$deviceid-set_course","state_topic":"$this/set_course","command_topic":"$this/set_course/set","name":"Set course","icon":"mdi:tune-vertical","options":labels(COURSES)}),
+        json!({"platform":"select","unique_id":"$deviceid-set_course","state_topic":"$this/set_course","command_topic":"$this/set_course/set","name":"Set course","icon":"mdi:tune-vertical","options":course_names}),
     );
     add(
         &mut c,
@@ -629,6 +710,9 @@ fn components() -> std::collections::HashMap<String, Value> {
         "ai_dd",
         json!({"platform":"binary_sensor","unique_id":"$deviceid-ai_dd","state_topic":"$this/ai_dd","name":"AI DD","icon":"mdi:brain"}),
     );
+    for (key, value) in &ext.extra_components {
+        c.insert(key.clone(), value.clone());
+    }
     c.into_iter().collect()
 }
 
