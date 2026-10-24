@@ -198,6 +198,19 @@ mod tests {
         assert_eq!(prop(&ha, "course").as_deref(), Some("Duvet"));
         assert_eq!(prop(&ha, "smart_course").as_deref(), Some("Blanket"));
         assert_eq!(prop(&ha, "downloaded_program").as_deref(), Some("Blanket"));
+        let mut frame = hex_decode(DUVET);
+        frame[76] = 0x86;
+        frame[79] = 0x86;
+        let (ha, thinq, _) = feed(&[]);
+        thinq.emit_data(&frame);
+        assert_eq!(
+            prop(&ha, "smart_course").as_deref(),
+            Some("MicroPlastic Care")
+        );
+        assert_eq!(
+            prop(&ha, "downloaded_program").as_deref(),
+            Some("MicroPlastic Care")
+        );
         assert_eq!(prop(&ha, "spin").as_deref(), Some("400 rpm"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("88"));
         assert_eq!(prop(&ha, "detergent").as_deref(), Some("Medium"));

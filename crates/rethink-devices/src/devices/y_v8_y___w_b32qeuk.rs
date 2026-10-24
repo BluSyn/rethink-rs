@@ -81,6 +81,7 @@ const SMART: &[(u8, &str)] = &[
     (0x79, "Drain"),
     (0x7a, "Spin"),
     (0x84, "Silent Wash"),
+    (0x86, "MicroPlastic Care"),
 ];
 
 const OPT_TURBO: u8 = 0x01;
@@ -889,6 +890,23 @@ mod tests {
         thinq.emit_data(&frame);
         assert_eq!(prop(&ha, "course").as_deref(), Some("None"));
         assert_eq!(prop(&ha, "smart_course").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn smart_course_0x86_is_microplastic_care() {
+        let mut frame = hex_decode(PAIR_HYGIENE);
+        frame[76] = 0x86;
+        let (ha, thinq, _) = feed(&[]);
+        thinq.emit_data(&frame);
+        assert_eq!(
+            prop(&ha, "smart_course").as_deref(),
+            Some("MicroPlastic Care")
+        );
+        let opts = ha.device(ID).unwrap().config.unwrap().components["smart_course"]["options"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(opts.iter().any(|v| v == "MicroPlastic Care"));
     }
 
     #[test]
