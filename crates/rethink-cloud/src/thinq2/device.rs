@@ -11,6 +11,18 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Firmware string for Home Assistant. An empty `softVer` falls back to `appVersion`
+/// (2REBGLUB_2P__ on clip_bkn_v1.9.238 reports firmware only there).
+fn deploy_sw_version(deploy: &serde_json::Value) -> Option<String> {
+    fn nonempty(v: Option<&serde_json::Value>) -> Option<String> {
+        v.and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+    nonempty(deploy.pointer("/data/appInfo/softVer"))
+        .or_else(|| nonempty(deploy.pointer("/data/appInfo/appVersion")))
+}
+
 pub struct DeviceAcceptor {
     broker: Arc<Broker>,
     manager: Arc<DeviceManager>,
@@ -181,10 +193,7 @@ impl DeviceAcceptor {
             .and_then(|v| v.as_str())
             .unwrap_or(&model_id)
             .to_string();
-        let sw_version = deploy
-            .pointer("/data/appInfo/softVer")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let sw_version = deploy_sw_version(&deploy);
         let device_type = deploy
             .pointer("/data/appInfo/DeviceType")
             .and_then(|v| v.as_str())
@@ -432,6 +441,7 @@ mod tests {
             .expect("master 8f6d19e registers immediately on deploy/preDeploy");
         assert_eq!(dev.meta.model_id, "T17A1EFHU_F");
         assert_eq!(dev.meta.model_name, "T17A1EFHU_F");
+        assert_eq!(dev.meta.sw_version.as_deref(), Some("1.0"));
 
         acc.handle_mqtt(
             &format!("clip/message/devices/{did}"),
@@ -514,6 +524,54 @@ mod tests {
         body["cmd"] = serde_json::json!("preDeploy");
         acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 4);
         assert!(manager.get(did).is_some());
+    }
+
+    #[test]
+    fn deploy_sw_version_prefers_soft_ver_over_app_version() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "softver-wins";
+        let body = serde_json::json!({
+            "did": did,
+            "cmd": "deploy",
+            "kind": "2REBGLUB_2P__",
+            "data": {
+                "appInfo": {
+                    "modelName": "M",
+                    "softVer": "1.2.3",
+                    "appVersion": "clip_x",
+                    "DeviceType": "101"
+                }
+            }
+        });
+        acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 1);
+        let dev = manager.get(did).expect("registered");
+        assert_eq!(dev.meta.model_id, "2REBGLUB_2P__");
+        assert_eq!(dev.meta.model_name, "M");
+        assert_eq!(dev.meta.device_type.as_deref(), Some("101"));
+        assert_eq!(dev.meta.sw_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn deploy_sw_version_falls_back_to_app_version_when_soft_ver_is_empty() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "empty-softver";
+        // Captured from a 2REBGLUB_2P__ (GBBSJ2CCEP) deploy: softVer empty, firmware in appVersion.
+        let body = serde_json::json!({
+            "did": did,
+            "cmd": "deploy",
+            "kind": "2REBGLUB_2P__",
+            "data": {
+                "appInfo": {
+                    "modelName": "2REBGLUB_2P__",
+                    "softVer": "",
+                    "appVersion": "clip_bkn_v1.9.238",
+                    "DeviceType": "101"
+                }
+            }
+        });
+        acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 1);
+        let dev = manager.get(did).expect("registered");
+        assert_eq!(dev.meta.sw_version.as_deref(), Some("clip_bkn_v1.9.238"));
     }
 
     #[test]
