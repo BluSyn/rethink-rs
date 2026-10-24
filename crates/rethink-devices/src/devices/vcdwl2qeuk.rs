@@ -1,6 +1,7 @@
 //! VCDWL2QEUK front-load washer (AABB multi-frame).
 
 use crate::device_trait::DeviceHandler;
+use crate::washer_common::{spin_options, spin_value, temperature_value, TEMPERATURE_LABELS};
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::{json, Map};
@@ -36,12 +37,15 @@ const TUB_CLEAN_OFFSET: usize = 27;
 fn soil_by_level() -> HashMap<u8, &'static str> {
     HashMap::from([(1, "Light"), (3, "Medium"), (5, "Heavy")])
 }
-fn status_temp() -> HashMap<u8, i64> {
-    HashMap::from([(1, 20), (2, 30), (3, 40), (5, 60), (6, 95)])
-}
-fn status_spin() -> HashMap<u8, i64> {
-    HashMap::from([(0, 0), (1, 400), (4, 800), (6, 1000), (8, 1200), (9, 1400)])
-}
+/// Shared rinse labels. Index 0 is "Not selected", not a blank.
+const RINSES: &[&str] = &[
+    "Not selected",
+    "Normal",
+    "Rinse+",
+    "Rinse++",
+    "Normal + Hold",
+    "Rinse+ + Hold",
+];
 fn status_course() -> HashMap<u8, &'static str> {
     HashMap::from([
         (0x72, "AI Wash"), (0x2e, "Cotton"), (0x54, "Towels"), (0x4b, "Quick 14"),
@@ -51,12 +55,6 @@ fn status_course() -> HashMap<u8, &'static str> {
         (0x81, "Bedding"), (0xa9, "Cuffs & Collars"), (0x6a, "Rainy Days"), (0x42, "Silent Wash"),
         (0x07, "Baby Steam Care"), (0x73, "Down Jacket"), (0x88, "Microplastic Care"),
         (0x37, "Rinse + Spin"),
-    ])
-}
-fn skyl_by_index() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (0, "None"), (1, "Normal"), (2, "Rinse +"), (3, "Rinse ++"),
-        (4, "Rinse + Hold"), (5, "Rinse+ + Hold"),
     ])
 }
 fn status_map() -> HashMap<u8, &'static str> {
@@ -80,8 +78,8 @@ impl Device {
             ("power", json!({"platform":"binary_sensor","unique_id":"$deviceid-power","state_topic":"$this/power","name":"Power","icon":"mdi:washing-machine","device_class":"running"})),
             ("status", json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine"})),
             ("course", json!({"platform":"sensor","unique_id":"$deviceid-course","state_topic":"$this/course","name":"Course","icon":"mdi:pin-outline"})),
-            ("temp", json!({"platform":"sensor","unique_id":"$deviceid-temp","state_topic":"$this/temp","name":"Temperature","device_class":"temperature","unit_of_measurement":"°C","suggested_display_precision":0,"value_template":"{{ value if value | is_number else 'None' }}"})),
-            ("spin", json!({"platform":"sensor","unique_id":"$deviceid-spin","state_topic":"$this/spin","name":"Spin","icon":"mdi:autorenew","unit_of_measurement":"RPM","value_template":"{{ value if value | is_number else 'None' }}"})),
+            ("temp", json!({"platform":"sensor","unique_id":"$deviceid-temp","state_topic":"$this/temp","name":"Temperature","device_class":"enum","options":TEMPERATURE_LABELS})),
+            ("spin", json!({"platform":"sensor","unique_id":"$deviceid-spin","state_topic":"$this/spin","name":"Spin","icon":"mdi:autorenew","device_class":"enum","options":spin_options()})),
             ("energy", json!({"platform":"sensor","unique_id":"$deviceid-energy","state_topic":"$this/energy","name":"Energy","icon":"mdi:lightning-bolt","device_class":"energy","state_class":"total_increasing","unit_of_measurement":"Wh"})),
             ("initial_time", json!({"platform":"sensor","unique_id":"$deviceid-initial_time","state_topic":"$this/initial_time","device_class":"duration","unit_of_measurement":"min","name":"Initial time"})),
             ("remaining_time", json!({"platform":"sensor","unique_id":"$deviceid-remaining_time","state_topic":"$this/remaining_time","device_class":"duration","unit_of_measurement":"min","name":"Remaining time"})),
@@ -144,15 +142,10 @@ impl Device {
         self.core.publish_property("power", "ON".into());
         self.core.publish_property("status", status_map().get(&rec[20]).copied().unwrap_or("Running").into());
         self.core.publish_property("soil", soil_by_level().get(&rec[0]).copied().unwrap_or("unknown").into());
-        self.core.publish_property("rinse", skyl_by_index().get(&rec[SKYL_OFFSET]).copied().unwrap_or("unknown").into());
-        match status_temp().get(&rec[1]) {
-            Some(n) => self.core.publish_property("temp", (*n).into()),
-            None => self.core.publish_property("temp", "unknown".into()),
-        }
-        match status_spin().get(&rec[3]) {
-            Some(n) => self.core.publish_property("spin", (*n).into()),
-            None => self.core.publish_property("spin", "unknown".into()),
-        }
+        self.core.publish_property("rinse", RINSES.get(rec[SKYL_OFFSET] as usize).copied().unwrap_or("None").into());
+        // This model's indexes sit one below the shared tables: 0 is Cold / No spin.
+        self.core.publish_property("temp", temperature_value(rec[1] as usize + 1).unwrap_or("None").into());
+        self.core.publish_property("spin", spin_value(rec[3] as usize + 1).unwrap_or("None").into());
         self.core.publish_property("course", status_course().get(&rec[4]).copied().unwrap_or("unknown").into());
         self.core.publish_property("remaining_time", (rec[13] as i64).into());
         self.core.publish_property("initial_time", (rec[15] as i64).into());
@@ -218,6 +211,8 @@ mod tests {
         let comps = &devinfo.config.as_ref().unwrap().components;
         assert!(comps.contains_key("tub_clean_count"));
         assert!(comps.contains_key("detergent_dose"));
+        assert_eq!(comps["temp"]["device_class"], "enum");
+        assert_eq!(comps["spin"]["device_class"], "enum");
 
         // config frame: buf[3]=0x88
         let mut inner = vec![0u8; 20];
@@ -276,8 +271,8 @@ mod tests {
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         assert_eq!(prop(&ha, "soil").as_deref(), Some("Medium"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("30"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("800"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("30 °C"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("800 rpm"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Cotton"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("42"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("60"));
@@ -291,6 +286,43 @@ mod tests {
         assert_eq!(prop(&ha, "child_lock").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "tub_clean_count").as_deref(), Some("7"));
+    }
+
+    fn running_frame(temp: u8, spin: u8, rinse: u8) -> Vec<u8> {
+        let mut inner = vec![0u8; 142];
+        inner[0] = 0x20;
+        inner[3] = 0x92;
+        let off = 78;
+        inner[off] = 3;
+        inner[off + 1] = temp;
+        inner[off + 3] = spin;
+        inner[off + 4] = 0x2e;
+        inner[off + 20] = 0x0b;
+        inner[off + 26] = rinse;
+        let mut pkt = vec![0xaa, 0];
+        pkt.extend(inner);
+        pkt.push(0);
+        pkt.push(0xbb);
+        pkt
+    }
+
+    #[test]
+    fn shared_tables_are_shifted_and_unmapped_codes_are_none() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&running_frame(0, 0, 0));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("Cold"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("No spin"));
+        assert_eq!(prop(&ha, "rinse").as_deref(), Some("Not selected"));
+
+        thinq.emit_data(&running_frame(4, 2, 2));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("50 °C"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("600 rpm"));
+        assert_eq!(prop(&ha, "rinse").as_deref(), Some("Rinse+"));
+
+        thinq.emit_data(&running_frame(0xff, 0xff, 4));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "rinse").as_deref(), Some("Normal + Hold"));
     }
 
     #[test]

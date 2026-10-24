@@ -2,7 +2,8 @@
 
 use crate::device_trait::DeviceHandler;
 use crate::washer_common::{
-    course_name, drying_mode, spin_value, temperature_value, ERRORS, STATES,
+    course_name, drying_mode, spin_options, spin_value, temperature_value, ERRORS, STATES,
+    TEMPERATURE_LABELS,
 };
 use rethink_util::sync::Mutex;
 use rethink_core::device_base::default_config;
@@ -116,10 +117,8 @@ impl Device {
                     "unique_id": "$deviceid-temp",
                     "state_topic": "$this/temp",
                     "name": "Temperature",
-                    "device_class": "temperature",
-                    "unit_of_measurement": "°C",
-                    "suggested_display_precision": 0,
-                    "value_template": "{{ value if value | is_number else 'None' }}",
+                    "device_class": "enum",
+                    "options": TEMPERATURE_LABELS,
                 }),
             ),
             (
@@ -130,8 +129,8 @@ impl Device {
                     "state_topic": "$this/spin",
                     "name": "Spin",
                     "icon": "mdi:autorenew",
-                    "unit_of_measurement": "RPM",
-                    "value_template": "{{ value if value | is_number else 'None' }}",
+                    "device_class": "enum",
+                    "options": spin_options(),
                 }),
             ),
             (
@@ -413,6 +412,10 @@ mod tests {
         let opts = cfg.components["status"]["options"].as_array().unwrap();
         assert!(opts.iter().any(|v| v == "Washing"));
         assert!(opts.iter().any(|v| v == "Error"));
+        assert_eq!(cfg.components["temp"]["device_class"], "enum");
+        assert_eq!(cfg.components["spin"]["device_class"], "enum");
+        assert!(cfg.components["temp"]["options"].as_array().unwrap().iter().any(|v| v == "Cold"));
+        assert!(cfg.components["spin"]["options"].as_array().unwrap().iter().any(|v| v == "No spin"));
     }
 
     #[test]
