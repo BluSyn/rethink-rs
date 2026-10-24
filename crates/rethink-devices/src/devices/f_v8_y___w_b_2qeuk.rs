@@ -155,4 +155,17 @@ mod tests {
         dev.start();
         assert!(outbox_has_inner(&thinq, STATUS_QUERY));
     }
+
+    #[test]
+    fn wv9_alias_uses_this_handler() {
+        let factory = crate::registry::t2_factory("F_V__Y___W.B__QEUK").unwrap();
+        let ha = rethink_core::MockHaConnection::new();
+        let meta = Metadata::new("F_V__Y___W.B__QEUK", "WV9-1609B", "1");
+        let thinq = rethink_core::MockThinq2Device::new(DEVICE_ID, meta.clone());
+        let _dev = factory(ha.clone(), thinq.clone(), meta);
+        thinq.emit_data(&hex_decode(SAMPLE));
+        assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("40 °C"));
+    }
 }

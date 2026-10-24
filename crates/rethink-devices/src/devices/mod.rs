@@ -62,7 +62,7 @@ register_devices! {
         dev_2res1ve600fwc => { "2RES1VE600FWC" },
         y_v8_y___w_b32qeuk => { "Y_V8_Y___W.B32QEUK" },
         f_v8_y___w_b_2qeuk => {
-            "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK"
+            "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK" | "F_V__Y___W.B__QEUK"
         },
         y_v8_f___w_b_2qeuk => { "Y_V8_F___W.B_2QEUK" },
         vcdwl2qeuk => { "VCDWL2QEUK" },
