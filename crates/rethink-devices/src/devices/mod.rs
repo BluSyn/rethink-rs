@@ -99,6 +99,7 @@ register_devices! {
         sdh_gvx5_6211 => { "SDH_GVX5_6211" },
         tlve5bb => { "TLVE5BB" },
         dev_2reft1dic4p_u => { "2REFT1DIC4P_U" },
+        dev_2reftbdii4p_u => { "2REFTBDII4P_U" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
