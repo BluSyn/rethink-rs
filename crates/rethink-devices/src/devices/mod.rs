@@ -107,6 +107,7 @@ register_devices! {
     }
     t1 {
         wtdn3 => { "WTDN3" },
+        wtwn3 => { "WTWN3" },
         f3l2cnv4w_wifi => { "F3L2CNV4W_WIFI" },
         rac_056905_ww_t1 => { "RAC_056905_WW" },
     }
