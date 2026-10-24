@@ -5,7 +5,7 @@
 //! `auto_ack` is on: status `EB`/`EC` frames stay unacked, other frames are acked.
 
 use crate::device_trait::DeviceHandler;
-use rethink_core::device_base::{default_config, process_common_status, wrap_aabb, AabbDeviceCore};
+use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::hex_decode;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::{json, Map, Value};
@@ -274,6 +274,7 @@ fn components() -> std::collections::HashMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rethink_core::device_base::wrap_aabb;
     use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Thinq2Device};
 
     const ID: &str = "test-id";
