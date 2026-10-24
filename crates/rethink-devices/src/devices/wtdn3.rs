@@ -1,7 +1,9 @@
 //! WTDN3 — ThinQ1 washer.
 
 use crate::device_trait::DeviceHandler;
-use crate::washer_common::{course_name, drying_mode, ERRORS, SPINS, STATES, TEMPERATURES};
+use crate::washer_common::{
+    course_name, drying_mode, spin_value, temperature_value, ERRORS, STATES,
+};
 use rethink_util::sync::Mutex;
 use rethink_core::device_base::default_config;
 use rethink_core::ha::{HaConnection, PropertyValue};
@@ -274,19 +276,8 @@ impl Device {
             .unwrap_or("unknown");
         self.publish_property("course", course.into());
 
-        let spin_v = SPINS
-            .get(spin)
-            .and_then(|s| *s)
-            .map(|n| PropertyValue::Int(n as i64))
-            .unwrap_or_else(|| "unknown".into());
-        self.publish_property("spin", spin_v);
-
-        let temp_v = TEMPERATURES
-            .get(temp)
-            .and_then(|t| *t)
-            .map(|n| PropertyValue::Int(n as i64))
-            .unwrap_or_else(|| "unknown".into());
-        self.publish_property("temp", temp_v);
+        self.publish_property("spin", spin_value(spin).unwrap_or("None").into());
+        self.publish_property("temp", temperature_value(temp).unwrap_or("None").into());
 
         let dry = drying_mode(drying).unwrap_or("unknown");
         self.publish_property("drying_mode", dry.into());
@@ -448,8 +439,8 @@ mod tests {
         assert_eq!(prop(&ha, "power"), "ON".into());
         assert_eq!(prop(&ha, "status"), "Ready".into());
         assert_eq!(prop(&ha, "course"), "Cotton".into());
-        assert_eq!(prop(&ha, "spin"), PropertyValue::Int(1200));
-        assert_eq!(prop(&ha, "temp"), PropertyValue::Int(40));
+        assert_eq!(prop(&ha, "spin"), PropertyValue::Str("1200 rpm".into()));
+        assert_eq!(prop(&ha, "temp"), PropertyValue::Str("40 °C".into()));
         assert_eq!(prop(&ha, "initial_time"), PropertyValue::Int(184));
         assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(184));
         assert_eq!(prop(&ha, "error"), "OFF".into());
@@ -476,8 +467,8 @@ mod tests {
         ));
         assert_eq!(prop(&ha, "status"), "Washing".into());
         assert_eq!(prop(&ha, "course"), "Quick 30".into());
-        assert_eq!(prop(&ha, "spin"), PropertyValue::Int(800));
-        assert_eq!(prop(&ha, "temp"), PropertyValue::Int(20));
+        assert_eq!(prop(&ha, "spin"), PropertyValue::Str("800 rpm".into()));
+        assert_eq!(prop(&ha, "temp"), PropertyValue::Str("20 °C".into()));
         assert_eq!(prop(&ha, "initial_time"), PropertyValue::Int(30));
         assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(30));
     }

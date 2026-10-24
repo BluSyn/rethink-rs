@@ -124,14 +124,14 @@ impl Device {
         } else {
             if spin != 0 {
                 match spin_value(spin as usize) {
-                    Some(n) => self.core.publish_property("spin", i64::from(n).into()),
-                    None => self.core.publish_property("spin", "unknown".into()),
+                    Some(label) => self.core.publish_property("spin", label.into()),
+                    None => self.core.publish_property("spin", "None".into()),
                 }
             }
             if temp != 0 {
                 match temperature_value(temp as usize) {
-                    Some(n) => self.core.publish_property("temp", i64::from(n).into()),
-                    None => self.core.publish_property("temp", "unknown".into()),
+                    Some(label) => self.core.publish_property("temp", label.into()),
+                    None => self.core.publish_property("temp", "None".into()),
                 }
             }
         }
@@ -284,8 +284,8 @@ mod tests {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(SAMPLE_EC_COTTON_800_60));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Cotton"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("800"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("800 rpm"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("229"));
 
         let (ha, thinq, _) = make();
@@ -335,23 +335,23 @@ mod tests {
 
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(SAMPLE_EC_COTTON_800_60));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("800"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("800 rpm"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
         let mut rinsing = hex_decode(SAMPLE_EC_COTTON_800_60);
         let block = 2 + HEADER_LENGTH;
         rinsing[block + 1] = 7;
         rinsing[block + 10] = 0;
         thinq.emit_data(&rinsing);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Rinsing"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("800"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("800 rpm"));
         let mut ending = rinsing;
         ending[block + 1] = 10;
         ending[block + 9] = 0;
         thinq.emit_data(&ending);
         assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("800"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("800 rpm"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
     }
 
     #[test]

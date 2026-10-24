@@ -224,8 +224,8 @@ mod tests {
         // 1h44 remaining, 2h01 initial
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("104"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("121"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("1400"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("1400 rpm"));
         assert_eq!(prop(&ha, "steam").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "active").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "tub_clean").as_deref(), Some("10"));
@@ -253,8 +253,8 @@ mod tests {
         assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
         // Wire buf[14]=0x01 → Cotton (PR comment said Ease Care; byte is Cotton/0x01)
         assert_eq!(prop(&ha, "course").as_deref(), Some("Cotton"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("40"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("1200"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("40 °C"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("1200 rpm"));
     }
 
     #[test]

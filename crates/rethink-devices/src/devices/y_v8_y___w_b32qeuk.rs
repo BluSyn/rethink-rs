@@ -134,8 +134,8 @@ mod tests {
         thinq.emit_data(&hex_decode(SAMPLE_RUNNING));
         assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Quick 14"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("400"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("10"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("400 rpm"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("Cold"));
 
         thinq.reset_recorder();
         dev.start();

@@ -68,7 +68,7 @@ pub fn course_name(code: u32) -> Option<&'static str> {
         0xe => Some("Rinse + Spin"),
         0x12 => Some("Drum Clean"),
         0x13 => Some("Wash + Dry"),
-        0x17 => Some("Spin + Dry"),
+        0x17 => Some("Spin + Drain"),
         0x18 => Some("Drying"),
         0x1b => Some("Wool"),
         0x20 => Some("Delicate"),
@@ -107,31 +107,33 @@ pub fn course_name(code: u32) -> Option<&'static str> {
     }
 }
 
-pub const TEMPERATURES: &[Option<u32>] = &[
-    None,
-    Some(10),
-    Some(20),
-    Some(30),
-    Some(40),
-    Some(50),
-    Some(60),
-    Some(95),
+pub const TEMPERATURE_LABELS: &[&str] = &[
+    "Not selected",
+    "Cold",
+    "20 °C",
+    "30 °C",
+    "40 °C",
+    "50 °C",
+    "60 °C",
+    "95 °C",
 ];
 
-pub const SPINS: &[Option<u32>] = &[
-    None,
-    Some(0),
-    Some(400),
-    Some(500),
-    Some(700),
-    Some(800),
-    Some(900),
-    Some(1000),
-    Some(1100),
-    Some(1200),
-    Some(1400),
-    Some(1600),
+pub const SPIN_LABELS: &[&str] = &[
+    "Not selected",
+    "No spin",
+    "400 rpm",
+    "600 rpm",
+    "700 rpm",
+    "800 rpm",
+    "900 rpm",
+    "1000 rpm",
+    "1100 rpm",
+    "1200 rpm",
+    "1400 rpm",
+    "1600 rpm",
 ];
+
+pub const SOIL_LABELS: &[&str] = &["Not selected", "TurboWash", "Time save", "Normal", "Intensive"];
 
 pub fn drying_mode(code: u32) -> Option<&'static str> {
     match code {
@@ -159,12 +161,25 @@ pub fn state_name(code: usize) -> &'static str {
     STATES.get(code).and_then(|x| *x).unwrap_or("unknown")
 }
 
-pub fn temperature_value(code: usize) -> Option<u32> {
-    TEMPERATURES.get(code).and_then(|x| *x)
+pub fn temperature_value(code: usize) -> Option<&'static str> {
+    TEMPERATURE_LABELS.get(code).copied()
 }
 
-pub fn spin_value(code: usize) -> Option<u32> {
-    SPINS.get(code).and_then(|x| *x)
+pub fn spin_value(code: usize) -> Option<&'static str> {
+    if code == 255 {
+        return Some("Max");
+    }
+    SPIN_LABELS.get(code).copied()
+}
+
+pub fn soil_level(code: usize) -> Option<&'static str> {
+    SOIL_LABELS.get(code).copied()
+}
+
+pub fn spin_options() -> Vec<&'static str> {
+    let mut options = SPIN_LABELS.to_vec();
+    options.push("Max");
+    options
 }
 
 /// Non-None STATE labels for HA enum options.
@@ -189,8 +204,8 @@ pub fn fy_base_components() -> Vec<(String, serde_json::Value)> {
         ("error".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-error","state_topic":"$this/error","name":"Error","icon":"mdi:check-circle","device_class":"problem","entity_category":"diagnostic"})),
         ("error_message".into(), json!({"platform":"sensor","unique_id":"$deviceid-error-message","state_topic":"$this/error_message","name":"Error message","icon":"mdi:alert-circle-outline","device_class":"enum","entity_category":"diagnostic","options":error_options()})),
         ("course".into(), json!({"platform":"sensor","unique_id":"$deviceid-course","state_topic":"$this/course","name":"Course","icon":"mdi:pin-outline"})),
-        ("temp".into(), json!({"platform":"sensor","unique_id":"$deviceid-temp","state_topic":"$this/temp","name":"Temperature","device_class":"temperature","unit_of_measurement":"°C","suggested_display_precision":0,"value_template":"{{ value if value | is_number else 'None' }}"})),
-        ("spin".into(), json!({"platform":"sensor","unique_id":"$deviceid-spin","state_topic":"$this/spin","name":"Spin","icon":"mdi:autorenew","unit_of_measurement":"RPM","value_template":"{{ value if value | is_number else 'None' }}"})),
+        ("temp".into(), json!({"platform":"sensor","unique_id":"$deviceid-temp","state_topic":"$this/temp","name":"Temperature","device_class":"enum","options":TEMPERATURE_LABELS})),
+        ("spin".into(), json!({"platform":"sensor","unique_id":"$deviceid-spin","state_topic":"$this/spin","name":"Spin","icon":"mdi:autorenew","device_class":"enum","options":spin_options()})),
         ("remote_start".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-remote_start","state_topic":"$this/remote_start","name":"Remote start","icon":"mdi:play-circle-outline"})),
         ("door_lock".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-door_lock","state_topic":"$this/door_lock","name":"Door lock","device_class":"lock"})),
         ("initial_time".into(), json!({"platform":"sensor","unique_id":"$deviceid-initial_time","state_topic":"$this/initial_time","device_class":"duration","unit_of_measurement":"min","name":"Initial time"})),
@@ -224,9 +239,13 @@ mod tests {
 
     #[test]
     fn temp_and_spin_tables() {
-        assert_eq!(temperature_value(4), Some(40));
-        assert_eq!(temperature_value(0), None);
-        assert_eq!(spin_value(10), Some(1400));
+        assert_eq!(temperature_value(4), Some("40 °C"));
+        assert_eq!(temperature_value(1), Some("Cold"));
+        assert_eq!(temperature_value(99), None);
+        assert_eq!(spin_value(10), Some("1400 rpm"));
+        assert_eq!(spin_value(3), Some("600 rpm"));
+        assert_eq!(spin_value(255), Some("Max"));
+        assert_eq!(soil_level(4), Some("Intensive"));
         assert_eq!(course_name(0x1), Some("Cotton"));
         assert_eq!(course_name(0xffff), None);
     }

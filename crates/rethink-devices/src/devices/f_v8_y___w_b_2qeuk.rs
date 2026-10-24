@@ -2,7 +2,7 @@
 
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::{pub_error_status, pub_temp_spin, set_power_start_pause};
-use crate::washer_common::{course_name, fy_base_components, install_components};
+use crate::washer_common::{course_name, fy_base_components, install_components, soil_level, SOIL_LABELS};
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::json;
@@ -29,7 +29,8 @@ impl Device {
                 ("extra_rinse", json!({"platform":"binary_sensor","unique_id":"$deviceid-extra_rinse","state_topic":"$this/extra_rinse","name":"Extra rinse","icon":"mdi:water-plus"})),
                 ("turbowash", json!({"platform":"binary_sensor","unique_id":"$deviceid-turbowash","state_topic":"$this/turbowash","name":"TurboWash","icon":"mdi:rocket-launch"})),
                 ("prewash", json!({"platform":"binary_sensor","unique_id":"$deviceid-prewash","state_topic":"$this/prewash","name":"Pre-wash","icon":"mdi:water-sync"})),
-                ("intensive_wash", json!({"platform":"binary_sensor","unique_id":"$deviceid-intensive_wash","state_topic":"$this/intensive_wash","name":"Intensive wash","icon":"mdi:washing-machine-alert"})),
+                ("soil", json!({"platform":"sensor","unique_id":"$deviceid-soil","state_topic":"$this/soil","name":"Soil level","icon":"mdi:washing-machine","device_class":"enum","options":SOIL_LABELS})),
+                ("intensive_wash", json!({"platform":"binary_sensor"})),
                 ("steam", json!({"platform":"binary_sensor","unique_id":"$deviceid-steam","state_topic":"$this/steam","name":"Steam","icon":"mdi:kettle-steam"})),
             ],
         );
@@ -83,7 +84,12 @@ impl Device {
             self.core.publish_on_off("turbowash", options & 0x01 != 0);
             self.core.publish_on_off("prewash", options & 0x40 != 0);
             self.core.publish_on_off("steam", options & 0x80 != 0);
-            self.core.publish_on_off("intensive_wash", wash_intensity >= 4);
+            self.core.publish_property(
+                "soil",
+                soil_level(wash_intensity as usize)
+                    .unwrap_or("None")
+                    .into(),
+            );
         }
     }
 
@@ -144,7 +150,7 @@ mod tests {
         thinq.emit_data(&hex_decode(SAMPLE));
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("40"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("40 °C"));
         thinq.reset_recorder();
         dev.start();
         assert!(outbox_has_inner(&thinq, STATUS_QUERY));

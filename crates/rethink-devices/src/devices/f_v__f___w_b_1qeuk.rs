@@ -149,8 +149,8 @@ mod tests {
 
         thinq.emit_data(&hex_decode(SAMPLE_WASH));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Wash + Dry"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("1200"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("40"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("1200 rpm"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("40 °C"));
         assert_eq!(prop(&ha, "drying_mode").as_deref(), Some("Auto"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("296")); // 4*60+56
 
