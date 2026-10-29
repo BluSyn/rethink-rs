@@ -212,6 +212,13 @@ mod tests {
     }
 
     #[test]
+    fn gsx961_alias_uses_this_handler() {
+        let canonical = crate::t2_factory("2RES1VE600FWC").unwrap();
+        let alias = crate::t2_factory("2RES1VE61NFWA").unwrap();
+        assert!(std::ptr::fn_addr_eq(canonical, alias));
+    }
+
+    #[test]
     fn first_delta_publishes_celsius() {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(SAMPLE_DELTA_DOOR_OPEN));

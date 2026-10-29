@@ -59,7 +59,7 @@ register_devices! {
         dev_2res1ve61nfa2 => { "2RES1VE61NFA2" },
         dev_2reb1glvb1__2 => { "2REB1GLVB1__2" },
         dev_2rebglub_2p__ => { "2REBGLUB_2P__" },
-        dev_2res1ve600fwc => { "2RES1VE600FWC" },
+        dev_2res1ve600fwc => { "2RES1VE600FWC" | "2RES1VE61NFWA" },
         y_v8_y___w_b32qeuk => { "Y_V8_Y___W.B32QEUK" },
         f_v8_y___w_b_2qeuk => {
             "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK" | "F_V__Y___W.B__QEUK"
@@ -69,7 +69,7 @@ register_devices! {
         f_v__f___w_b_1qeuk => { "F_V__F___W.B_1QEUK" | "F_VA_F___W.B__QEUK" },
         f_vb_f___w_b_2qeuk => { "F_VB_F___W.B_2QEUK" },
         f_vb_y___w_b_2qeuk => { "F_VB_Y___W.B_2QEUK" },
-        f_c__y___w_a__qeuk => { "F_C__Y___W.A__QEUK" },
+        f_c__y___w_a__qeuk => { "F_C__Y___W.A__QEUK" | "F_V7_Y___W.A__QEUK" },
         h11 => { "H11" },
         n17 => { "N17" },
         d0211 => { "D0211" | "D2211" },

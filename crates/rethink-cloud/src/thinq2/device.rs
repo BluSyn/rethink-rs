@@ -94,24 +94,22 @@ impl DeviceAcceptor {
         let did = payload.get("did").and_then(|v| v.as_str()).unwrap_or("");
         let cmd = payload.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
 
-        if topic_ends_with_device("clip/message/devices/", &topic, did) {
-            // completeProvisioning_ack is a no-op: some RTL CLIP firmware
-            // (e.g. T17A1EFHU_F) never sends it. Registration is on deploy/preDeploy.
-            if cmd == "device_packet" {
-                let meta = self.broker.client_meta(client_id);
-                if meta
-                    .deploy_msg
-                    .as_ref()
-                    .and_then(|d| d.get("did"))
-                    .and_then(|v| v.as_str())
-                    == Some(did)
-                {
+        // Route device traffic by the topic assigned at provisioning. Some
+        // modules put a different id in the payload than the one they deployed with.
+        let meta = self.broker.client_meta(client_id);
+        if let Some(provisioned) = meta
+            .deploy_msg
+            .as_ref()
+            .and_then(|d| d.get("did"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if topic_ends_with_device("clip/message/devices/", &topic, &provisioned) {
+                if cmd == "device_packet" {
                     if let Some(dev) = self.devices.lock().get(&client_id).cloned() {
-                        // Heal: reconnect race may have removed this id from DeviceManager
-                        // while the MQTT session + acceptor still hold the device.
-                        if self.manager.get(did).is_none() {
+                        if self.manager.get(&provisioned).is_none() {
                             eprintln!(
-                                "device {did}: re-accepting into manager (was orphaned from UI/HA)"
+                                "device {provisioned}: re-accepting into manager (was orphaned from UI/HA)"
                             );
                             self.manager.accept(dev.clone());
                         }
@@ -122,9 +120,9 @@ impl DeviceAcceptor {
                         }
                     }
                 }
-            }
-            if cmd == "req_timesync" {
-                self.time_sync_request(client_id);
+                if cmd == "req_timesync" {
+                    self.time_sync_request(client_id);
+                }
             }
         }
 
@@ -587,6 +585,32 @@ mod tests {
             3,
         );
         assert!(manager.get("orphan").is_none());
+    }
+
+    #[test]
+    fn device_packet_follows_the_provisioned_topic() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "11111111-2222-3333-4444-555555555555";
+        acc.handle_mqtt(
+            &format!("clip/provisioning/devices/{did}"),
+            &deploy_json(did),
+            9,
+        );
+        let dev = manager.get(did).expect("registered");
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        dev.add_data_handler(move |_| {
+            h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let packet = serde_json::json!({
+            "did": &did[1..],
+            "cmd": "device_packet",
+            "data": "AA04BB",
+        });
+        acc.handle_mqtt(&format!("clip/message/devices/{did}"), &packet, 9);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        acc.handle_mqtt("clip/message/devices/some-other-device", &packet, 9);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub struct Device {
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
-        let core = AabbDeviceCore::new(ha, thinq.clone());
+        let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
         let this = Arc::new(Self {
             core: core.clone(),
             last_status: Mutex::new(-1),
@@ -74,28 +74,30 @@ impl Device {
         if !(is_ec || is_eb) {
             return;
         }
-        if buf.len() < 26 {
+        // 0xEC carries the previous 30-byte record, then the current one.
+        let base = if is_ec { 32 } else { 2 };
+        if buf.len() < base + 24 {
             return;
         }
-        let status = buf[4];
+        let status = buf[base + 2];
         *self.last_status.lock() = status as i32;
-        let remain_h = buf[5];
-        let remain_m = buf[6];
-        let initial_h = buf[7];
-        let initial_m = buf[8];
-        let lock_status = buf[9];
-        let error_code = buf[10];
-        let spin = buf[12];
-        let temp = buf[13];
-        let course = buf[14];
-        let delay_h = buf[16];
-        let delay_m = buf[17];
-        let steam = buf[18] & 0x80;
-        let wrinkle_care = buf[18] & 0x20;
-        let active = buf[19] & 0x40;
-        let child_lock = buf[19] & 0x80;
-        let pre_state = buf[23];
-        let tub_clean = buf[25];
+        let remain_h = buf[base + 3];
+        let remain_m = buf[base + 4];
+        let initial_h = buf[base + 5];
+        let initial_m = buf[base + 6];
+        let lock_status = buf[base + 7];
+        let error_code = buf[base + 8];
+        let spin = buf[base + 10];
+        let temp = buf[base + 11];
+        let course = buf[base + 12];
+        let delay_h = buf[base + 14];
+        let delay_m = buf[base + 15];
+        let steam = buf[base + 16] & 0x80;
+        let wrinkle_care = buf[base + 17] & 0x20;
+        let active = buf[base + 17] & 0x40;
+        let child_lock = buf[base + 17] & 0x80;
+        let pre_state = buf[base + 21];
+        let tub_clean = buf[base + 23];
 
         self.core.publish_on_off("power", status > 0);
         pub_error_status(&self.core, error_code, status, fy_refresh_name);
@@ -193,10 +195,10 @@ mod tests {
 
     // Fixtures from upstream PR #136
     const SAMPLE_WASHING_EC: &str = "AA4220EC001C06012C02010100030A0601000000004000000306000A003400000500001C06012B02010100030A0601000000004000000306000A003400000500FEBB";
-    const SAMPLE_STEAM_ON_EC: &str = "AA4220EC001C06012C02010100030A0601000000804000000306000A003400000500001C06012B02010100030A0601000000004000000306000A003400000500FEBB";
-    const SAMPLE_WRINKLE_CARE_ON_EC: &str = "AA4220EC001C06012C02010100030A0601000000204000000306000A003400000500001C06012B02010100030A0601000000004000000306000A003400000500FEBB";
-    const SAMPLE_CHILD_LOCK_ON_EC: &str = "AA4220EC001C06012C02010100030A060100000000C000000306000A003400000500001C06012B02010100030A0601000000004000000306000A003400000500FEBB";
-    const SAMPLE_REMOTE_START_ON_EC: &str = "AA4220EC001C01003B003B3200030904010000000100000001010030003400000000001C01041B041B0400030A0601000000000000000201003000340000020044BB";
+    const SAMPLE_STEAM_ON_EC: &str = "AA4220EC001C06012C02010100030A0601000000804000000306000A003400000500001C06012C02010100030A0601000000804000000306000A003400000500FEBB";
+    const SAMPLE_WRINKLE_CARE_ON_EC: &str = "AA4220EC001C06012C02010100030A0601000000006000000306000A003400000500001C06012C02010100030A0601000000006000000306000A003400000500FEBB";
+    const SAMPLE_CHILD_LOCK_ON_EC: &str = "AA4220EC001C06012C02010100030A060100000000C000000306000A003400000500001C06012C02010100030A060100000000C000000306000A003400000500FEBB";
+    const SAMPLE_REMOTE_START_ON_EC: &str = "AA4220EC001C01003B003B3200030904010000000100000001010030003400000000001C01003B003B320003090401000000010000000101003000340000000044BB";
     const SAMPLE_OFF_EC: &str = "AA4220EC001C000000020101000000000000000000000000030A000A003400000500001C0000000201010000000000000000000000000300000A0034000005009BBB";
     const SAMPLE_END_EC: &str = "AA4220EC001C0A0000020101000000000000000000400000060A000A003400000500001C0A0000020101000000000000000000000000060A000A00340000050067BB";
     const SAMPLE_WASHING_EB: &str = "AA2420EB001C06003200480100000A0601000000000000000606000A003400000500C4BB";
@@ -225,7 +227,7 @@ mod tests {
         assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Cotton"));
         // 1h44 remaining, 2h01 initial
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("104"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("103"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("121"));
         assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
         assert_eq!(prop(&ha, "spin").as_deref(), Some("1400 rpm"));
@@ -294,6 +296,46 @@ mod tests {
         assert_eq!(prop(&ha, "door_lock").as_deref(), Some("OFF"));
         thinq.emit_data(&hex_decode(SAMPLE_DOOR_UNLOCKED));
         assert_eq!(prop(&ha, "door_lock").as_deref(), Some("ON"));
+    }
+
+    fn acks(thinq: &MockThinq2Device) -> Vec<String> {
+        thinq
+            .sent()
+            .into_iter()
+            .filter(|m| m.cmd == "ack")
+            .map(|m| m.data.as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn auto_ack_covers_marker_frames_not_status() {
+        let (_ha, thinq, _) = make();
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(SAMPLE_E2_IGNORED));
+        assert!(!acks(&thinq).is_empty());
+        let n = acks(&thinq).len();
+        thinq.emit_data(&hex_decode(SAMPLE_WASHING_EC));
+        assert_eq!(acks(&thinq).len(), n);
+    }
+
+    #[test]
+    fn wv5_alias_decodes_the_a_gen_frames() {
+        let canonical = crate::t2_factory("F_C__Y___W.A__QEUK").unwrap();
+        let alias = crate::t2_factory("F_V7_Y___W.A__QEUK").unwrap();
+        assert!(std::ptr::fn_addr_eq(canonical, alias));
+        let ha = MockHaConnection::new();
+        let alias_meta = Metadata::new("F_V7_Y___W.A__QEUK", "F_V7_Y___W.A__QEUK", "2.9.61");
+        let thinq = MockThinq2Device::new(DEVICE_ID, alias_meta.clone());
+        let _dev = alias(ha.clone(), thinq.clone(), alias_meta);
+        thinq.emit_data(&hex_decode(
+            "AA4220EC001C0100000000010000000000000000000000000001002C006400000000001C04023A023A010003090401000000000000000104002C006400000000B3BB",
+        ));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Detecting"));
+        assert_eq!(prop(&ha, "course").as_deref(), Some("Cotton"));
+        assert_eq!(prop(&ha, "temp").as_deref(), Some("40 °C"));
+        assert_eq!(prop(&ha, "spin").as_deref(), Some("1200 rpm"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("178"));
+        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("178"));
     }
 
     #[test]
