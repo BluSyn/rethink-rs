@@ -1,7 +1,6 @@
 //! Shared control packets for F/Y-class AABB washers.
 
 use rethink_core::device_base::AabbDeviceCore;
-use rethink_core::hex_decode;
 
 /// Family-wide "report your state" request used by F/Y washers, US laundry, RH10, H11.
 pub const STATUS_QUERY: &[u8] = &[
@@ -37,12 +36,9 @@ pub fn set_power_start_pause(core: &AabbDeviceCore, prop: &str, mqtt_value: &str
     if prop == "pause" {
         core.send(PAUSE);
     }
+    // The button payload is not a command. Every F/Y washer sends this fixed start.
     if prop == "start" {
-        if mqtt_value.is_empty() {
-            core.send(START);
-        } else {
-            core.send(&hex_decode(mqtt_value));
-        }
+        core.send(START);
     }
 }
 
@@ -115,6 +111,38 @@ mod tests {
         assert!(hexes.iter().any(|h| h.contains("F024010100")));
         assert!(hexes.iter().any(|h| h.contains("F024040100")));
         assert!(hexes.iter().any(|h| h.contains("F024050100")));
+    }
+
+    #[test]
+    fn start_payload_is_ignored() {
+        // Master always sends F024050100. A button payload must not become the packet.
+        let models = [
+            "F_C__Y___W.A__QEUK",
+            "F_V8_Y___W.B_2QEUK",
+            "F_VB_F___W.B_2QEUK",
+            "F_VB_Y___W.B_2QEUK",
+            "F_V__F___W.B_1QEUK",
+            "Y_V8_Y___W.B32QEUK",
+            "Y_V8_F___W.B_2QEUK",
+            "G2V7_Y___W.B_2QEUK",
+        ];
+        for model in models {
+            let ha = MockHaConnection::new();
+            let meta = Metadata::new(model, model, "1");
+            let thinq = MockThinq2Device::new("id", meta.clone());
+            let factory = crate::registry::t2_factory(model).expect(model);
+            let dev = factory(ha, thinq.clone(), meta);
+            dev.set_property("start", "DEADBEEF");
+            let hexes: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+            assert!(
+                hexes.iter().any(|h| h.contains("F024050100")),
+                "{model} start packet: {hexes:?}"
+            );
+            assert!(
+                hexes.iter().all(|h| !h.contains("DEAD")),
+                "{model} echoed the payload: {hexes:?}"
+            );
+        }
     }
 
     #[test]
