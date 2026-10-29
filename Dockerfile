@@ -10,7 +10,7 @@
 #
 # time 0.3.x needs rustc >= 1.88; icu_* 2.2 needs >= 1.86.
 
-FROM rust:1.88-bookworm AS build
+FROM rust:1.99-bookworm AS build
 WORKDIR /app
 
 ENV CARGO_TERM_COLOR=always \
