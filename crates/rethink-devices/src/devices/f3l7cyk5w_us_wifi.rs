@@ -45,21 +45,49 @@ const OPT2_DOOR_LOCKED: u8 = 0x80;
 const TCL_COUNT_OFFSET: usize = 22;
 const LOAD_LEVEL_OFFSET: usize = 24;
 const PHASE_OFF: u8 = 0x00;
-const PHASE_COMPLETE: u8 = 0x3c;
+/// End (cloud code 60). Timers park on a stale minute here, same as Off.
+const PHASE_END: u8 = 0x3c;
 
-fn status_map() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (0x00, "Off"),
-        (0x05, "Initial"),
-        (0x06, "Pause"),
-        (0x0a, "Delay Wash"),
-        (0x14, "Sensing"),
-        (0x15, "Add Garments"),
-        (0x17, "Washing"),
-        (0x1e, "Rinsing"),
-        (0x28, "Spinning"),
-        (0x3c, "Complete"),
-    ])
+const STATUS_OPTIONS: &[&str] = &[
+    "Off",
+    "Standby",
+    "Paused",
+    "Delayed",
+    "Detecting",
+    "Filling",
+    "Detergent amount",
+    "Washing",
+    "Pre-wash",
+    "Rinsing",
+    "Rinse hold",
+    "Spinning",
+    "Drying",
+    "End",
+    "Refreshing",
+    "Smart Diagnosis",
+];
+
+/// Cloud state enum. Unmapped codes publish `None` rather than a guessed label.
+fn status_name(phase: u8) -> &'static str {
+    match phase {
+        0 => "Off",
+        5 | 83 => "Standby",
+        6 | 85 => "Paused",
+        10 => "Delayed",
+        20 => "Detecting",
+        21 => "Filling",
+        22 => "Detergent amount",
+        23 | 84 => "Washing",
+        24 => "Pre-wash",
+        30 => "Rinsing",
+        31 => "Rinse hold",
+        40 => "Spinning",
+        50 => "Drying",
+        60 => "End",
+        61 => "Refreshing",
+        79 => "Smart Diagnosis",
+        _ => "None",
+    }
 }
 fn course_map() -> HashMap<u8, &'static str> {
     HashMap::from([
@@ -117,7 +145,7 @@ impl Device {
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
         let comps = [
             ("power", json!({"platform":"binary_sensor","unique_id":"$deviceid-power","state_topic":"$this/power","name":"Power","icon":"mdi:washing-machine","device_class":"running"})),
-            ("status", json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine"})),
+            ("status", json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine","device_class":"enum","options":STATUS_OPTIONS})),
             ("course", json!({"platform":"sensor","unique_id":"$deviceid-course","state_topic":"$this/course","name":"Course","icon":"mdi:pin-outline"})),
             ("remaining_time", json!({"platform":"sensor","unique_id":"$deviceid-remaining_time","state_topic":"$this/remaining_time","name":"Remaining time","icon":"mdi:timer-outline","device_class":"duration","unit_of_measurement":"min"})),
             ("initial_time", json!({"platform":"sensor","unique_id":"$deviceid-initial_time","state_topic":"$this/initial_time","name":"Initial time","icon":"mdi:timer-sand","device_class":"duration","unit_of_measurement":"min"})),
@@ -164,13 +192,11 @@ impl Device {
         }
         let phase = rec[PHASE_OFFSET];
         let is_off = phase == PHASE_OFF;
-        let idle = is_off || phase == PHASE_COMPLETE;
+        let idle = is_off || phase == PHASE_END;
 
         self.core.publish_on_off("power", !is_off);
-        self.core.publish_property(
-            "status",
-            status_map().get(&phase).copied().unwrap_or("Running").into(),
-        );
+        self.core
+            .publish_property("status", status_name(phase).into());
         self.core.publish_property(
             "course",
             course_map()
@@ -340,6 +366,11 @@ mod tests {
         let devinfo = ha.device(DEVICE_ID).unwrap();
         let comps = &devinfo.config.as_ref().unwrap().components;
         assert!(comps.contains_key("power"));
+        assert_eq!(comps["status"]["device_class"], json!("enum"));
+        let opts = comps["status"]["options"].as_array().unwrap();
+        assert!(opts.iter().any(|v| v == "Standby"));
+        assert!(opts.iter().any(|v| v == "End"));
+        assert!(!opts.iter().any(|v| v == "Initial" || v == "Complete" || v == "Running"));
         assert!(comps.contains_key("course"));
         assert!(comps.contains_key("child_lock"));
         assert!(comps.contains_key("rinse_spin"));
@@ -356,12 +387,22 @@ mod tests {
     }
 
     #[test]
+    fn unknown_phase_publishes_no_guessed_label() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(
+            "aa2020eb0018ff00010000fe0000000000000000000000000005332b00001abb",
+        ));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("None"));
+        assert_ne!(prop(&ha, "status").as_deref(), Some("Running"));
+    }
+
+    #[test]
     fn course_table_not_f3l2() {
         // 0x06 is Normal here; F3L2 would call it Heavy Duty
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(DIAL_NORMAL));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Initial"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
 
         thinq.emit_data(&hex_decode(DIAL_SPEED_WASH));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Speed Wash"));
@@ -387,7 +428,7 @@ mod tests {
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("80"));
 
         thinq.emit_data(&hex_decode(CYCLE_COMPLETE));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Complete"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
         // idle phases zero timers
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("0"));
@@ -397,10 +438,10 @@ mod tests {
     fn ignores_e2_stale_replay() {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(CYCLE_COMPLETE));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Complete"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
         thinq.emit_data(&hex_decode(E2_STALE_REPLAY));
-        // must not knock back to Sensing
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Complete"));
+        // must not knock back to Detecting
+        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
     }
 
     #[test]
