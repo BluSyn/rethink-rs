@@ -70,6 +70,7 @@ register_devices! {
         f_vb_f___w_b_2qeuk => { "F_VB_F___W.B_2QEUK" },
         f_vb_y___w_b_2qeuk => { "F_VB_Y___W.B_2QEUK" },
         f_c__y___w_a__qeuk => { "F_C__Y___W.A__QEUK" | "F_V7_Y___W.A__QEUK" },
+        g2v7_y___w_b_2qeuk => { "G2V7_Y___W.B_2QEUK" },
         h11 => { "H11" },
         n17 => { "N17" },
         d0211 => { "D0211" | "D2211" },
