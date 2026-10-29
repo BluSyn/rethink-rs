@@ -56,6 +56,7 @@ register_devices! {
         dev_2ref11eidg__4 => { "2REF11EIDG__4" },
         dev_2ref11ebivpc4 => { "2REF11EBIVPC4" },
         dev_2ref12eii_p_2 => { "2REF12EII_P_2" },
+        dev_2ref11eii__m2 => { "2REF11EII__M2" },
         dev_2res1ve61nfa2 => { "2RES1VE61NFA2" },
         dev_2reb1glvb1__2 => { "2REB1GLVB1__2" },
         dev_2rebglub_2p__ => { "2REBGLUB_2P__" },
