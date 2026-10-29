@@ -44,27 +44,24 @@ const STATE_END: u8 = 16;
 
 const STATES: &[(u8, &str)] = &[
     (0, "Off"),
-    (1, "Initial"),
-    (2, "Pause"),
+    (1, "Standby"),
+    (27, "Standby"),
+    (2, "Paused"),
+    (28, "Paused"),
     (3, "Detecting"),
-    (5, "Add drain"),
+    (5, "Filling"),
     (6, "Detergent amount"),
-    (7, "Reserved"),
+    (7, "Delayed"),
     (9, "Pre-wash"),
-    (11, "Running"),
+    (11, "Washing"),
+    (29, "Washing"),
     (12, "Rinsing"),
     (13, "Rinse hold"),
     (14, "Spinning"),
     (15, "Drying"),
     (16, "End"),
     (21, "Refreshing"),
-    (23, "Error auto off"),
-    (27, "Frozen prevent initial"),
-    (28, "Frozen prevent pause"),
-    (29, "Frozen prevent running"),
-    (34, "Audible diagnosis"),
-    (35, "Auto DT open pause"),
-    (36, "Confirm start for control"),
+    (23, "Error"),
 ];
 
 const COURSES: &[(u8, &str)] = &[
@@ -193,7 +190,7 @@ impl Device {
 
         self.core.publish_on_off("power", !is_off);
         self.publish_error(rec[ERROR_OFFSET]);
-        let status = named(STATES, state).unwrap_or("Running");
+        let status = named(STATES, state).unwrap_or("None");
         self.core.publish_property("status", status.into());
         self.core.publish_property(
             "course",
@@ -644,7 +641,7 @@ mod tests {
         let (ha, thinq, _dev) = make();
         thinq.emit_data(&hex_decode(PAUSED));
         assert_eq!(prop(&ha, "power"), "ON".into());
-        assert_eq!(prop(&ha, "status"), "Pause".into());
+        assert_eq!(prop(&ha, "status"), "Paused".into());
         assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(21));
         assert_eq!(prop(&ha, "initial_time"), PropertyValue::Int(22));
 
@@ -669,7 +666,7 @@ mod tests {
         assert_eq!(prop(&ha, "run_completed"), "OFF".into());
 
         thinq.emit_data(&hex_decode(DIAL_NORMAL));
-        assert_eq!(prop(&ha, "status"), "Initial".into());
+        assert_eq!(prop(&ha, "status"), "Standby".into());
         assert_eq!(prop(&ha, "run_completed"), "OFF".into());
     }
 

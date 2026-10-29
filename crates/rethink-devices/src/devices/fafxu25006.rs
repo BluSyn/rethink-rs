@@ -76,16 +76,36 @@ fn named(v: Option<&'static str>) -> rethink_core::ha::PropertyValue {
 
 fn state_name(c: u8) -> Option<&'static str> {
     Some(match c {
-        0 => "Off", 1 => "Initial", 2 => "Pause", 3 => "Detecting", 5 => "Add drain",
-        6 => "Detergent amount", 7 => "Reserved", 8 => "Soak", 9 => "Pre-wash",
-        11 => "Running", 12 => "Rinsing", 13 => "Rinse hold", 14 => "Spinning",
-        15 => "Drying", 16 => "End", 21 => "Refreshing", 23 => "Error auto off",
-        27 => "Frozen prevent initial", 28 => "Frozen prevent pause",
-        29 => "Frozen prevent running", 34 => "Audible diagnosis",
-        35 => "Auto DT open pause", 36 => "Confirm start for control",
-        37 => "Clothing recognition", 38 => "Detergent input", 39 => "Softener input",
-        40 => "Pollution detecting", 41 => "Tub cleaning", 42 => "End remote maintain on",
-        43 => "Steam", 47 => "Laundry care", 48 => "EZDispense cleaning", 52 => "Dry cooling",
+        0 => "Off",
+        1 | 27 => "Standby",
+        2 | 28 => "Paused",
+        3 => "Detecting",
+        5 => "Filling",
+        6 => "Detergent amount",
+        7 => "Delayed",
+        8 => "Soak",
+        9 => "Pre-wash",
+        11 | 29 => "Washing",
+        12 => "Rinsing",
+        13 => "Rinse hold",
+        14 => "Spinning",
+        15 => "Drying",
+        16 => "End",
+        21 => "Refreshing",
+        23 => "Error",
+        34 => "Audible diagnosis",
+        35 => "Auto DT open pause",
+        36 => "Confirm start for control",
+        37 => "Clothing recognition",
+        38 => "Detergent input",
+        39 => "Softener input",
+        40 => "Pollution detecting",
+        41 => "Tub cleaning",
+        42 => "End remote maintain on",
+        43 => "Steam",
+        47 => "Laundry care",
+        48 => "EZDispense cleaning",
+        52 => "Dry cooling",
         _ => return None,
     })
 }
@@ -123,7 +143,7 @@ fn buzzer_name(c: u8) -> Option<&'static str> {
     match c { 0 => Some("Off"), 1 => Some("1"), 2 => Some("2"), 3 => Some("3"), 4 => Some("4"), _ => None }
 }
 
-const STATE_OPTS: &[&str] = &["Off","Initial","Pause","Detecting","Add drain","Detergent amount","Reserved","Soak","Pre-wash","Running","Rinsing","Rinse hold","Spinning","Drying","End","Refreshing","Error auto off","Frozen prevent initial","Frozen prevent pause","Frozen prevent running","Audible diagnosis","Auto DT open pause","Confirm start for control","Clothing recognition","Detergent input","Softener input","Pollution detecting","Tub cleaning","End remote maintain on","Steam","Laundry care","EZDispense cleaning","Dry cooling"];
+const STATE_OPTS: &[&str] = &["Off","Standby","Paused","Detecting","Filling","Detergent amount","Delayed","Soak","Pre-wash","Washing","Rinsing","Rinse hold","Spinning","Drying","End","Refreshing","Error","Audible diagnosis","Auto DT open pause","Confirm start for control","Clothing recognition","Detergent input","Softener input","Pollution detecting","Tub cleaning","End remote maintain on","Steam","Laundry care","EZDispense cleaning","Dry cooling"];
 const COURSE_OPTS: &[&str] = &["Allergiene","ColdWash","Color Care","Delicates","Bedding","Heavy Duty","Jeans","Kids Wear","Normal","Overnight Wash","Perm. Press","Rinse & Spin","Sanitary","Small Load","Quick Wash","Spin Only","Towels","Tub Clean","BrightWhites","Hand/Wool","Activewear","Sweat Stains","AI Wash","Pet Care","Swimwear","Dresses","Large Load","XL Load","Microplastics Care"];
 const SOIL_OPTS: &[&str] = &["Light","Light/Normal","Normal","Normal/Heavy","Heavy"];
 const SPIN_OPTS: &[&str] = &["Drain only","Low","Medium","High","Extra High"];
@@ -324,7 +344,7 @@ mod tests {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(NORMAL_IDLE));
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Initial"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Normal"));
         assert_eq!(prop(&ha, "soil").as_deref(), Some("Normal"));
         assert_eq!(prop(&ha, "temp").as_deref(), Some("Warm"));
@@ -381,7 +401,7 @@ mod tests {
     fn run_countdown_energy_and_phases() {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(STARTS_RUNNING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         assert_eq!(prop(&ha, "door_lock").as_deref(), Some("OFF"));
         thinq.emit_data(&hex_decode(DOOR_LOCKS));
         assert_eq!(prop(&ha, "door_lock").as_deref(), Some("ON"));
@@ -396,7 +416,7 @@ mod tests {
         thinq.emit_data(&hex_decode(EB_ENDS));
         assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
         thinq.emit_data(&hex_decode(PAUSES));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Pause"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Paused"));
     }
 
     #[test]
@@ -406,12 +426,12 @@ mod tests {
         assert_eq!(prop(&ha, "delay_wash").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "drum_light").as_deref(), Some("ON"));
         thinq.emit_data(&hex_decode(DELAY_STARTS));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Reserved"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Delayed"));
         thinq.emit_data(&hex_decode(DELAY_COUNTS_DOWN));
         assert_eq!(prop(&ha, "reserve_time").as_deref(), Some("30"));
         thinq.emit_data(&hex_decode(DELAY_FIRES));
         assert_eq!(prop(&ha, "delay_wash").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         thinq.emit_data(&hex_decode(DETECTING));
         assert_eq!(prop(&ha, "status").as_deref(), Some("Detecting"));
         assert_eq!(prop(&ha, "ez_dispense_detergent").as_deref(), Some("Off"));

@@ -18,7 +18,7 @@ impl Device {
         let this = Arc::new(Self { core: core.clone() });
 
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
-        install_components(&mut base, fy_base_components());
+        install_components(&mut base, fy_base_components(crate::washer_common::FY_STEAM));
         install_components(
             &mut base,
             [
@@ -66,7 +66,7 @@ impl Device {
         let drying = buf[s + 11];
 
         self.core.publish_on_off("power", status > 0);
-        pub_error_status(&self.core, error, status);
+        pub_error_status(&self.core, error, status, crate::washer_common::fy_steam_name);
         self.core.publish_property(
             "course",
             course_name(course as u32).unwrap_or("unknown").into(),
@@ -159,7 +159,7 @@ mod tests {
         pkt.push(0); pkt.push(0xbb);
         thinq.emit_data(&pkt);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("10"));
     }
 }

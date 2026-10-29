@@ -7,7 +7,8 @@
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::set_power_start_pause;
 use crate::washer_common::{
-    error_message, error_options, soil_level, spin_options, spin_value, state_name, state_options,
+    error_message, error_options, fy_steam_name, soil_level, spin_options, spin_value,
+    washer_status_options, FY_STEAM,
     temperature_value, SOIL_LABELS, TEMPERATURE_LABELS,
 };
 use rethink_core::device_base::{default_config, process_enveloped_status, AabbDeviceCore};
@@ -213,7 +214,7 @@ impl Device {
             .publish_property("error_message", error_message(s[8] as usize).into());
         self.core.publish_on_off("error", s[8] != 0);
         self.core
-            .publish_property("status", state_name(status as usize).into());
+            .publish_property("status", fy_steam_name(status).into());
         self.core
             .publish_property("course", self.course_name(s[7]).into());
         self.core
@@ -524,7 +525,7 @@ fn components(ext: &Extension) -> std::collections::HashMap<String, Value> {
     add(
         &mut c,
         "status",
-        json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine","device_class":"enum","options":state_options()}),
+        json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine","device_class":"enum","options":washer_status_options(FY_STEAM)}),
     );
     add(
         &mut c,
@@ -763,7 +764,7 @@ mod tests {
     fn initial_and_running_frames_use_the_39_byte_record() {
         let (ha, thinq, _) = feed(&[INITIAL]);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "error").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "error_message").as_deref(), Some("OK"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("218"));
@@ -836,7 +837,7 @@ mod tests {
     fn ec_pairs_publish_the_replacing_record() {
         let (ha, _, _) = feed(&[PAIR_ON]);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "cycles").as_deref(), Some("14"));
 
         let (ha, _, _) = feed(&[PAIR_COURSE]);

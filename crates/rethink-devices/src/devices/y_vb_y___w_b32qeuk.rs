@@ -160,7 +160,7 @@ mod tests {
     fn initial_state_includes_the_download_slot_and_doses() {
         let (ha, _, _) = feed(&[INITIAL]);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "error").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "error_message").as_deref(), Some("OK"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Not selected"));
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn downloaded_program_cycle_and_drawer_follow_the_current_record() {
         let (ha, _, _) = feed(&[DUVET]);
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Duvet"));
         assert_eq!(prop(&ha, "smart_course").as_deref(), Some("Blanket"));
         assert_eq!(prop(&ha, "downloaded_program").as_deref(), Some("Blanket"));
@@ -218,7 +218,7 @@ mod tests {
 
         let (ha, thinq, _) = feed(&[]);
         for (frame, status) in [
-            (MEASURING, "Measuring"),
+            (MEASURING, "Detecting"),
             (RUNNING, "Washing"),
             (RINSING, "Rinsing"),
             (SPINNING, "Spinning"),
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(prop(&ha, "error_message").as_deref(), Some("OK"));
 
         let (ha, _, _) = feed(&[MEASURING]);
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Measuring"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Detecting"));
         assert_eq!(prop(&ha, "course").as_deref(), Some("Tub Clean"));
         assert_eq!(prop(&ha, "spin").as_deref(), Some("No spin"));
         assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));

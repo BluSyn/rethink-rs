@@ -60,11 +60,11 @@ pub fn pub_temp_spin(core: &AabbDeviceCore, temp_idx: u8, spin_idx: u8) {
     );
 }
 
-pub fn pub_error_status(core: &AabbDeviceCore, error: u8, status: u8) {
-    use crate::washer_common::{error_message, state_name};
+pub fn pub_error_status(core: &AabbDeviceCore, error: u8, status: u8, name: fn(u8) -> &'static str) {
+    use crate::washer_common::error_message;
     core.publish_property("error_message", error_message(error as usize).into());
     core.publish_on_off("error", error != 0);
-    core.publish_property("status", state_name(status as usize).into());
+    core.publish_property("status", name(status).into());
 }
 
 #[cfg(test)]
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn pub_error_status_ok_and_fault() {
         let (ha, _, c) = core();
-        pub_error_status(&c, 0, 1);
+        pub_error_status(&c, 0, 1, crate::washer_common::fy_steam_name);
         assert_eq!(
             ha.device("id").unwrap().properties.get("error").map(|p| p.as_string()),
             Some("OFF".into())
@@ -131,9 +131,9 @@ mod tests {
                 .properties
                 .get("status")
                 .map(|p| p.as_string()),
-            Some("Ready".into())
+            Some("Standby".into())
         );
-        pub_error_status(&c, 1, 18);
+        pub_error_status(&c, 1, 18, crate::washer_common::fy_steam_name);
         assert_eq!(
             ha.device("id").unwrap().properties.get("error").map(|p| p.as_string()),
             Some("ON".into())

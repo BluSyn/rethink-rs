@@ -5,7 +5,8 @@
 
 use crate::device_trait::DeviceHandler;
 use crate::washer_common::{
-    error_options, spin_options, spin_value, state_options, temperature_value, ERRORS, STATES,
+    error_options, spin_options, spin_value, temperature_value, thinq1_washer_name,
+    washer_status_options, ERRORS, THINQ1_WASHER,
     TEMPERATURE_LABELS,
 };
 use rethink_core::device_base::default_config;
@@ -143,7 +144,7 @@ impl Device {
                     "name": "Status",
                     "icon": "mdi:state-machine",
                     "device_class": "enum",
-                    "options": state_options(),
+                    "options": washer_status_options(THINQ1_WASHER),
                 }),
             ),
             (
@@ -429,7 +430,7 @@ impl Device {
         self.publish_on_off("power", status > 0);
         self.publish_label("error_message", hole(ERRORS, error));
         self.publish_on_off("error", error != 0);
-        self.publish_label("status", hole(STATES, status));
+        self.publish_property("status", thinq1_washer_name(buf[0]).into());
         let course = course_label(smart_course).or_else(|| course_label(native_course));
         self.publish_label("course", course);
         self.publish_label("wash", named(WASH, wash));
@@ -592,7 +593,7 @@ mod tests {
             "04 01 0e 01 0e 12 00 03 01 06 01 00 00 00 00 40 00 00 01 01 00 29 00 4b 00 00 02 00",
         ));
         assert_eq!(prop(&ha, "power"), "ON".into());
-        assert_eq!(prop(&ha, "status"), "Measuring".into());
+        assert_eq!(prop(&ha, "status"), "Detecting".into());
         assert_eq!(prop(&ha, "course"), "Tub Clean".into());
         assert_eq!(prop(&ha, "wash"), "Normal".into());
         assert_eq!(prop(&ha, "spin"), "No spin".into());
@@ -653,7 +654,7 @@ mod tests {
         thinq.emit_data(&hex_decode(
             "01 02 0a 02 0a 01 00 03 09 04 01 00 03 00 c1 82 00 00 00 00 00 39 00 64 00 00 04 00",
         ));
-        assert_eq!(prop(&ha, "status"), "Ready".into());
+        assert_eq!(prop(&ha, "status"), "Standby".into());
         assert_eq!(prop(&ha, "course"), "Cotton".into());
         assert_eq!(prop(&ha, "spin"), "1200 rpm".into());
         assert_eq!(prop(&ha, "temp"), "40 °C".into());

@@ -161,6 +161,94 @@ pub fn state_name(code: usize) -> &'static str {
     STATES.get(code).and_then(|x| *x).unwrap_or("unknown")
 }
 
+/// Per-model status vocabulary from upstream `6881ea2`. Code 1 is Standby and
+/// code 4 is Detecting. Unmapped codes publish `None`.
+#[derive(Clone, Copy)]
+pub struct WasherStatusStyle {
+    pub fifteen: &'static str,
+    pub eleven: &'static str,
+    pub five: Option<&'static str>,
+    pub nineteen_is_paused: bool,
+}
+
+pub const FY_STEAM: WasherStatusStyle = WasherStatusStyle {
+    fifteen: "Steam softening",
+    eleven: "Cool down",
+    five: None,
+    nineteen_is_paused: false,
+};
+pub const FY_STEAM_PAUSE19: WasherStatusStyle = WasherStatusStyle {
+    nineteen_is_paused: true,
+    ..FY_STEAM
+};
+pub const FY_REFRESH: WasherStatusStyle = WasherStatusStyle {
+    fifteen: "Refreshing",
+    eleven: "Cool down",
+    five: None,
+    nineteen_is_paused: false,
+};
+pub const FY_REFRESH_PAUSE19: WasherStatusStyle = WasherStatusStyle {
+    nineteen_is_paused: true,
+    ..FY_REFRESH
+};
+pub const THINQ1_WASHER: WasherStatusStyle = WasherStatusStyle {
+    fifteen: "Steam softening",
+    eleven: "Cooling",
+    five: Some("Pre-wash"),
+    nineteen_is_paused: true,
+};
+
+pub fn washer_status(code: u8, style: WasherStatusStyle) -> &'static str {
+    match code {
+        0 => "Off",
+        1 => "Standby",
+        2 => "Paused",
+        3 => "Delayed",
+        4 => "Detecting",
+        5 => style.five.unwrap_or("None"),
+        6 => "Washing",
+        7 => "Rinsing",
+        8 => "Spinning",
+        9 => "Drying",
+        10 => "End",
+        11 => style.eleven,
+        12 => "Rinse hold",
+        14 => "Refreshing",
+        15 => style.fifteen,
+        16 => "Demo",
+        18 => "Error",
+        19 if style.nineteen_is_paused => "Paused",
+        _ => "None",
+    }
+}
+
+pub fn fy_steam_name(code: u8) -> &'static str {
+    washer_status(code, FY_STEAM)
+}
+pub fn fy_steam_pause19_name(code: u8) -> &'static str {
+    washer_status(code, FY_STEAM_PAUSE19)
+}
+pub fn fy_refresh_name(code: u8) -> &'static str {
+    washer_status(code, FY_REFRESH)
+}
+pub fn fy_refresh_pause19_name(code: u8) -> &'static str {
+    washer_status(code, FY_REFRESH_PAUSE19)
+}
+pub fn thinq1_washer_name(code: u8) -> &'static str {
+    washer_status(code, THINQ1_WASHER)
+}
+
+pub fn washer_status_options(style: WasherStatusStyle) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for code in 0..=19 {
+        let name = washer_status(code, style);
+        if name != "None" && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 pub fn temperature_value(code: usize) -> Option<&'static str> {
     TEMPERATURE_LABELS.get(code).copied()
 }
@@ -194,13 +282,13 @@ pub fn error_options() -> Vec<&'static str> {
 
 /// HA discovery shared by F_/Y_ AABB washers (power/start/pause + status/error + course/temp/spin + times).
 /// Callers insert extras (energy, drying_mode, option bits) on top.
-pub fn fy_base_components() -> Vec<(String, serde_json::Value)> {
+pub fn fy_base_components(style: WasherStatusStyle) -> Vec<(String, serde_json::Value)> {
     use serde_json::json;
     vec![
         ("power".into(), json!({"platform":"switch","unique_id":"$deviceid-power","state_topic":"$this/power","command_topic":"$this/power/set","name":"","icon":"mdi:washing-machine"})),
         ("start".into(), json!({"platform":"button","unique_id":"$deviceid-start","command_topic":"$this/start/set","payload_press":"","name":"Start","icon":"mdi:play-circle-outline"})),
         ("pause".into(), json!({"platform":"button","unique_id":"$deviceid-pause","command_topic":"$this/pause/set","payload_press":"","name":"Pause","icon":"mdi:pause-circle-outline"})),
-        ("status".into(), json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine","device_class":"enum","options":state_options()})),
+        ("status".into(), json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine","device_class":"enum","options":washer_status_options(style)})),
         ("error".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-error","state_topic":"$this/error","name":"Error","icon":"mdi:check-circle","device_class":"problem","entity_category":"diagnostic"})),
         ("error_message".into(), json!({"platform":"sensor","unique_id":"$deviceid-error-message","state_topic":"$this/error_message","name":"Error message","icon":"mdi:alert-circle-outline","device_class":"enum","entity_category":"diagnostic","options":error_options()})),
         ("course".into(), json!({"platform":"sensor","unique_id":"$deviceid-course","state_topic":"$this/course","name":"Course","icon":"mdi:pin-outline"})),
@@ -252,7 +340,7 @@ mod tests {
 
     #[test]
     fn fy_base_has_control_and_status() {
-        let keys: Vec<_> = fy_base_components().into_iter().map(|(k, _)| k).collect();
+        let keys: Vec<_> = fy_base_components(FY_STEAM).into_iter().map(|(k, _)| k).collect();
         for k in [
             "power",
             "start",

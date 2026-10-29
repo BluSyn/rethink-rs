@@ -27,7 +27,7 @@ impl Device {
         let this = Arc::new(Self { core: core.clone() });
 
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
-        install_components(&mut base, fy_base_components());
+        install_components(&mut base, fy_base_components(crate::washer_common::FY_STEAM_PAUSE19));
         install_components(
             &mut base,
             [
@@ -105,7 +105,7 @@ impl Device {
         let energy = buf[71] as i64 * 256 + buf[72] as i64;
 
         self.core.publish_on_off("power", status > 0);
-        pub_error_status(&self.core, error, status);
+        pub_error_status(&self.core, error, status, crate::washer_common::fy_steam_pause19_name);
         self.core.publish_property(
             "course",
             course_name(course as u32).unwrap_or("unknown").into(),
@@ -233,7 +233,7 @@ mod tests {
             json!({"platform": "binary_sensor"})
         );
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "error").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "detergent").as_deref(), Some("Medium"));
         assert_eq!(prop(&ha, "softener").as_deref(), Some("Medium"));

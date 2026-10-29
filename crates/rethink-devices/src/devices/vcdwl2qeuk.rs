@@ -17,7 +17,6 @@ const DOOR_FRAME_TYPE: u8 = 0x41;
 const DOOR_OFFSET: usize = 18;
 const DOOR_CLOSED: u8 = 0x02;
 const DOOR_OPEN: u8 = 0x01;
-const RECORD_B_STANDBY: u8 = 0x00;
 const SKYL_OFFSET: usize = 26;
 const DISP_DETERGENT_EN: usize = 29;
 const DISP_SOFTENER_EN: usize = 30;
@@ -57,12 +56,31 @@ fn status_course() -> HashMap<u8, &'static str> {
         (0x37, "Rinse + Spin"),
     ])
 }
-fn status_map() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (0x01, "Detecting"), (0x02, "Paused"), (0x03, "Detecting"), (0x0b, "Washing"),
-        (0x0c, "Rinsing"), (0x0e, "Spinning"), (0x10, "End"), (0x25, "Detecting"),
-        (0x26, "Washing"), (0x27, "Rinsing"), (0x29, "Drum Clean"),
-    ])
+fn status_name(code: u8) -> &'static str {
+    match code {
+        0 => "Off",
+        1 | 27 => "Standby",
+        2 | 28 | 35 => "Paused",
+        3 | 37 | 40 => "Detecting",
+        5 => "Filling",
+        6 => "Detergent amount",
+        7 => "Delayed",
+        8 => "Soaking",
+        9 => "Pre-wash",
+        11 | 29 | 38 => "Washing",
+        12 | 39 => "Rinsing",
+        13 => "Rinse hold",
+        14 => "Spinning",
+        15 => "Drying",
+        16 | 42 => "End",
+        21 | 47 | 57 => "Refreshing",
+        23 => "Error",
+        41 => "Drum Clean",
+        43 => "Steam",
+        48 => "Cleaning",
+        49 => "Waiting",
+        _ => "None",
+    }
 }
 
 pub struct Device {
@@ -131,7 +149,7 @@ impl Device {
     fn process_status(&self, buf: &[u8]) {
         if buf.len() != STATUS_FRAME_LEN { return; }
         let rec = &buf[STATUS_RECORD_OFF..STATUS_RECORD_OFF + STATUS_RECORD_LEN];
-        if rec[0] == RECORD_B_STANDBY && rec[20] == 0x00 {
+        if rec[20] == 0x00 {
             self.core.publish_property("power", "OFF".into());
             self.core.publish_property("status", "Off".into());
             self.core.publish_property("remaining_time", 0i64.into());
@@ -140,7 +158,7 @@ impl Device {
             return;
         }
         self.core.publish_property("power", "ON".into());
-        self.core.publish_property("status", status_map().get(&rec[20]).copied().unwrap_or("Running").into());
+        self.core.publish_property("status", status_name(rec[20]).into());
         self.core.publish_property("soil", soil_by_level().get(&rec[0]).copied().unwrap_or("unknown").into());
         self.core.publish_property("rinse", RINSES.get(rec[SKYL_OFFSET] as usize).copied().unwrap_or("None").into());
         // This model's indexes sit one below the shared tables: 0 is Cold / No spin.

@@ -6,7 +6,10 @@
 
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::{pub_error_status, pub_temp_spin, set_power_start_pause};
-use crate::washer_common::{course_name, fy_base_components, install_components, state_name, state_options};
+use crate::washer_common::{
+    course_name, fy_base_components, fy_refresh_name, install_components, washer_status_options,
+    FY_REFRESH,
+};
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use rethink_util::sync::Mutex;
@@ -27,7 +30,7 @@ impl Device {
         });
 
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
-        install_components(&mut base, fy_base_components());
+        install_components(&mut base, fy_base_components(FY_REFRESH));
         install_components(
             &mut base,
             [
@@ -35,7 +38,7 @@ impl Device {
                 ("wrinkle_care", json!({"platform":"binary_sensor","unique_id":"$deviceid-wrinkle_care","state_topic":"$this/wrinkle_care","name":"Wrinkle care","icon":"mdi:iron-outline"})),
                 ("child_lock", json!({"platform":"binary_sensor","unique_id":"$deviceid-child_lock","state_topic":"$this/child_lock","name":"Child lock","icon":"mdi:account-lock","device_class":"lock","entity_category":"diagnostic"})),
                 ("active", json!({"platform":"binary_sensor","unique_id":"$deviceid-active","state_topic":"$this/active","name":"Active","icon":"mdi:washing-machine"})),
-                ("pre_state", json!({"platform":"sensor","unique_id":"$deviceid-pre_state","state_topic":"$this/pre_state","name":"Pre state","icon":"mdi:state-machine","device_class":"enum","options":state_options()})),
+                ("pre_state", json!({"platform":"sensor","unique_id":"$deviceid-pre_state","state_topic":"$this/pre_state","name":"Pre state","icon":"mdi:state-machine","device_class":"enum","options":washer_status_options(FY_REFRESH)})),
                 ("tub_clean", json!({"platform":"sensor","unique_id":"$deviceid-tub-clean","state_topic":"$this/tub_clean","name":"Tub clean counter","icon":"mdi:washing-machine-alert","entity_category":"diagnostic"})),
                 ("delay_remaining", json!({"platform":"sensor","unique_id":"$deviceid-delay_remaining","state_topic":"$this/delay_remaining","device_class":"duration","unit_of_measurement":"min","name":"Delay remaining","icon":"mdi:clock-start"})),
             ],
@@ -95,7 +98,7 @@ impl Device {
         let tub_clean = buf[25];
 
         self.core.publish_on_off("power", status > 0);
-        pub_error_status(&self.core, error_code, status);
+        pub_error_status(&self.core, error_code, status, fy_refresh_name);
         self.core.publish_property(
             "course",
             course_name(course as u32).unwrap_or("unknown").into(),
@@ -121,7 +124,7 @@ impl Device {
         self.core.publish_on_off("child_lock", child_lock == 0);
         self.core.publish_property(
             "pre_state",
-            state_name(pre_state as usize).into(),
+            fy_refresh_name(pre_state).into(),
         );
         self.core
             .publish_property("tub_clean", (tub_clean as i64).into());
@@ -249,7 +252,7 @@ mod tests {
     fn remote_start_ready() {
         let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(SAMPLE_REMOTE_START_ON_EC));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Ready"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
         assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
         // Wire buf[14]=0x01 → Cotton (PR comment said Ease Care; byte is Cotton/0x01)
         assert_eq!(prop(&ha, "course").as_deref(), Some("Cotton"));

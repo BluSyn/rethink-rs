@@ -40,14 +40,25 @@ const PHASE_OFF: u8 = 0x00;
 fn status_map() -> HashMap<u8, &'static str> {
     HashMap::from([
         (0x00, "Off"),
-        (0x05, "Selecting"),
+        (0x05, "Standby"),
+        (83, "Standby"),
         (0x06, "Paused"),
-        (0x0a, "Delay Wash"),
-        (0x14, "Sensing"),
+        (85, "Paused"),
+        (0x07, "Error"),
+        (0x0a, "Delayed"),
+        (0x14, "Detecting"),
+        (21, "Filling"),
+        (22, "Detergent amount"),
         (0x17, "Washing"),
+        (84, "Washing"),
+        (24, "Pre-wash"),
         (0x1e, "Rinsing"),
+        (31, "Rinse hold"),
         (0x28, "Spinning"),
-        (0x3c, "Complete"),
+        (50, "Drying"),
+        (0x3c, "End"),
+        (61, "Refreshing"),
+        (79, "Smart Diagnosis"),
     ])
 }
 fn course_map() -> HashMap<u8, &'static str> {
@@ -155,7 +166,7 @@ impl Device {
         self.core.publish_on_off("power", !is_off);
         self.core.publish_property(
             "status",
-            status_map().get(&phase).copied().unwrap_or("Running").into(),
+            status_map().get(&phase).copied().unwrap_or("None").into(),
         );
         self.core.publish_property(
             "course",

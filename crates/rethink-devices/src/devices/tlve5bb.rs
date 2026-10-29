@@ -13,25 +13,25 @@ const STATUS_REQUEST: &str = "F0ED112101000000180411120000";
 
 const STATE: &[(u8, &str)] = &[
     (0, "Off"),
-    (1, "Initial"),
-    (2, "Pause"),
+    (1, "Standby"),
+    (27, "Standby"),
+    (2, "Paused"),
+    (28, "Paused"),
     (3, "Detecting"),
-    (5, "Add drain"),
+    (5, "Filling"),
     (6, "Detergent amount"),
-    (7, "Reserved"),
-    (8, "Soak"),
+    (7, "Delayed"),
+    (8, "Soaking"),
     (9, "Pre-wash"),
-    (11, "Running"),
+    (11, "Washing"),
+    (29, "Washing"),
     (12, "Rinsing"),
     (13, "Rinse hold"),
     (14, "Spinning"),
     (15, "Drying"),
     (16, "End"),
     (21, "Refreshing"),
-    (23, "Error auto off"),
-    (27, "Frozen prevent initial"),
-    (28, "Frozen prevent pause"),
-    (29, "Frozen prevent running"),
+    (23, "Error"),
     (34, "Audible diagnosis"),
     (35, "Auto DT open pause"),
     (36, "Confirm start for control"),
@@ -224,7 +224,7 @@ mod tests {
     fn decodes_the_current_record_from_a_paired_running_update() {
         let ha = feed(RUNNING);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("86"));
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("106"));
         assert_eq!(prop(&ha, "energy").as_deref(), Some("23"));

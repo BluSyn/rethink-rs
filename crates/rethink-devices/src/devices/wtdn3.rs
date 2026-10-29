@@ -2,7 +2,8 @@
 
 use crate::device_trait::DeviceHandler;
 use crate::washer_common::{
-    course_name, drying_mode, spin_options, spin_value, temperature_value, ERRORS, STATES,
+    course_name, drying_mode, spin_options, spin_value, temperature_value, thinq1_washer_name,
+    washer_status_options, ERRORS, THINQ1_WASHER,
     TEMPERATURE_LABELS,
 };
 use rethink_util::sync::Mutex;
@@ -26,7 +27,7 @@ impl Device {
         let id = thinq.id().to_string();
         let mut config = default_config(&meta, Some(json!({"name": "LG Washer"})));
 
-        let status_options: Vec<&str> = STATES.iter().filter_map(|s| *s).collect();
+        let status_options = washer_status_options(THINQ1_WASHER);
         let error_options: Vec<&str> = ERRORS.iter().filter_map(|s| *s).collect();
 
         config.components = [
@@ -264,11 +265,7 @@ impl Device {
         self.publish_property("error_message", err_msg.into());
         self.publish_on_off("error", error != 0);
 
-        let st = STATES
-            .get(status)
-            .and_then(|s| *s)
-            .unwrap_or("unknown");
-        self.publish_property("status", st.into());
+        self.publish_property("status", thinq1_washer_name(status as u8).into());
 
         let course = course_name(custom_course)
             .or_else(|| course_name(native_course))
@@ -440,7 +437,7 @@ mod tests {
             "01030403040100030904010000000000000003000006006400000400",
         ));
         assert_eq!(prop(&ha, "power"), "ON".into());
-        assert_eq!(prop(&ha, "status"), "Ready".into());
+        assert_eq!(prop(&ha, "status"), "Standby".into());
         assert_eq!(prop(&ha, "course"), "Cotton".into());
         assert_eq!(prop(&ha, "spin"), PropertyValue::Str("1200 rpm".into()));
         assert_eq!(prop(&ha, "temp"), PropertyValue::Str("40 °C".into()));
