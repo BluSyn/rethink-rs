@@ -20,6 +20,8 @@ fn display_light_on_value(eeprom_checksum: u32) -> Option<u32> {
         0x4e88 | 0x551d | 0x4c19 | 0x4f58 | 0x4e95 => Some(1),
         // H09S1D, firmware 0x55703: 0 = on, as the ThinQ app shows it.
         0x4eb9 => Some(0),
+        // Firmware 0x885612: 0 = on.
+        0x4aba | 0x4d06 => Some(0),
         _ => None,
     }
 }
@@ -1984,6 +1986,11 @@ mod tests {
         assert!(display_light_supported(2, 0x4f58));
         assert!(display_light_supported(2, 0x4e95));
         assert!(display_light_supported(0x6, 0x4e88));
+        // Two Brazilian units on firmware 0x885612 advertise only bit 15 and invert the value.
+        for checksum in [0x4aba, 0x4d06] {
+            assert!(display_light_supported(0x8000, checksum));
+            assert_eq!(display_light_on_value(checksum), Some(0));
+        }
         // Negative checksums, and a positive checksum with the capability bit clear.
         assert!(!display_light_supported(2, 0x4dda));
         assert!(!display_light_supported(2, 0x4d81));
