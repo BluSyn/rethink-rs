@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 static HTML: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../html");
@@ -166,9 +166,14 @@ pub struct MgmtState {
     pub bridge: Option<Arc<Bridge>>,
     pub subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
     pub frame_log: Arc<FrameLog>,
+    pub names_refresh: Arc<NamesRefresher>,
 }
 
 pub fn router(state: MgmtState) -> Router {
+    if let Some(bridge) = &state.bridge {
+        let st = state.clone();
+        bridge.on_names_changed(move || broadcast(&st, &json!({ "devices": enum_devices(&st) })));
+    }
     Router::new()
         .route("/ws", get(ws_status))
         .route("/device", get(ws_device))
@@ -199,6 +204,8 @@ fn enum_devices(state: &MgmtState) -> Value {
         all.insert(
             id.clone(),
             json!({
+                // What the owner calls it, when the bridge has been able to ask the account.
+                "name": state.bridge.as_ref().and_then(|b| b.name(&id)),
                 "model": dev.meta.model_id,
                 "deviceType": dev.meta.device_type,
                 "packageId": dev.meta.package_id,
@@ -248,6 +255,7 @@ async fn ws_status(ws: WebSocketUpgrade, State(state): State<MgmtState>) -> Resp
 async fn handle_status_ws(mut socket: WebSocket, state: MgmtState) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     state.subscribers.lock().push(tx);
+    let _names = state.names_refresh.subscribe();
 
     let hello = json!({
         "ha": state.ha.is_connected(),
@@ -286,6 +294,111 @@ pub fn broadcast(state: &MgmtState, message: &Value) {
     let str = message.to_string();
     let mut subs = state.subscribers.lock();
     subs.retain(|tx| tx.send(str.clone()).is_ok());
+}
+
+// The bridge's device names are only read while the panel is open: when the first status
+// websocket connects (at most once a minute) and then every 15 minutes.
+const NAMES_REFRESH_PERIOD: Duration = Duration::from_secs(15 * 60);
+const NAMES_REFRESH_COOLOFF: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+struct NamesRefreshPolicy {
+    subscribers: usize,
+    last_refresh: Option<Instant>,
+}
+
+impl NamesRefreshPolicy {
+    /// True for the first subscriber, which starts the periodic refresh.
+    fn subscriber_connected(&mut self) -> bool {
+        self.subscribers += 1;
+        self.subscribers == 1
+    }
+
+    /// True for the last subscriber, which stops the periodic refresh.
+    fn subscriber_disconnected(&mut self) -> bool {
+        self.subscribers = self.subscribers.saturating_sub(1);
+        self.subscribers == 0
+    }
+
+    /// Whether to refresh now (first subscriber or periodic tick); records the refresh if so.
+    fn refresh_due(&mut self, now: Instant) -> bool {
+        let cooling_off = self
+            .last_refresh
+            .is_some_and(|last| now.saturating_duration_since(last) < NAMES_REFRESH_COOLOFF);
+        if self.subscribers == 0 || cooling_off {
+            return false;
+        }
+        self.last_refresh = Some(now);
+        true
+    }
+}
+
+/// Runs [`NamesRefreshPolicy`] for the status websockets.
+pub struct NamesRefresher {
+    refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+    inner: Mutex<NamesRefresherInner>,
+}
+
+#[derive(Default)]
+struct NamesRefresherInner {
+    policy: NamesRefreshPolicy,
+    timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl NamesRefresher {
+    pub fn for_bridge(bridge: Option<Arc<Bridge>>) -> Arc<Self> {
+        Self::new(bridge.map(|bridge| {
+            Arc::new(move || {
+                let bridge = bridge.clone();
+                tokio::spawn(async move { bridge.refresh_names().await });
+            }) as Arc<dyn Fn() + Send + Sync>
+        }))
+    }
+
+    fn new(refresh: Option<Arc<dyn Fn() + Send + Sync>>) -> Arc<Self> {
+        Arc::new(Self {
+            refresh,
+            inner: Mutex::new(NamesRefresherInner::default()),
+        })
+    }
+
+    /// Counts a status websocket for as long as the returned guard lives.
+    fn subscribe(self: &Arc<Self>) -> NamesSubscription {
+        let mut inner = self.inner.lock();
+        if inner.policy.subscriber_connected() {
+            if let Some(refresh) = &self.refresh {
+                if inner.policy.refresh_due(Instant::now()) {
+                    refresh();
+                }
+                let (this, refresh) = (self.clone(), refresh.clone());
+                inner.timer = Some(tokio::spawn(async move {
+                    let first = tokio::time::Instant::now() + NAMES_REFRESH_PERIOD;
+                    let mut ticks = tokio::time::interval_at(first, NAMES_REFRESH_PERIOD);
+                    loop {
+                        ticks.tick().await;
+                        let due = this.inner.lock().policy.refresh_due(Instant::now());
+                        if due {
+                            refresh();
+                        }
+                    }
+                }));
+            }
+        }
+        NamesSubscription(self.clone())
+    }
+}
+
+struct NamesSubscription(Arc<NamesRefresher>);
+
+impl Drop for NamesSubscription {
+    fn drop(&mut self) {
+        let mut inner = self.0.inner.lock();
+        if inner.policy.subscriber_disconnected() {
+            if let Some(timer) = inner.timer.take() {
+                timer.abort();
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1068,7 +1181,9 @@ async fn api_device_detail(
 mod tests {
     use super::*;
     use crate::devmgr::ConnectedDevice;
+    use rethink_bridge::{BridgeState, Credentials, Environment, JsonStorage};
     use rethink_core::metadata::Metadata;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_state(bridge: Option<Arc<Bridge>>) -> MgmtState {
         let ha = rethink_core::ha::MockHaConnection::new();
@@ -1076,9 +1191,10 @@ mod tests {
             ha: ha.clone(),
             ha_bridge: HaBridge::new(ha),
             manager: DeviceManager::new(),
-            bridge,
+            bridge: bridge.clone(),
             subscribers: Arc::new(Mutex::new(Vec::new())),
             frame_log: FrameLog::new(),
+            names_refresh: NamesRefresher::for_bridge(bridge),
         }
     }
 
@@ -1137,6 +1253,109 @@ mod tests {
             assert_eq!(resp.headers()[header::CONTENT_TYPE], mime, "{path}");
             assert_eq!(body_bytes(resp).await, contents, "{path} unmodified");
         }
+    }
+
+    /// A bridge with its own storage; logged in when `refresh_token` is given.
+    fn test_bridge(refresh_token: Option<&str>) -> Arc<Bridge> {
+        let dir = std::env::temp_dir().join(format!("rethink-mgmt-{}", uuid::Uuid::new_v4()));
+        let storage = Arc::new(JsonStorage::new(dir));
+        storage.set_credentials(refresh_token.map(|token| Credentials {
+            refresh_token: token.into(),
+            env: Environment {
+                country_code: "US".into(),
+                language_code: None,
+            },
+        }));
+        Bridge::new(storage)
+    }
+
+    fn subscribe(state: &MgmtState) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.subscribers.lock().push(tx);
+        rx
+    }
+
+    fn names(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn device_list_names_each_appliance_and_follows_the_account() {
+        let bridge = test_bridge(None);
+        let state = test_state(Some(bridge.clone()));
+        let _app = router(state.clone());
+        for id in ["cassette", "washer"] {
+            connect_device(&state, id, Metadata::new("CST_570004_WW", "CST", "1"));
+        }
+        let mut panel = subscribe(&state);
+        assert!(enum_devices(&state)["cassette"]["name"].is_null());
+
+        bridge.set_names(names(&[("cassette", "Bedroom AC")]));
+        let update: Value = serde_json::from_str(&panel.try_recv().unwrap()).unwrap();
+        assert_eq!(update["devices"]["cassette"]["name"], "Bedroom AC");
+        assert!(update["devices"]["washer"]["name"].is_null());
+
+        bridge.set_names(names(&[("cassette", "Bedroom AC")]));
+        assert!(panel.try_recv().is_err(), "nothing changed, nothing sent");
+
+        bridge.logout().await.unwrap();
+        let update: Value = serde_json::from_str(&panel.try_recv().unwrap()).unwrap();
+        assert!(update["devices"]["cassette"]["name"].is_null());
+    }
+
+    #[test]
+    fn names_are_read_on_the_first_panel_then_every_15_minutes_while_one_is_open() {
+        let t0 = Instant::now();
+        let at = |min: u64, sec: u64| t0 + Duration::from_secs(min * 60 + sec);
+        let mut policy = NamesRefreshPolicy::default();
+        assert!(!policy.refresh_due(at(0, 0)), "nobody is looking");
+
+        assert!(policy.subscriber_connected(), "the first panel");
+        assert!(policy.refresh_due(at(0, 0)));
+        assert!(!policy.subscriber_connected(), "a second panel");
+        assert!(policy.refresh_due(at(15, 0)), "the periodic refresh");
+
+        assert!(!policy.subscriber_disconnected());
+        assert!(policy.subscriber_disconnected(), "the last panel");
+        assert!(!policy.refresh_due(at(15, 20)), "nobody is looking");
+
+        assert!(policy.subscriber_connected());
+        assert!(!policy.refresh_due(at(15, 40)), "cooling off");
+        assert!(policy.refresh_due(at(16, 0)));
+        assert!(!policy.refresh_due(at(16, 30)));
+    }
+
+    #[tokio::test]
+    async fn status_sockets_drive_the_names_refresh() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counter = refreshes.clone();
+        let refresher = NamesRefresher::new(Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })));
+        let count = || refreshes.load(Ordering::SeqCst);
+        let timer_running = || refresher.inner.lock().timer.is_some();
+
+        let first = refresher.subscribe();
+        assert_eq!(count(), 1, "the first panel reads the names");
+        assert!(timer_running());
+        let second = refresher.subscribe();
+        assert_eq!(count(), 1);
+
+        drop(first);
+        assert!(timer_running(), "a panel is still open");
+        drop(second);
+        assert!(!timer_running(), "the last panel closing stops the timer");
+
+        let _again = refresher.subscribe();
+        assert_eq!(count(), 1, "reopened within the cool-off");
+        assert!(timer_running());
+
+        let without_bridge = NamesRefresher::for_bridge(None);
+        let _panel = without_bridge.subscribe();
+        assert!(without_bridge.inner.lock().timer.is_none());
     }
 
     #[test]

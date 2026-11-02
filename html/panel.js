@@ -144,6 +144,9 @@ class DeviceEntry {
     }
 
     updateDom() {
+        // The owner's own name for the appliance, which only the bridge can know. Without it four
+        // identical ceiling cassettes are four rows of the same model and a different UUID.
+        const name = this.remoteState.name || ''
         const model = this.remoteState.model || '—'
         const platform = this.remoteState.platform || '—'
         const haChip = this.remoteState.mapped
@@ -156,6 +159,7 @@ class DeviceEntry {
             ? `<div class="id-sub packageId">packageId: ${escapeHtml(this.remoteState.packageId)}</div>`
             : ''
         this.row.innerHTML = `
+            <td class="col-name" title="${escapeHtml(name)}">${escapeHtml(name || '—')}</td>
             <td class="col-model">
                 <div>${escapeHtml(model)}${
                     this.remoteState.mapped
@@ -1594,6 +1598,10 @@ function connect() {
                 if (!devices[id]) devices[id] = new DeviceEntry(id, j, get('devices_body'))
                 else devices[id].update(j)
             }
+            // Only the bridge knows the names, and only with a ThinQ account linked: the column
+            // either says something about these appliances or about none of them.
+            const named = Object.values(devices).some((dev) => dev.remoteState.name)
+            get('devices_table').classList.toggle('no-names', !named)
             updateDevicesEmpty()
             // Deep-link or re-select after list refresh
             if (selectedDeviceId && devices[selectedDeviceId] && !get('workbench').classList.contains('active')) {

@@ -6,6 +6,7 @@
 //! - `status_for(id)` == live session present
 //! - reconnect re-attaches via `start_session` when saved state / want_enabled exists
 
+mod account;
 pub mod oauth2;
 pub mod pair;
 pub mod resolver;
@@ -80,6 +81,9 @@ pub struct Bridge {
     sessions: Mutex<HashMap<String, Arc<BridgedSession>>>,
     want_enabled: Mutex<HashSet<String>>,
     logged_in: Mutex<bool>,
+    /// What the owner calls each appliance, from the ThinQ account (see `account.rs`).
+    device_names: Mutex<HashMap<String, String>>,
+    names_changed: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Bridge {
@@ -90,6 +94,8 @@ impl Bridge {
             sessions: Mutex::new(HashMap::new()),
             want_enabled: Mutex::new(HashSet::new()),
             logged_in: Mutex::new(logged_in),
+            device_names: Mutex::new(HashMap::new()),
+            names_changed: Mutex::new(Vec::new()),
         })
     }
 
@@ -143,7 +149,11 @@ impl Bridge {
     }
 
     /// `pasted` is the post-login URL, or the signInAct response when LG's sign-in page stalls.
-    pub async fn complete_login(&self, country_code: &str, pasted: &str) -> anyhow::Result<bool> {
+    pub async fn complete_login(
+        self: &Arc<Self>,
+        country_code: &str,
+        pasted: &str,
+    ) -> anyhow::Result<bool> {
         let mut client = thinq_api::Client::new(Environment {
             country_code: country_code.into(),
             language_code: None,
@@ -160,12 +170,15 @@ impl Bridge {
             },
         }));
         *self.logged_in.lock() = true;
+        let this = self.clone();
+        tokio::spawn(async move { this.refresh_names().await });
         Ok(true)
     }
 
     pub async fn logout(&self) -> anyhow::Result<()> {
         self.storage.set_credentials(None);
         *self.logged_in.lock() = false;
+        self.clear_names();
         let ids: Vec<String> = self.sessions.lock().keys().cloned().collect();
         for id in ids {
             self.detach_session(&id);
@@ -281,6 +294,9 @@ impl Bridge {
             .set_device_state_json(&id, Some(lg_state.clone()));
         self.start_session(device, lg_state).await?;
         self.want_enabled.lock().insert(id);
+        // Registering may have just given the appliance its name.
+        let this = self.clone();
+        tokio::spawn(async move { this.refresh_names_with(&client, &creds.refresh_token).await });
         Ok(true)
     }
 

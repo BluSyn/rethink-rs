@@ -417,6 +417,7 @@ async fn main() -> Result<()> {
         bridge: lg_bridge.clone(),
         subscribers: Arc::new(rethink_util::sync::Mutex::new(Vec::new())),
         frame_log: frame_log.clone(),
+        names_refresh: management::NamesRefresher::for_bridge(lg_bridge.clone()),
     };
 
     let app = management::router(mgmt_state)

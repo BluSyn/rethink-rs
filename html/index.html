@@ -138,6 +138,27 @@
             table.devices .col-bridge {
                 width: 32%;
             }
+            /* The owner's names come from a linked ThinQ account. Until some device has one the
+               column is not drawn and the others keep their widths; a device the account does not
+               cover shows a dash next to the ones that do have a name. */
+            table.devices.no-names .col-name {
+                display: none;
+            }
+            table.devices:not(.no-names) .col-name {
+                width: 18%;
+            }
+            table.devices:not(.no-names) .col-model {
+                width: 30%;
+            }
+            table.devices:not(.no-names) .col-plat {
+                width: 10%;
+            }
+            table.devices:not(.no-names) .col-ha {
+                width: 12%;
+            }
+            table.devices:not(.no-names) .col-bridge {
+                width: 30%;
+            }
             .chip {
                 display: inline-block;
                 height: auto;
@@ -610,9 +631,10 @@
                     <span class="hint">click a row to monitor &amp; decode</span>
                 </h5>
                 <div class="card-panel">
-                    <table class="devices highlight">
+                    <table id="devices_table" class="devices highlight no-names">
                         <thead>
                             <tr>
+                                <th class="col-name">Name</th>
                                 <th class="col-model">Model</th>
                                 <th class="col-plat">Platform</th>
                                 <th class="col-ha">HA</th>
