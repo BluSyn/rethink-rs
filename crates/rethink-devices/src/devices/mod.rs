@@ -92,6 +92,7 @@ register_devices! {
         f3l7cyk5w_us_wifi => { "F3L7CYK5W_US_WIFI" },
         rv13b6bsd_d_us_wifi => { "RV13B6BSD_D_US_WIFI" },
         rv13b6es_d_us_wifi => { "RV13B6ES_D_US_WIFI" },
+        rv13d4asjw_d_us => { "RV13D4ASJW_D_US" },
         rh10v9_ch => { "RH10V9_CH" },
         wtl_fxu_bdv_na_01 => { "WTL_FXU_BDV_NA_01" },
         f3s1cwkb__ => { "F3S1CWKB__" },
