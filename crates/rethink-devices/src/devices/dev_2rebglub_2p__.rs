@@ -282,7 +282,7 @@ impl Device {
             if record[0] != 1 && record[0] != 2 {
                 continue;
             }
-            let part = String::from_utf8_lossy(&record[1..12]);
+            let part: String = record[1..12].iter().copied().map(char::from).collect();
             let version = format!("{:02x}{:02x}.{}", record[14], record[15], record[16]);
             let name = format!("firmware_{}", record[0]);
             self.core
@@ -360,7 +360,7 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device};
+    use rethink_core::{hex_decode, hex_encode, wrap_aabb, MockHaConnection, MockThinq2Device};
 
     const ID: &str = "test-id";
     const STATUS_INITIAL: &str = "AA6610EB02040401FFFFFF0201FFFFFF00FFFFFF0001FFFFFFFFFFFFFFFF050101FF02FFFFFFFFFFFFFFFFFF01FF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0078FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0005FFFFFFFFFF0000FF00000DBB";
@@ -469,6 +469,19 @@ mod tests {
         assert_eq!(
             prop(&ha, "firmware_2").as_deref(),
             Some("968f.0 (SAA30619001)")
+        );
+    }
+
+    #[test]
+    fn firmware_part_numbers_decode_as_latin1() {
+        let (ha, thinq, _) = ready();
+        let frame = hex_decode(FIRMWARE);
+        let mut inner = frame[2..frame.len() - 2].to_vec();
+        inner[2 + 1 + 11] = 0xe9;
+        thinq.emit_data(&wrap_aabb(&inner));
+        assert_eq!(
+            prop(&ha, "firmware_1").as_deref(),
+            Some("68e0.0 (SAA3088080é)")
         );
     }
 

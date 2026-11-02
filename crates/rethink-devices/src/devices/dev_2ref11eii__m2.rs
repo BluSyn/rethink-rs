@@ -87,8 +87,15 @@ fn lookup(table: &[(u8, i64)], raw: u8) -> Option<i64> {
     table.iter().find(|(code, _)| *code == raw).map(|(_, v)| *v)
 }
 
-fn inverse(table: &[(u8, i64)], value: i64) -> Option<u8> {
-    table.iter().find(|(_, v)| *v == value).map(|(code, _)| *code)
+fn int_or_none(value: Option<i64>) -> PropertyValue {
+    value.map_or_else(|| "None".into(), PropertyValue::Int)
+}
+
+fn inverse(table: &[(u8, i64)], value: f64) -> Option<u8> {
+    table
+        .iter()
+        .find(|(_, v)| *v as f64 == value)
+        .map(|(code, _)| *code)
 }
 
 fn range_ends(table: &[(u8, i64)]) -> (i64, i64) {
@@ -118,7 +125,7 @@ fn smart_grid_name(code: u8) -> Option<&'static str> {
     }
 }
 
-/// Months above 12 are not a reading. `None` means skip both filter sensors.
+/// `None` above 12 months, which is not a reading.
 fn water_filter_problem(months: u8) -> Option<bool> {
     if months > WATER_FILTER_MAX {
         None
@@ -335,14 +342,14 @@ impl Device {
         };
         self.set_temperature_unit(unit);
         let (fridge, freezer) = tables(unit);
-        if let Some(value) = lookup(fridge, status_get(&status, "fridgeSetpoint")) {
-            self.core
-                .publish_property("fridge_setpoint", PropertyValue::Int(value));
-        }
-        if let Some(value) = lookup(freezer, status_get(&status, "freezerSetpoint")) {
-            self.core
-                .publish_property("freezer_setpoint", PropertyValue::Int(value));
-        }
+        self.core.publish_property(
+            "fridge_setpoint",
+            int_or_none(lookup(fridge, status_get(&status, "fridgeSetpoint"))),
+        );
+        self.core.publish_property(
+            "freezer_setpoint",
+            int_or_none(lookup(freezer, status_get(&status, "freezerSetpoint"))),
+        );
         self.core.publish_on_off(
             "express_freeze",
             status_get(&status, "expressFreeze") == EXPRESS_ON,
@@ -353,15 +360,21 @@ impl Device {
         }
         self.core
             .publish_on_off("fresh_air_filter_replace", fresh == FRESH_AIR_REPLACE);
-        if let Some(name) = smart_grid_name(status_get(&status, "smartSaving")) {
-            self.core.publish_property("smart_grid", name.into());
-        }
+        self.core.publish_property(
+            "smart_grid",
+            smart_grid_name(status_get(&status, "smartSaving"))
+                .unwrap_or("None")
+                .into(),
+        );
         let months = status_get(&status, "waterFilter");
-        if let Some(problem) = water_filter_problem(months) {
-            self.core.publish_on_off("water_filter", problem);
-            self.core
-                .publish_property("water_filter_months", PropertyValue::Int(months as i64));
+        match water_filter_problem(months) {
+            Some(problem) => self.core.publish_on_off("water_filter", problem),
+            None => self.core.publish_property("water_filter", "None".into()),
         }
+        self.core.publish_property(
+            "water_filter_months",
+            int_or_none((months <= WATER_FILTER_MAX).then_some(i64::from(months))),
+        );
         // The flag does not say which door. Only a closed reading resyncs both.
         if status_get(&status, "anyDoorOpen") != 1 {
             self.core.publish_on_off("fridge_door", false);
@@ -386,12 +399,8 @@ impl DeviceHandler for Device {
         let mut fields: Vec<(&'static str, u8)> = Vec::new();
         match prop {
             "fridge_setpoint" | "freezer_setpoint" => {
-                let Ok(parsed) = value.parse::<i64>() else {
-                    tracing::debug!("{prop}: no code for {value}");
-                    return;
-                };
                 let table = if prop == "fridge_setpoint" { fridge } else { freezer };
-                let Some(raw) = inverse(table, parsed) else {
+                let Some(raw) = crate::js::number(value).and_then(|n| inverse(table, n)) else {
                     tracing::debug!("{prop}: no {unit:?} code for {value}");
                     return;
                 };
@@ -513,6 +522,14 @@ mod tests {
     fn with_fresh_air(code: u8) -> Vec<u8> {
         let mut inner = hex_decode("10EC020B08010302040000020B08010302040000");
         inner[2 + 9 + 4] = code;
+        wrap_aabb(&inner)
+    }
+
+    /// SAMPLE_INITIAL with one status byte replaced.
+    fn initial_with(index: usize, value: u8) -> Vec<u8> {
+        let frame = hex_decode(SAMPLE_INITIAL);
+        let mut inner = frame[2..frame.len() - 2].to_vec();
+        inner[2 + index] = value;
         wrap_aabb(&inner)
     }
 
@@ -776,6 +793,58 @@ mod tests {
         thinq.reset_recorder();
         dev.set_property("freezer_setpoint", "7");
         assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn setpoint_codes_missing_from_the_tables_publish_none() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_INITIAL);
+        thinq.emit_data(&initial_with(1, 15));
+        assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("None"));
+        thinq.emit_data(&initial_with(2, 14));
+        assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("35"));
+        assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn unknown_smart_grid_code_publishes_none() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_INITIAL);
+        thinq.emit_data(&initial_with(5, 1));
+        assert_eq!(prop(&ha, "smart_grid").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn water_filter_past_12_months_publishes_none() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&initial_with(6, 12));
+        assert_eq!(prop(&ha, "water_filter").as_deref(), Some("ON"));
+        assert_eq!(prop(&ha, "water_filter_months").as_deref(), Some("12"));
+        thinq.emit_data(&initial_with(6, 13));
+        assert_eq!(prop(&ha, "water_filter").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "water_filter_months").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn setpoint_writes_parse_like_js_number() {
+        let (_, thinq, dev) = make();
+        emit(&thinq, SAMPLE_DELTA_EXPRESS_OFF);
+        for value in ["36.0", " 36", "3.6e1"] {
+            thinq.reset_recorder();
+            dev.set_property("fridge_setpoint", value);
+            assert_eq!(
+                hex_encode(&thinq.outbox()[0]),
+                CLOUD_CMD_FRIDGE_36F,
+                "{value:?}"
+            );
+        }
+        thinq.reset_recorder();
+        dev.set_property("fridge_setpoint", "36.5");
+        dev.set_property("fridge_setpoint", "abc");
+        assert!(thinq.outbox().is_empty());
+        // Number("") is 0
+        dev.set_property("freezer_setpoint", "");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), CLOUD_CMD_FREEZER_0F);
     }
 
     #[test]

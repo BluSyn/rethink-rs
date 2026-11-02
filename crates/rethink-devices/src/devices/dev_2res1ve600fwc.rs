@@ -55,13 +55,13 @@ fn convert_to_freezer_temperature(unit: TemperatureUnit, input: i32) -> i32 {
     }
 }
 
-fn convert_from_freezer_temperature(unit: TemperatureUnit, input: u8) -> i32 {
+fn convert_from_freezer_temperature(unit: TemperatureUnit, input: u8) -> Option<i32> {
     match unit {
         TemperatureUnit::F => {
             let table: [i32; 16] = [7, 7, 6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -7, -12, -15, -17];
-            table.get(input as usize).copied().unwrap_or(7)
+            table.get(input as usize).copied()
         }
-        TemperatureUnit::C => -13 - input as i32,
+        TemperatureUnit::C => Some(-13 - input as i32),
     }
 }
 
@@ -122,10 +122,8 @@ impl Device {
         );
         self.core.publish_property(
             "freezer_setpoint",
-            PropertyValue::Int(convert_from_freezer_temperature(
-                unit,
-                status_at(cur, ST_FREEZER_SETPOINT),
-            ) as i64),
+            convert_from_freezer_temperature(unit, status_at(cur, ST_FREEZER_SETPOINT))
+                .map_or_else(|| "None".into(), PropertyValue::from),
         );
         self.core
             .publish_on_off("express_freeze", status_at(cur, ST_EXPRESS_FREEZE) == 2);
@@ -199,16 +197,53 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device};
+    use rethink_core::{hex_decode, hex_encode, wrap_aabb, MockHaConnection, MockThinq2Device};
 
     const DEVICE_ID: &str = "test-id";
-    const SAMPLE_DELTA_DOOR_OPEN: &str = "AA1E10EC02030501FFFFFF0001FF01FF02030501FFFFFF0101FF01FF80BB";
+    // Captures from a GSB470BASZ (issue #44), Celsius: 10EC <12 prev> <12 cur>
+    const SAMPLE_DELTA_DOOR_OPEN: &str =
+        "AA1E10EC02030501FFFFFF0001FF01FF02030501FFFFFF0101FF01FF80BB";
+    const SAMPLE_DELTA_DOOR_CLOSE: &str =
+        "AA1E10EC02030501FFFFFF0101FF01FF02030501FFFFFF0001FF01FF80BB";
+    const SAMPLE_DELTA_FRIDGE_MINUS_1: &str =
+        "AA1E10EC02030501FFFFFF0001FF01FF02040501FFFFFF0001FF01FF80BB";
+    const SAMPLE_DELTA_FRIDGE_PLUS_1: &str =
+        "AA1E10EC02040501FFFFFF0001FF01FF02030501FFFFFF0001FF01FF80BB";
+    const SAMPLE_DELTA_FREEZER_MINUS_1: &str =
+        "AA1E10EC02030501FFFFFF0001FF01FF02030601FFFFFF0001FF01FF80BB";
+    const SAMPLE_DELTA_FREEZER_PLUS_1: &str =
+        "AA1E10EC02030601FFFFFF0001FF01FF02030501FFFFFF0001FF01FF80BB";
+    const SAMPLE_DELTA_EXPRESS_FREEZE_ON: &str =
+        "AA1E10EC02030501FFFFFF0001FF01FF02030502FFFFFF0001FF01FF80BB";
+    const SAMPLE_DELTA_EXPRESS_FREEZE_OFF: &str =
+        "AA1E10EC02030502FFFFFF0001FF01FF02030501FFFFFF0001FF01FF80BB";
 
     fn make() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
         let ha = MockHaConnection::new();
         let meta = Metadata::new("2RES1VE600FWC", "2RES1VE600FWC", "1.0");
         let thinq = MockThinq2Device::new(DEVICE_ID, meta.clone());
         (ha.clone(), thinq.clone(), Device::new(ha, thinq, meta))
+    }
+
+    fn prop(ha: &MockHaConnection, name: &str) -> Option<String> {
+        ha.device(DEVICE_ID)?
+            .properties
+            .get(name)
+            .map(|p| p.as_string())
+    }
+
+    fn emit(thinq: &MockThinq2Device, hex: &str) {
+        thinq.emit_data(&hex_decode(hex));
+    }
+
+    /// SAMPLE_DELTA_DOOR_OPEN with the current record in °F and the freezer byte replaced.
+    fn fahrenheit_freezer(raw: u8) -> Vec<u8> {
+        let frame = hex_decode(SAMPLE_DELTA_DOOR_OPEN);
+        let mut inner = frame[2..frame.len() - 2].to_vec();
+        let cur = 2 + STATUS_LENGTH;
+        inner[cur + ST_TEMP_UNIT] = 0;
+        inner[cur + ST_FREEZER_SETPOINT] = raw;
+        wrap_aabb(&inner)
     }
 
     #[test]
@@ -219,89 +254,152 @@ mod tests {
     }
 
     #[test]
-    fn first_delta_publishes_celsius() {
+    fn config_waits_for_a_status_frame() {
+        let (ha, _, _) = make();
+        assert!(ha.device(DEVICE_ID).is_none());
+    }
+
+    #[test]
+    fn first_delta_publishes_celsius_config_and_setpoints() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_DELTA_DOOR_OPEN));
-        let dev = ha.device(DEVICE_ID).unwrap();
+        emit(&thinq, SAMPLE_DELTA_DOOR_OPEN);
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(comps["fridge_setpoint"]["unit_of_measurement"], json!("°C"));
         assert_eq!(
-            dev.config.as_ref().unwrap().components["fridge_setpoint"]["unit_of_measurement"],
+            comps["freezer_setpoint"]["unit_of_measurement"],
             json!("°C")
         );
-        assert_eq!(
-            dev.properties.get("fridge_setpoint").map(|p| p.as_string()),
-            Some("5".into())
-        );
-        assert_eq!(
-            dev.properties
-                .get("freezer_setpoint")
-                .map(|p| p.as_string()),
-            Some("-18".into())
-        );
-        assert_eq!(
-            dev.properties.get("door").map(|p| p.as_string()),
-            Some("ON".into())
-        );
-    }
-
-    fn prop(ha: &MockHaConnection, name: &str) -> Option<String> {
-        ha.device(DEVICE_ID)?.properties.get(name).map(|p| p.as_string())
-    }
-    #[test]
-    fn door_and_temps() {
-        let (ha, thinq, _) = make();
-        assert!(ha.device(DEVICE_ID).is_none());
-
-        thinq.emit_data(&hex_decode("AA1E10EC02030501FFFFFF0001FF01FF02030501FFFFFF0101FF01FF80BB"));
-        let devinfo = ha.device(DEVICE_ID).unwrap();
-        let comps = &devinfo.config.as_ref().unwrap().components;
-        assert_eq!(comps["fridge_setpoint"]["unit_of_measurement"], "°C");
+        assert!(comps.contains_key("express_freeze"));
         assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("5"));
         assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("-18"));
         assert_eq!(prop(&ha, "door").as_deref(), Some("ON"));
+    }
 
-        thinq.emit_data(&hex_decode("AA1E10EC02030501FFFFFF0101FF01FF02030501FFFFFF0001FF01FF80BB"));
+    #[test]
+    fn door_close_publishes_door_off() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_DOOR_CLOSE);
         assert_eq!(prop(&ha, "door").as_deref(), Some("OFF"));
+    }
 
-        thinq.emit_data(&hex_decode("AA1E10EC02030501FFFFFF0001FF01FF02040501FFFFFF0001FF01FF80BB"));
+    #[test]
+    fn fridge_5c_to_4c() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_FRIDGE_MINUS_1);
         assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("4"));
+    }
 
-        thinq.emit_data(&hex_decode("AA1E10EC02030501FFFFFF0001FF01FF02030601FFFFFF0001FF01FF80BB"));
+    #[test]
+    fn fridge_4c_to_5c() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_FRIDGE_PLUS_1);
+        assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn freezer_minus_18c_to_minus_19c() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_FREEZER_MINUS_1);
         assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("-19"));
+    }
 
-        thinq.emit_data(&hex_decode("AA1E10EC02030501FFFFFF0001FF01FF02030502FFFFFF0001FF01FF80BB"));
+    #[test]
+    fn freezer_minus_19c_to_minus_18c() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_FREEZER_PLUS_1);
+        assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("-18"));
+    }
+
+    #[test]
+    fn fahrenheit_freezer_byte_without_a_table_entry_publishes_none() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&fahrenheit_freezer(15));
+        assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("-17"));
+        thinq.emit_data(&fahrenheit_freezer(16));
+        assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn express_freeze_toggle() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_EXPRESS_FREEZE_ON);
         assert_eq!(prop(&ha, "express_freeze").as_deref(), Some("ON"));
-        thinq.emit_data(&hex_decode("AA1E10EC02030502FFFFFF0001FF01FF02030501FFFFFF0001FF01FF80BB"));
+        emit(&thinq, SAMPLE_DELTA_EXPRESS_FREEZE_OFF);
         assert_eq!(prop(&ha, "express_freeze").as_deref(), Some("OFF"));
     }
 
     #[test]
-    fn writes() {
+    fn frames_outside_the_aa_bb_envelope_are_ignored() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, "001122");
+        assert!(ha.device(DEVICE_ID).is_none());
+    }
+
+    #[test]
+    fn unrecognised_inner_shape_is_ignored() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, "AA08109901020304BB");
+        assert!(ha.device(DEVICE_ID).is_none());
+    }
+
+    #[test]
+    fn start_sends_the_status_query() {
         let (_, thinq, dev) = make();
-        thinq.emit_data(&hex_decode("AA1E10EC02030501FFFFFF0001FF01FF02030501FFFFFF0101FF01FF80BB"));
         thinq.reset_recorder();
         dev.start();
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0EF0ED1211010000010400EBBB");
+        assert_eq!(thinq.outbox().len(), 1);
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA0EF0ED1211010000010400EBBB"
+        );
+    }
 
+    #[test]
+    fn write_fridge_5c() {
+        let (_, thinq, dev) = make();
+        emit(&thinq, SAMPLE_DELTA_DOOR_OPEN);
         thinq.reset_recorder();
         dev.set_property("fridge_setpoint", "5");
         let pkt = thinq.outbox()[0].clone();
+        assert_eq!(pkt[2], 0xf0);
+        assert_eq!(pkt[3], 0x17);
         assert_eq!(pkt[4 + 1], 3);
         assert_eq!(pkt[4 + 8], 1);
+    }
 
+    #[test]
+    fn write_freezer_minus_19c() {
+        let (_, thinq, dev) = make();
+        emit(&thinq, SAMPLE_DELTA_DOOR_OPEN);
         thinq.reset_recorder();
         dev.set_property("freezer_setpoint", "-19");
         assert_eq!(thinq.outbox()[0][4 + 2], 6);
+    }
 
+    #[test]
+    fn write_express_freeze_on() {
+        let (_, thinq, dev) = make();
+        emit(&thinq, SAMPLE_DELTA_DOOR_OPEN);
         thinq.reset_recorder();
         dev.set_property("express_freeze", "ON");
         assert_eq!(thinq.outbox()[0][4 + 3], 0x02);
+    }
+
+    #[test]
+    fn write_express_freeze_off() {
+        let (_, thinq, dev) = make();
+        emit(&thinq, SAMPLE_DELTA_DOOR_OPEN);
         thinq.reset_recorder();
         dev.set_property("express_freeze", "OFF");
         assert_eq!(thinq.outbox()[0][4 + 3], 0x01);
-
-        thinq.reset_recorder();
-        dev.set_property("nonsense", "x");
-        assert_eq!(thinq.outbox().len(), 0);
     }
 
+    #[test]
+    fn write_unknown_property_sends_nothing() {
+        let (_, thinq, dev) = make();
+        emit(&thinq, SAMPLE_DELTA_DOOR_OPEN);
+        thinq.reset_recorder();
+        dev.set_property("nonsense", "whatever");
+        assert!(thinq.outbox().is_empty());
+    }
 }
