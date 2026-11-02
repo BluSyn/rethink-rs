@@ -266,7 +266,7 @@ impl Device {
             let on = mqtt_value == "ON";
             match prop {
                 "rinse_level" => {
-                    let Ok(level) = mqtt_value.parse::<i64>() else {
+                    let Some(level) = crate::js::parse_int(mqtt_value) else {
                         return;
                     };
                     if !(0..=4).contains(&level) {
@@ -355,7 +355,7 @@ impl Device {
                     .publish_property("target_night_dry", mqtt_value.into());
             }
             "target_delay" => {
-                let Ok(hours) = mqtt_value.parse::<i64>() else {
+                let Some(hours) = crate::js::parse_int(mqtt_value) else {
                     return;
                 };
                 if !(0..=12).contains(&hours) {
@@ -1092,5 +1092,17 @@ mod tests {
     #[test]
     fn registry_resolves() {
         assert!(crate::registry::t2_factory("N02").is_some());
+    }
+
+    #[test]
+    fn number_payloads_parse_like_javascript_parse_int() {
+        let (ha, _thinq, dev) = feed(&[]);
+        for (payload, hours) in [("3", 3), (" 4", 4), ("5.9", 5), ("6h", 6)] {
+            dev.set_property("target_delay", payload);
+            assert_eq!(prop(&ha, "target_delay").as_deref(), Some(hours.to_string().as_str()));
+        }
+        dev.set_property("target_delay", "abc");
+        dev.set_property("target_delay", "13");
+        assert_eq!(prop(&ha, "target_delay").as_deref(), Some("6"));
     }
 }
