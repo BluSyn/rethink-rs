@@ -4,10 +4,8 @@
 //! module is only registered on the ThinQ1 factory.
 
 use crate::device_trait::DeviceHandler;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use rethink_core::device_base::default_config;
-use rethink_core::ha::{HaConnection, PropertyValue};
+use rethink_core::ha::{DeviceDiscovery, HaConnection, PropertyValue};
 use rethink_core::metadata::Metadata;
 use rethink_core::thinq::Thinq1Device;
 use rethink_util::sync::Mutex;
@@ -60,6 +58,8 @@ pub struct Device {
     model_id: String,
     ha: Arc<dyn HaConnection>,
     thinq: Arc<dyn Thinq1Device>,
+    /// Re-published when HA asks for discovery (birth message / MQTT reconnect).
+    config: DeviceDiscovery,
     publish_cache: Mutex<HashMap<String, String>>,
     last_status: Mutex<Option<Value>>,
     reported: Mutex<HashSet<String>>,
@@ -140,6 +140,7 @@ impl Device {
             model_id: meta.model_id.clone(),
             ha,
             thinq: thinq.clone(),
+            config,
             publish_cache: Mutex::new(HashMap::new()),
             last_status: Mutex::new(None),
             reported: Mutex::new(HashSet::new()),
@@ -342,7 +343,11 @@ impl DeviceHandler for Device {
     fn set_property(&self, prop: &str, value: &str) {
         Device::set_property(self, prop, value);
     }
-    fn publish_config(&self) {}
+    fn publish_config(&self) {
+        self.ha
+            .publish_property(&self.id, "availability", "online".into());
+        self.ha.publish_config(&self.id, &self.config);
+    }
 }
 
 pub fn create(
@@ -356,6 +361,8 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use rethink_core::{MockHaConnection, MockThinq1Device};
 
     const SAMPLE_OFF: &str = "eyJPcGVyYXRpb24iOiIwIiwiT3BNb2RlIjoiMiIsIldpbmRTdHJlbmd0aCI6IjIiLCJUZW1wVW5pdCI6Ik5TIiwiVGVtcEN1ciI6IjIxIiwiVGVtcENmZyI6IjI0IiwiR3JvdXBUeXBlIjoiMSIsIlNsZWVwVGltZSI6IjAiLCJPblRpbWUiOiIwIiwiT2ZmVGltZSI6IjAiLCJSYWNBZGRGdW5jIjoiTlMiLCJFeHRyYU9wIjoiMCIsIkRpYWdDb2RlIjoiMDAiLCJUaW1lQnNPbiI6IjAiLCJUaW1lQnNPZmYiOiIwIiwiQWlyQ2xlYW4iOiIwIiwiQXV0b0RyeSI6IjAiLCJQb3dlclNhdmUiOiIwIiwiV0RpclZTdGVwIjoiMCIsIldEaXJIU3RlcCI6IjMiLCJUZW1wTGltaXRNYXgiOiIwIiwiVGVtcExpbWl0TWluIjoiMCIsIkR1Y3Rab25lVHlwZSI6IjAiLCJab25lQ29udHJvbCI6IjAiLCJEUkVEIjoiMCIsIlNlbnNvclBNMSI6IjAiLCJTZW5zb3JQTTIiOiIwIiwiU2Vuc29yUE0xMCI6IjAiLCJBaXJQb2x1dGlvbiI6IjAiLCJIdW1pZGl0eUNmZyI6IjAiLCJXYXRlclRlbXBDb29sTWluIjoiMCIsIldhdGVyVGVtcENvb2xNYXgiOiIwIiwiV2F0ZXJUZW1wSGVhdE1pbiI6IjAiLCJXYXRlclRlbXBIZWF0TWF4IjoiMCIsIkhvdFdhdGVyVGVtcE1pbiI6IjAiLCJIb3RXYXRlclRlbXBNYXgiOiIwIiwiU2Vuc29ySHVtaWRpdHkiOiIwIiwiVG90YWxBaXJQb2x1dGlvbiI6IjAiLCJTZW5zb3JNb24iOiIwIiwiQ2xlYW5EcnkiOiIwIiwiUHJvZHVjdFN0YXR1cyI6IjAiLCJBaXJNb25pdG9yaW5nIjoiMCIsIkh1bWlkaWZpY2F0aW9uIjoiMCIsIkFpckZhc3QiOiIwIiwiQWlyUmVtb3ZhbCI6IjAiLCJBaXJVVkRpc2luZmVjdGlvbiI6IjAiLCJXYXRlcnRhbmtMaWdodCI6IjAiLCJTaWduYWxMaWdodGluZyI6IjAiLCJXRGlyVXBEb3duIjoiMCIsIldEaXJMZWZ0UmlnaHQiOiIwIiwiV1N3aXJsIjoiMCIsIkpldCI6IjAiLCJMb3dIZWF0aW5nIjoiMCIsIkNpcmN1bGF0ZVN0cmVuZ3RoIjoiMCIsIkNpcmN1bGF0ZURpciI6IjAiLCJBbnRpQnVncyI6IjAiLCJJY2VWYWxsZXkiOiIwIiwiSHVtc2F2ZSI6IjAiLCJXYXRlclRlbXBDdXIiOiIwIiwiSG90V2F0ZXJUZW1wQ3VyIjoiMCIsIkhvdFdhdGVyVGVtcENmZyI6IjAiLCJIb3RXYXRlck1vZGUiOiIwIiwiSG90V2F0ZXIiOiIwIiwiQVdIUFRlbXBDZmdTd2l0Y2giOiIwIiwiQWlyVGVtcENvb2xNaW4iOiIwIiwiQWlyVGVtcENvb2xNYXgiOiIwIiwiQWlyVGVtcEhlYXRNaW4iOiIwIiwiQWlyVGVtcEhlYXRNYXgiOiIwIiwiV2F0ZXJJblRlbXBDdXIiOiIwIiwiQVdIUFdBVGVtcENvbnRyb2xTdGEiOiIwIiwiRGlzcGxheUNvbnRyb2wiOiIwIiwiU21hcnRDYXJlIjoiMCIsIlR3b1NldENvb2xUZW1wIjoiMCIsIlR3b1NldEhlYXRUZW1wIjoiMCIsIlR3b1NldENvb2xVU0wiOiIwIiwiVHdvU2V0Q29vbExTTCI6IjAiLCJUd29TZXRIZWF0VVNMIjoiMCIsIlR3b1NldEhlYXRMU0wiOiIwIiwiVHdvU2V0QUNPU3RhdGUiOiIwIiwiVHdvU2V0TW9kZURlYWRiYW5kIjoiMCIsIlR3b1NldFN0YXRlIjoiMCJ9";
@@ -588,5 +595,19 @@ mod tests {
         thinq.emit_data(unknown);
         assert_eq!(prop(&ha, "mode"), "None".into());
         assert_eq!(prop(&ha, "fan_mode"), "very low".into());
+    }
+
+    #[test]
+    fn publish_config_restores_availability_and_discovery() {
+        let (ha, _thinq, dev) = make_device();
+        DeviceHandler::drop_device(dev.as_ref());
+        assert_eq!(
+            ha.device(DEVICE_ID).unwrap().availability.as_deref(),
+            Some("offline")
+        );
+        DeviceHandler::publish_config(dev.as_ref());
+        let info = ha.device(DEVICE_ID).unwrap();
+        assert_eq!(info.availability.as_deref(), Some("online"));
+        assert!(info.config.is_some());
     }
 }

@@ -10,7 +10,7 @@ use crate::device_trait::DeviceHandler;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rethink_core::device_base::default_config;
-use rethink_core::ha::{HaConnection, PropertyValue};
+use rethink_core::ha::{DeviceDiscovery, HaConnection, PropertyValue};
 use rethink_core::metadata::Metadata;
 use rethink_core::thinq::Thinq1Device;
 use rethink_util::sync::Mutex;
@@ -255,6 +255,8 @@ pub struct Device {
     id: String,
     ha: Arc<dyn HaConnection>,
     thinq: Arc<dyn Thinq1Device>,
+    /// Re-published when HA asks for discovery (birth message / MQTT reconnect).
+    config: DeviceDiscovery,
     publish_cache: Mutex<HashMap<String, String>>,
     pending_course_id: Mutex<u8>,
     course_selected_by_user: Mutex<bool>,
@@ -660,6 +662,7 @@ impl Device {
             id,
             ha,
             thinq: thinq.clone(),
+            config,
             publish_cache: Mutex::new(HashMap::new()),
             pending_course_id: Mutex::new(DEFAULT_COURSE_ID),
             course_selected_by_user: Mutex::new(false),
@@ -860,7 +863,11 @@ impl DeviceHandler for Device {
     fn set_property(&self, prop: &str, value: &str) {
         Device::set_property(self, prop, value);
     }
-    fn publish_config(&self) {}
+    fn publish_config(&self) {
+        self.ha
+            .publish_property(&self.id, "availability", "online".into());
+        self.ha.publish_config(&self.id, &self.config);
+    }
 }
 
 pub fn create(
@@ -1162,5 +1169,19 @@ mod tests {
             json!({ "lgedmRoot": { "tubInfo": { "event": 2, "count": 49, "maxCount": 30 } } }),
         );
         assert!(prop(&ha, "last_cycle_energy").is_none());
+    }
+
+    #[test]
+    fn publish_config_restores_availability_and_discovery() {
+        let (ha, _thinq, dev) = make();
+        DeviceHandler::drop_device(dev.as_ref());
+        assert_eq!(
+            ha.device(DEVICE_ID).unwrap().availability.as_deref(),
+            Some("offline")
+        );
+        DeviceHandler::publish_config(dev.as_ref());
+        let info = ha.device(DEVICE_ID).unwrap();
+        assert_eq!(info.availability.as_deref(), Some("online"));
+        assert!(info.config.is_some());
     }
 }
