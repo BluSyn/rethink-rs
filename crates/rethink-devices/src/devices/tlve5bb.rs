@@ -79,8 +79,15 @@ const BUZZER: &[(u8, &str)] = &[
     (4, "Very loud"),
 ];
 
+/// Each label once, in first-seen order.
 fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
-    table.iter().map(|(_, name)| *name).collect()
+    let mut out: Vec<&'static str> = Vec::new();
+    for (_, name) in table {
+        if !out.contains(name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 fn named(table: &'static [(u8, &'static str)], code: u8) -> &'static str {
@@ -202,7 +209,7 @@ mod tests {
     use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Thinq2Device};
 
     const DEVICE_ID: &str = "test-id";
-    const RUNNING: &str = "aa ff 20 0a 00 76 00 9c 86 00 01 00 ec 00 64 00 05 08 03 0e 09 00 00 09 06 00 00 00 00 57 00 6a 00 15 00 2e 0b 0b 6f 00 00 00 03 2d 04 00 00 00 00 00 00 00 10 01 00 30 00 00 00 00 00 00 00 00 00 00 05 08 03 0e 09 00 00 09 06 00 00 00 00 56 00 6a 00 17 00 2e 0b 0b 6f 00 00 00 03 2d 04 00 00 00 00 00 00 00 10 01 00 30 00 00 00 00 00 00 00 00 00 17 c9 bb";
+    const RUNNING_87_TO_86: &str = "aa ff 20 0a 00 76 00 9c 86 00 01 00 ec 00 64 00 05 08 03 0e 09 00 00 09 06 00 00 00 00 57 00 6a 00 15 00 2e 0b 0b 6f 00 00 00 03 2d 04 00 00 00 00 00 00 00 10 01 00 30 00 00 00 00 00 00 00 00 00 00 05 08 03 0e 09 00 00 09 06 00 00 00 00 56 00 6a 00 17 00 2e 0b 0b 6f 00 00 00 03 2d 04 00 00 00 00 00 00 00 10 01 00 30 00 00 00 00 00 00 00 00 00 17 c9 bb";
     const END: &str = "aaff200a007600a0cd000100ec0064000508000e09000009060000000001006a0050002e0e0e6f000000002d040000000000000010010030000000000000000000000508000e09000009060000000001006a0055002e10106f000000002d0400000000000000000100300000000000000000001e67bb";
     const END_UNLOCKED: &str = "aaff200a007600a0d4000100ec0064000508000e09000009060000000001006a0055002e10106f000000002d040000000000000000010030000000000000000000000508000e09000009060000000001006a0055002e10106f000000002d0400000000000000000000300000000000000000003a09bb";
     const OFF: &str = "aaff200a007600a0dd000100ec0064000508000e09000009060000000001006a0055002e10106f000000002d040000000000000000000030000000000000000000000508000e09000009060000000001006a0055002e00006f000000002d04000000000000000000003000000000000000000033b6bb";
@@ -222,7 +229,7 @@ mod tests {
 
     #[test]
     fn decodes_the_current_record_from_a_paired_running_update() {
-        let ha = feed(RUNNING);
+        let ha = feed(RUNNING_87_TO_86);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("86"));
@@ -279,14 +286,57 @@ mod tests {
 
     #[test]
     fn rejects_frames_whose_declared_record_length_does_not_match() {
-        let mut malformed = hex_decode(RUNNING);
+        let mut malformed = hex_decode(RUNNING_87_TO_86);
         malformed[13] = 0;
         malformed[14] = 99;
         let ha = MockHaConnection::new();
         let thinq = MockThinq2Device::new(DEVICE_ID, Metadata::new("TLVE5BB", "TLVE5BB", "0.0.0"));
         let _dev = Device::new(ha.clone(), thinq.clone(), Metadata::new("TLVE5BB", "TLVE5BB", "0.0.0"));
         thinq.emit_data(&malformed);
-        assert!(prop(&ha, "status").is_none());
+        assert!(ha.device(DEVICE_ID).unwrap().properties.is_empty());
+    }
+
+    #[test]
+    fn status_options_list_each_label_once() {
+        let ha = MockHaConnection::new();
+        let thinq = MockThinq2Device::new(DEVICE_ID, Metadata::new("TLVE5BB", "TLVE5BB", "0.0.0"));
+        let _dev = Device::new(ha.clone(), thinq, Metadata::new("TLVE5BB", "TLVE5BB", "0.0.0"));
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(
+            comps["status"]["options"],
+            json!([
+                "Off",
+                "Standby",
+                "Paused",
+                "Detecting",
+                "Filling",
+                "Detergent amount",
+                "Delayed",
+                "Soaking",
+                "Pre-wash",
+                "Washing",
+                "Rinsing",
+                "Rinse hold",
+                "Spinning",
+                "Drying",
+                "End",
+                "Refreshing",
+                "Error",
+                "Audible diagnosis",
+                "Auto DT open pause",
+                "Confirm start for control",
+                "Clothing recognition",
+                "Detergent input",
+                "Softener input",
+                "Pollution detecting",
+                "Tub cleaning",
+                "End remote maintain on",
+                "Steam",
+                "Laundry care",
+                "EZDispense cleaning",
+                "Dry cooling",
+            ])
+        );
     }
 
     #[test]
