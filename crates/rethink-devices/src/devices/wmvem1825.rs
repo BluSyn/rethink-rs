@@ -3,10 +3,15 @@
 //! Port of upstream commit 7ad7f28 (PR #160). Status is a 46-byte record
 //! (0x41EB / current half of 0x41EC). Hood fan/light share rec[36]; door uses
 //! a short 0x41B2 event. Combined F0432204 writes were verified live on the
-//! appliance.
+//! appliance, as were the clock and beeper fields of the F043210E Preferences
+//! write shared with the WFV474PGV oven (the beeper sits at payload index 3,
+//! not the oven's 8, and is reported back in rec[35]).
+//!
+//! Port of upstream commit 7ad7f28 (PR #160) and PR #183.
 
 use crate::device_trait::DeviceHandler;
 use crate::js;
+use chrono::Timelike;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::hex_decode;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
@@ -18,6 +23,24 @@ const STATUS_QUERY: &str =
     "F0ED114101000000181A0207080C14191A1E262B30353A00000000000000000000000000";
 const DOOR_PREFIX: &[u8] = &[0x00, 0x0f, 0x07, 0x0a, 0x01, 0x03, 0x00, 0x00, 0x00];
 
+// Fields the write does not set go out as 0x80 "no change", index 11 as 0xFF.
+const PREFERENCE_COMMAND_PREFIX: [u8; 4] = [0xf0, 0x43, 0x21, 0x0e];
+const PREFERENCE_PAYLOAD_LEN: usize = 13;
+const PREFERENCE_NO_CHANGE: u8 = 0x80;
+const PREFERENCE_FF_INDEX: usize = 11;
+const PREFERENCE_FF_NO_CHANGE: u8 = 0xff;
+const CLOCK_HOURS_INDEX: usize = 0;
+const CLOCK_MINUTES_INDEX: usize = 1;
+const CLOCK_HOUR_FORMAT_INDEX: usize = 2;
+const CLOCK_HOUR_FORMAT_24H: u8 = 0x00;
+const BEEPER_INDEX: usize = 3;
+// Writing 1, 2 or 3 all read back the same, so the appliance only offers on and off.
+const BEEPER_ON: u8 = 0x01;
+const BEEPER_OFF: u8 = 0x00;
+// rec[35]'s low two bits read 3 while the keys beep and 0 once muted.
+const BEEPER_STATUS_OFFSET: usize = 35;
+const BEEPER_STATUS_MASK: u8 = 0x03;
+
 fn status_name(code: u8) -> &'static str {
     match code {
         0x00 => "Idle",
@@ -27,6 +50,12 @@ fn status_name(code: u8) -> &'static str {
         0x07 => "Ready to start",
         _ => "None",
     }
+}
+
+fn preference_payload() -> [u8; PREFERENCE_PAYLOAD_LEN] {
+    let mut payload = [PREFERENCE_NO_CHANGE; PREFERENCE_PAYLOAD_LEN];
+    payload[PREFERENCE_FF_INDEX] = PREFERENCE_FF_NO_CHANGE;
+    payload
 }
 
 pub struct Device {
@@ -114,6 +143,30 @@ impl Device {
                     "icon": "mdi:lightbulb",
                 }),
             ),
+            (
+                "clock_sync".into(),
+                json!({
+                    "platform": "button",
+                    "icon": "mdi:clock-check-outline",
+                    "unique_id": "$deviceid-clock_sync",
+                    "command_topic": "$this/clock_sync/set",
+                    "payload_press": "PRESS",
+                    "name": "Sync clock",
+                }),
+            ),
+            (
+                "beeper".into(),
+                json!({
+                    "platform": "switch",
+                    "icon": "mdi:volume-high",
+                    "unique_id": "$deviceid-beeper",
+                    "state_topic": "$this/beeper",
+                    "command_topic": "$this/beeper/set",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "name": "Beeper",
+                }),
+            ),
         ]
         .into_iter()
         .collect();
@@ -163,6 +216,10 @@ impl Device {
             self.core
                 .publish_property("light_level", i64::from(light_level).into());
         }
+        self.core.publish_on_off(
+            "beeper",
+            rec[BEEPER_STATUS_OFFSET] & BEEPER_STATUS_MASK != 0,
+        );
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -202,6 +259,26 @@ impl Device {
         ]);
     }
 
+    fn send_preference(&self, payload: &[u8; PREFERENCE_PAYLOAD_LEN]) {
+        let mut body = PREFERENCE_COMMAND_PREFIX.to_vec();
+        body.extend_from_slice(payload);
+        self.core.send(&body);
+    }
+
+    fn send_clock(&self, hours: u8, minutes: u8) {
+        let mut payload = preference_payload();
+        payload[CLOCK_HOURS_INDEX] = hours;
+        payload[CLOCK_MINUTES_INDEX] = minutes;
+        payload[CLOCK_HOUR_FORMAT_INDEX] = CLOCK_HOUR_FORMAT_24H;
+        self.send_preference(&payload);
+    }
+
+    fn send_beeper(&self, on: bool) {
+        let mut payload = preference_payload();
+        payload[BEEPER_INDEX] = if on { BEEPER_ON } else { BEEPER_OFF };
+        self.send_preference(&payload);
+    }
+
     pub fn set_property(&self, prop: &str, mqtt_value: &str) {
         match prop {
             "fan_power" => {
@@ -237,6 +314,13 @@ impl Device {
                 };
                 *self.light_level.lock() = v.round().clamp(0.0, 2.0) as u8;
                 self.send_hood_command();
+            }
+            "clock_sync" if mqtt_value == "PRESS" => {
+                let now = chrono::Local::now();
+                self.send_clock(now.hour() as u8, now.minute() as u8);
+            }
+            "beeper" if mqtt_value == "ON" || mqtt_value == "OFF" => {
+                self.send_beeper(mqtt_value == "ON");
             }
             _ => {}
         }
@@ -299,6 +383,10 @@ mod tests {
     const SAMPLE_LIGHT_LOW: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000004000008080808001000000003000015500000000000000FF030D000000000000000000000000000000C30000000040100080808080010000002EBB";
     const SAMPLE_FAN_HIGH: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000004001008080808001000000003000015500000000000000FF030D000000000000000000000000000000C30000000040020080808080010000003BBB";
     const SAMPLE_FAN_HIGH_LIGHT_LOW: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000004010008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000004012008080808001000000D8BB";
+    // Status replies to the beeper writes: current rec[35] = 0x43 (keys beep), then 0x40 (muted).
+    // The hood byte rec[36] stays 0x20 (light high) in both.
+    const SAMPLE_BEEPER_ON: &str = "AA6241EC003000015500000000000000FF030C000000000000000000000000000000C3000000004320008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000004320008080808001000000E5BB";
+    const SAMPLE_BEEPER_MUTED: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000004320008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000004020008080808001000000FBBB";
 
     #[test]
     fn power_differs_from_target_seconds_in_a_captured_20_second_level_5_cook() {
@@ -324,6 +412,8 @@ mod tests {
             "door",
             "fan_power",
             "light_power",
+            "clock_sync",
+            "beeper",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected);
@@ -339,6 +429,12 @@ mod tests {
         assert_eq!(comps["fan_power"]["speed_range_max"], 2);
         assert_eq!(comps["light_power"]["platform"], "light");
         assert_eq!(comps["light_power"]["brightness_scale"], 2);
+        assert_eq!(comps["clock_sync"]["platform"], "button");
+        assert_eq!(comps["clock_sync"]["command_topic"], "$this/clock_sync/set");
+        assert!(comps["clock_sync"].get("state_topic").is_none());
+        assert_eq!(comps["beeper"]["platform"], "switch");
+        assert_eq!(comps["beeper"]["state_topic"], "$this/beeper");
+        assert_eq!(comps["beeper"]["command_topic"], "$this/beeper/set");
     }
 
     #[test]
@@ -484,6 +580,69 @@ mod tests {
         unknown[4] = 0xff;
         thinq.emit_data(&unknown);
         assert_eq!(prop(&ha, "status").as_deref(), Some("None"));
+    }
+
+    // Sent to a live MVEM1825 and acknowledged (41 00 43 00); the panel showed 13:05.
+    #[test]
+    fn clock_sync_reproduces_the_frame_verified_on_the_appliance() {
+        let (_, thinq, dev) = make();
+        dev.send_clock(13, 5);
+        assert_eq!(thinq.outbox().len(), 1);
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA15F043210E0D05008080808080808080FF80E7BB"
+        );
+    }
+
+    #[test]
+    fn clock_sync_sends_the_host_time_and_leaves_every_other_preference_unchanged() {
+        let (_, thinq, dev) = make();
+        dev.set_property("clock_sync", "PRESS");
+        let outbox = thinq.outbox();
+        assert_eq!(outbox.len(), 1);
+        let frame = &outbox[0];
+        let payload = &frame[6..frame.len() - 2];
+        assert_eq!(hex_encode(&frame[..6]), "AA15F043210E");
+        assert!(payload[0] < 24);
+        assert!(payload[1] < 60);
+        assert_eq!(payload[2], 0x00);
+        assert_eq!(
+            payload[3..],
+            [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xff, 0x80]
+        );
+    }
+
+    // Payload index 3 = 0 silenced the keys (confirmed at the panel); 1 brought them back.
+    #[test]
+    fn beeper_commands_reproduce_the_frames_verified_on_the_appliance() {
+        let (_, thinq, dev) = make();
+        dev.set_property("beeper", "OFF");
+        dev.set_property("beeper", "ON");
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(
+            sent,
+            [
+                "AA15F043210E8080800080808080808080FF80F5BB",
+                "AA15F043210E8080800180808080808080FF80F4BB",
+            ]
+        );
+    }
+
+    #[test]
+    fn beeper_state_decodes_from_the_low_bits_of_rec_35() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_BEEPER_ON);
+        assert_eq!(prop(&ha, "beeper").as_deref(), Some("ON"));
+        feed(&thinq, SAMPLE_BEEPER_MUTED);
+        assert_eq!(prop(&ha, "beeper").as_deref(), Some("OFF"));
+    }
+
+    #[test]
+    fn invalid_beeper_and_clock_payloads_send_nothing() {
+        let (_, thinq, dev) = make();
+        dev.set_property("beeper", "LOUD");
+        dev.set_property("clock_sync", "not-a-press");
+        assert_eq!(thinq.outbox().len(), 0);
     }
 
     #[test]
