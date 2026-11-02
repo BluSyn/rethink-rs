@@ -264,7 +264,7 @@ impl Device {
         let err_msg = ERRORS
             .get(error)
             .and_then(|e| *e)
-            .unwrap_or("unknown");
+            .unwrap_or("None");
         self.publish_property("error_message", err_msg.into());
         self.publish_on_off("error", error != 0);
 
@@ -272,13 +272,13 @@ impl Device {
 
         let course = course_name(custom_course)
             .or_else(|| course_name(native_course))
-            .unwrap_or("unknown");
+            .unwrap_or("None");
         self.publish_property("course", course.into());
 
         self.publish_property("spin", spin_value(spin).unwrap_or("None").into());
         self.publish_property("temp", temperature_value(temp).unwrap_or("None").into());
 
-        let dry = drying_mode(drying).unwrap_or("unknown");
+        let dry = drying_mode(drying).unwrap_or("None");
         self.publish_property("drying_mode", dry.into());
 
         self.publish_property("cycles", PropertyValue::Int(cycles));
@@ -521,24 +521,51 @@ mod tests {
     }
 
     #[test]
+    fn unmapped_codes_publish_none() {
+        let (ha, thinq, _dev) = make_device();
+        let mut frame = hex_decode("01030403040100030904010000000000000003000006006400000400");
+        frame[5] = 0x03; // no native course 3
+        frame[6] = 10; // a hole in the error table
+        frame[11] = 0x01; // no drying mode 1
+        thinq.emit_data(&frame);
+        assert_eq!(prop(&ha, "course"), "None".into());
+        assert_eq!(prop(&ha, "error_message"), "None".into());
+        assert_eq!(prop(&ha, "error"), "ON".into());
+        assert_eq!(prop(&ha, "drying_mode"), "None".into());
+
+        frame[6] = 27; // past the end of the error table
+        thinq.emit_data(&frame);
+        assert_eq!(prop(&ha, "error_message"), "None".into());
+    }
+
+    #[test]
     fn start_sends_mon() {
         let (_ha, thinq, dev) = make_device();
         thinq.reset_recorder();
         DeviceHandler::start(dev.as_ref());
-        assert_eq!(thinq.sent().len(), 1);
-        assert_eq!(thinq.sent()[0]["Cmd"], "Mon");
-        assert_eq!(thinq.sent()[0]["CmdOpt"], "Start");
+        assert_eq!(thinq.sent(), vec![json!({"Cmd": "Mon", "CmdOpt": "Start"})]);
     }
 
     #[test]
-    fn write_power_on_off() {
+    fn write_power_on() {
         let (_ha, thinq, dev) = make_device();
         thinq.reset_recorder();
         dev.set_property("power", "ON");
-        assert_eq!(thinq.sent()[0]["Value"], "On");
+        assert_eq!(
+            thinq.sent(),
+            vec![json!({"Cmd": "Control", "CmdOpt": "Power", "Value": "On", "Format": "B64", "Data": ""})]
+        );
+    }
+
+    #[test]
+    fn write_power_off() {
+        let (_ha, thinq, dev) = make_device();
         thinq.reset_recorder();
         dev.set_property("power", "OFF");
-        assert_eq!(thinq.sent()[0]["Value"], "Off");
+        assert_eq!(
+            thinq.sent(),
+            vec![json!({"Cmd": "Control", "CmdOpt": "Power", "Value": "Off", "Format": "B64", "Data": ""})]
+        );
     }
 
     #[test]
@@ -546,8 +573,10 @@ mod tests {
         let (_ha, thinq, dev) = make_device();
         thinq.reset_recorder();
         dev.set_property("pause", "");
-        assert_eq!(thinq.sent()[0]["CmdOpt"], "Operation");
-        assert_eq!(thinq.sent()[0]["Value"], "Stop");
+        assert_eq!(
+            thinq.sent(),
+            vec![json!({"Cmd": "Control", "CmdOpt": "Operation", "Value": "Stop", "Format": "B64", "Data": ""})]
+        );
     }
 
     #[test]
