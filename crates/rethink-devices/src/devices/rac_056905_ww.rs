@@ -30,6 +30,8 @@ fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
 }
 
 const MODE_PURIFY_ONLY: u32 = 46;
+/// 0x2d3 (support.reserve): the remote's sleep timer goes up to 12 h instead of 7 h.
+const SLEEP_TIMER_12H: u32 = 0x4000;
 const MOMENTARY_INOUTDOOR: u32 = 0x2;
 const MOMENTARY_OUTDOOR: u32 = 0x4;
 
@@ -1391,7 +1393,8 @@ impl Device {
             self.describe_feature(
                 config,
                 "aiair",
-                "AI Air adjusts the fan and airflow while cooling or heating.",
+                "AI Air: fan speed and airflow direction adjust automatically to reach the set temperature quickly. \
+                 Changing the mode or starting Jet ends it.",
                 Some(("AC on, in Cooling or Heating".into(), Some(modes))),
             );
         }
@@ -1400,7 +1403,8 @@ impl Device {
             self.describe_feature(
                 config,
                 "windowdetection",
-                "Window Open Detection switches the AC to Energy Control when the room temperature changes suddenly.",
+                "Window Open Detection: in Cooling or Heating, a sudden temperature change (an open window) switches \
+                 the AC to Energy Control (8O/6O/4O on the display) until the window is closed or the mode changes.",
                 None,
             );
         }
@@ -1410,7 +1414,8 @@ impl Device {
             self.describe_feature(
                 config,
                 "lowheating",
-                "Low Heating keeps the room at about 10 °C.",
+                "Low Heating (LH): keeps the room at about 10 °C so nothing freezes while you are away. \
+                 Changing the temperature, fan speed or mode cancels it.",
                 Some(("AC on, in Heating".into(), Some(modes))),
             );
         }
@@ -1419,14 +1424,20 @@ impl Device {
             self.describe_feature(
                 config,
                 "beep",
-                "The beep when a setting changes. Off is the Mute function.",
+                "The beep when a setting changes. Off is the \"Mute\" function.",
                 None,
             );
         }
         if caps(0x2f0, 0x8) && self.has_tag(0x12d) {
             let while_on = Some(("AC on".into(), None));
             for (id, name, desc, text) in [
-                (0x12du16, "goodsleep", "GoodSleep", "Sleep+ adjusts the temperature and fan while the Sleep timer runs."),
+                (
+                    0x12du16,
+                    "goodsleep",
+                    "GoodSleep",
+                    "Sleep+: while the Sleep timer runs in Cooling, the AC learns and adjusts the temperature and \
+                     fan speed for sleeping. Nothing changes until a Sleep timer is set.",
+                ),
                 (0x12f, "goodsleepop", "GoodSleep adjusts operation", "Lets Sleep+ adjust the fan and operation."),
                 (0x133, "goodsleeptemp", "GoodSleep adjusts temperature", "Lets Sleep+ adjust the set temperature."),
             ] {
@@ -1443,7 +1454,8 @@ impl Device {
             self.describe_feature(
                 config,
                 "softair",
-                "Soft Air directs the airflow upwards and runs the fan low.",
+                "Soft Air: directs the airflow upwards so you stay cool without feeling a draft. The fan runs low \
+                 while it is on. Changing the mode ends it.",
                 Some(("AC on, in Cooling or Fan".into(), Some(modes))),
             );
         }
@@ -1458,7 +1470,8 @@ impl Device {
         self.describe_feature(
             config,
             "autodrysetting",
-            "Auto Clean+ dries the indoor unit after Cooling or Dry.",
+            "Auto Clean+: after Cooling or Dry, dries the inside of the indoor unit for up to 20 minutes to \
+             prevent moisture and odours. Can be set with the AC off.",
             None,
         );
         self.describe_feature(
@@ -1471,15 +1484,23 @@ impl Device {
             self.describe_feature(
                 config,
                 "displaylight",
-                "The indoor unit display.",
+                "The indoor unit display. Off is the \"Light Off\" function; a remote button press lights it briefly.",
                 None,
             );
         }
         if config.components.contains_key("sleeptimer") {
+            let hours = if self.core.get_raw(0x2d3).unwrap_or(0) & SLEEP_TIMER_12H != 0 {
+                12
+            } else {
+                7
+            };
             self.describe_feature(
                 config,
                 "sleeptimer",
-                "Turns the AC off after the set time.",
+                &format!(
+                    "Turns the AC off after the set time (the remote allows up to {hours} h). In Cooling it raises \
+                     the temperature by up to 2 °C for a more comfortable sleep."
+                ),
                 Some(("AC on".into(), None)),
             );
         }
@@ -1509,7 +1530,7 @@ impl Device {
             self.describe_feature(
                 config,
                 "jet",
-                "Jet runs strong airflow for 30 minutes.",
+                "Jet: strong airflow for 30 minutes to cool or heat the room quickly, then back to the previous setting.",
                 Some((text.into(), Some(jet_modes))),
             );
         }
@@ -1517,7 +1538,8 @@ impl Device {
             self.describe_feature(
                 config,
                 "energysave",
-                "Energy saving reduces the power input.",
+                "Energy saving: reduces the power input, which also reduces cooling capacity. The choice is re-applied \
+                 whenever the AC is back in Cooling.",
                 Some(("AC on, in Cooling".into(), Some(vec![0]))),
             );
         }
@@ -1525,7 +1547,8 @@ impl Device {
             self.describe_feature(
                 config,
                 "airclean",
-                "Air purify runs the ionizer. It can be set at any time.",
+                "Air purify: the ionizer reduces bacteria and other substances in the air. Set it any time; it is \
+                 applied while the AC runs.",
                 None,
             );
         }
@@ -1642,7 +1665,8 @@ impl Device {
         self.describe_feature(
             config,
             "energylimit",
-            "Energy Control limits the power input to 80, 60 or 40 percent.",
+            "Energy Control: limits the power input to 80, 60 or 40 % of the rated input, which also reduces \
+             cooling capacity. The choice is re-applied whenever the AC is back in Cooling.",
             Some(("AC on, in Cooling".into(), Some(modes))),
         );
     }
@@ -2446,5 +2470,49 @@ mod tests {
         assert_eq!(components["energysave"]["platform"], "switch");
         assert_eq!(components["autodry"]["platform"], "switch");
         assert!(!components.contains_key("autodrysetting"));
+    }
+
+    fn feature_attributes(ha: &MockHaConnection, name: &str) -> Value {
+        let props = ha.device(DEVICE_ID).unwrap().properties;
+        serde_json::from_str(&props[&format!("{name}-attributes")].as_string()).unwrap()
+    }
+
+    #[test]
+    fn feature_descriptions_match_upstream() {
+        let (ha, _thinq, _dev) = h09_ready();
+        for (name, description) in [
+            ("aiair", "AI Air: fan speed and airflow direction adjust automatically to reach the set temperature quickly. Changing the mode or starting Jet ends it."),
+            ("energylimit", "Energy Control: limits the power input to 80, 60 or 40 % of the rated input, which also reduces cooling capacity. The choice is re-applied whenever the AC is back in Cooling."),
+            ("softair", "Soft Air: directs the airflow upwards so you stay cool without feeling a draft. The fan runs low while it is on. Changing the mode ends it."),
+            ("windowdetection", "Window Open Detection: in Cooling or Heating, a sudden temperature change (an open window) switches the AC to Energy Control (8O/6O/4O on the display) until the window is closed or the mode changes."),
+            ("lowheating", "Low Heating (LH): keeps the room at about 10 °C so nothing freezes while you are away. Changing the temperature, fan speed or mode cancels it."),
+            ("beep", "The beep when a setting changes. Off is the \"Mute\" function."),
+            ("goodsleep", "Sleep+: while the Sleep timer runs in Cooling, the AC learns and adjusts the temperature and fan speed for sleeping. Nothing changes until a Sleep timer is set."),
+            ("goodsleepop", "Lets Sleep+ adjust the fan and operation."),
+            ("goodsleeptemp", "Lets Sleep+ adjust the set temperature."),
+            ("autodrysetting", "Auto Clean+: after Cooling or Dry, dries the inside of the indoor unit for up to 20 minutes to prevent moisture and odours. Can be set with the AC off."),
+            ("autodryfan", "Fan speed used while Auto Clean+ dries the indoor unit."),
+            ("displaylight", "The indoor unit display. Off is the \"Light Off\" function; a remote button press lights it briefly."),
+            // 0x2d3 = 0x45011 has SLEEP_TIMER_12H
+            ("sleeptimer", "Turns the AC off after the set time (the remote allows up to 12 h). In Cooling it raises the temperature by up to 2 °C for a more comfortable sleep."),
+            ("starttimer", "Turns the AC on or off after the set time (up to 24 h)."),
+            ("jet", "Jet: strong airflow for 30 minutes to cool or heat the room quickly, then back to the previous setting."),
+        ] {
+            assert_eq!(feature_attributes(&ha, name)["description"], description, "{name}");
+        }
+
+        // DC12RT: 0x2d3 = 0x7, so the remote's sleep timer stops at 7 h
+        const CAPS: &str = "0000040000008702017C4EB001B05077B0A0017CB0C1B103B307B34FB4C7B582B6A04D87B6F0690409B701BC40BD46B5C0B61029B642B5C1B6102EB642B5C2B6102EB642B5C4B6102CB642B5C5B6102EB642B5C6B6102CB64294E8";
+        const QUERY: &str = "00000400000087020480697E407DC07E827F50317F9029C840C881C8C08340838183C0868086C0870087C1894088408A008A408A808C808CC0ACC0D540D580C900CAC0CB108BCB40CB8CCBC0CC10CCCC40CC90968B40BF6001C7BFC0BFA001C7C000BE5089BE90881B00BEC0C300C340C0C0C3800C05";
+        let (ha, thinq, _dev) = make_device();
+        thinq.emit_data(&hex_decode(CAPS));
+        thinq.emit_data(&hex_decode(QUERY));
+        for (name, description) in [
+            ("sleeptimer", "Turns the AC off after the set time (the remote allows up to 7 h). In Cooling it raises the temperature by up to 2 °C for a more comfortable sleep."),
+            ("energysave", "Energy saving: reduces the power input, which also reduces cooling capacity. The choice is re-applied whenever the AC is back in Cooling."),
+            ("airclean", "Air purify: the ionizer reduces bacteria and other substances in the air. Set it any time; it is applied while the AC runs."),
+        ] {
+            assert_eq!(feature_attributes(&ha, name)["description"], description, "{name}");
+        }
     }
 }
