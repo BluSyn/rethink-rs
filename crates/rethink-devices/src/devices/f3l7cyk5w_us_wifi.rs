@@ -9,7 +9,6 @@ use crate::device_trait::DeviceHandler;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::{json, Map};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 const STATUS_FRAME_TYPE: u8 = 0xec;
@@ -48,7 +47,8 @@ const PHASE_OFF: u8 = 0x00;
 /// End (cloud code 60). Timers park on a stale minute here, same as Off.
 const PHASE_END: u8 = 0x3c;
 
-const STATUS_OPTIONS: &[&str] = &[
+// The status, course, soil, spin and temperature tables are shared with F3L2CYV5W_WIFI.
+pub(crate) const STATUS_OPTIONS: &[&str] = &[
     "Off",
     "Standby",
     "Paused",
@@ -68,7 +68,7 @@ const STATUS_OPTIONS: &[&str] = &[
 ];
 
 /// Cloud state enum. Unmapped codes publish `None` rather than a guessed label.
-fn status_name(phase: u8) -> &'static str {
+pub(crate) fn status_name(phase: u8) -> &'static str {
     match phase {
         0 => "Off",
         5 | 83 => "Standby",
@@ -89,48 +89,44 @@ fn status_name(phase: u8) -> &'static str {
         _ => "None",
     }
 }
-fn course_map() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (0x01, "Tub Clean"),
-        (0x02, "Allergiene"),
-        (0x03, "Sanitary"),
-        (0x04, "Bedding"),
-        (0x05, "Heavy Duty"),
-        (0x06, "Normal"),
-        (0x07, "Bright Whites"),
-        (0x08, "Perm Press"),
-        (0x09, "Delicates"),
-        (0x0a, "Towels"),
-        (0x0b, "Speed Wash"),
-        (0x0c, "Downloaded"),
-    ])
-}
-fn soil_map() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (1, "Light"),
-        (2, "Light-Normal"),
-        (3, "Normal"),
-        (4, "Normal-Heavy"),
-        (5, "Heavy"),
-    ])
-}
-fn spin_map() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (1, "No Spin"),
-        (2, "Low"),
-        (3, "Medium"),
-        (4, "High"),
-        (5, "Extra High"),
-    ])
-}
-fn temp_map() -> HashMap<u8, &'static str> {
-    HashMap::from([
-        (1, "Tap Cold"),
-        (2, "Cold"),
-        (4, "Warm"),
-        (6, "Hot"),
-        (7, "Extra Hot"),
-    ])
+pub(crate) const COURSE: &[(u8, &str)] = &[
+    (0x01, "Tub Clean"),
+    (0x02, "Allergiene"),
+    (0x03, "Sanitary"),
+    (0x04, "Bedding"),
+    (0x05, "Heavy Duty"),
+    (0x06, "Normal"),
+    (0x07, "Bright Whites"),
+    (0x08, "Perm Press"),
+    (0x09, "Delicates"),
+    (0x0a, "Towels"),
+    (0x0b, "Speed Wash"),
+    (0x0c, "Downloaded"),
+];
+pub(crate) const SOIL: &[(u8, &str)] = &[
+    (1, "Light"),
+    (2, "Light-Normal"),
+    (3, "Normal"),
+    (4, "Normal-Heavy"),
+    (5, "Heavy"),
+];
+pub(crate) const SPIN: &[(u8, &str)] = &[
+    (1, "No Spin"),
+    (2, "Low"),
+    (3, "Medium"),
+    (4, "High"),
+    (5, "Extra High"),
+];
+pub(crate) const TEMP: &[(u8, &str)] = &[
+    (1, "Tap Cold"),
+    (2, "Cold"),
+    (4, "Warm"),
+    (6, "Hot"),
+    (7, "Extra Hot"),
+];
+
+fn named(table: &[(u8, &'static str)], code: u8) -> Option<&'static str> {
+    table.iter().find(|(c, _)| *c == code).map(|(_, name)| *name)
 }
 
 pub struct Device {
@@ -199,11 +195,7 @@ impl Device {
             .publish_property("status", status_name(phase).into());
         self.core.publish_property(
             "course",
-            course_map()
-                .get(&rec[COURSE_OFFSET])
-                .copied()
-                .unwrap_or("unknown")
-                .into(),
+            named(COURSE, rec[COURSE_OFFSET]).unwrap_or("unknown").into(),
         );
         self.core.publish_property(
             "remaining_time",
@@ -234,27 +226,15 @@ impl Device {
         );
         self.core.publish_property(
             "soil",
-            soil_map()
-                .get(&rec[SOIL_OFFSET])
-                .copied()
-                .unwrap_or("unknown")
-                .into(),
+            named(SOIL, rec[SOIL_OFFSET]).unwrap_or("unknown").into(),
         );
         self.core.publish_property(
             "spin",
-            spin_map()
-                .get(&rec[SPIN_OFFSET])
-                .copied()
-                .unwrap_or("unknown")
-                .into(),
+            named(SPIN, rec[SPIN_OFFSET]).unwrap_or("unknown").into(),
         );
         self.core.publish_property(
             "temp",
-            temp_map()
-                .get(&rec[TEMP_OFFSET])
-                .copied()
-                .unwrap_or("unknown")
-                .into(),
+            named(TEMP, rec[TEMP_OFFSET]).unwrap_or("unknown").into(),
         );
         self.core
             .publish_property("rinse_count", ((rec[RINSE_OFFSET] & 0x0f) as i64).into());
