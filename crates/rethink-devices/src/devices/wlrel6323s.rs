@@ -155,6 +155,8 @@ impl Device {
                     "options": labels(OVEN_STATES),
                 }),
             ),
+            // Withdraws the entity this handler published before oven_status took its place.
+            ("oven_state".into(), json!({"platform": "sensor"})),
             (
                 "oven_mode".into(),
                 json!({
@@ -474,6 +476,15 @@ mod tests {
         assert_eq!(comps["beeper_volume"]["platform"], "select");
         assert_eq!(comps["beeper_volume"]["options"], json!(["High", "Mute"]));
         assert_eq!(comps["beeper_volume"]["optimistic"], true);
+    }
+
+    #[test]
+    fn withdraws_the_entity_renamed_to_oven_status() {
+        let (ha, _, _) = make();
+        let device = ha.device(DEVICE_ID).unwrap();
+        let comps = &device.config.as_ref().unwrap().components;
+        assert_eq!(comps["oven_state"], json!({"platform": "sensor"}));
+        assert_eq!(comps["oven_status"]["unique_id"], "$deviceid-oven_status");
     }
 
     #[test]
