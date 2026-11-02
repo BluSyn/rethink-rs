@@ -1,6 +1,7 @@
 //! DHUM_056905_WW — LG dehumidifier (deviceType 403).
 
 use crate::device_trait::DeviceHandler;
+use crate::js;
 use rethink_util::sync::Mutex;
 use rethink_core::device_base::{default_config, FieldDefinition, TlvDeviceCore};
 use rethink_core::ha::{DeviceDiscovery, HaConnection, PropertyValue};
@@ -43,14 +44,14 @@ const MODE_FAN_CAPS: &[ModeFanCap] = &[
     },
 ];
 
-fn clip_to_ha_mode(raw: u32) -> String {
+fn clip_to_ha_mode(raw: u32) -> Option<&'static str> {
     match raw {
-        0 | 17 => "Smart".into(),
-        1 | 18 => "Jet".into(),
-        2 | 19 => "Silent".into(),
-        4 | 20 => "Spot".into(),
-        5 | 21 => "Laundry".into(),
-        n => format!("mode{n}"),
+        0 | 17 => Some("Smart"),
+        1 | 18 => Some("Jet"),
+        2 | 19 => Some("Silent"),
+        4 | 20 => Some("Spot"),
+        5 | 21 => Some("Laundry"),
+        _ => None,
     }
 }
 
@@ -249,7 +250,7 @@ impl Device {
             let this_r = self.clone();
             let this_w = self.clone();
             let mut mode = FieldDefinition::new("humidifier", "mode").with_id(0x1f9);
-            mode.read_xform = Some(Box::new(|raw| Some(clip_to_ha_mode(raw).into())));
+            mode.read_xform = Some(Box::new(|raw| clip_to_ha_mode(raw).map(Into::into)));
             mode.read_callback = Some(Box::new(move |_val| {
                 let mode = this_r.core.get_raw(0x1f9);
                 if let Some(mode) = mode {
@@ -269,28 +270,23 @@ impl Device {
                 true
             }));
             mode.write_xform = Some(Box::new(move |val| {
-                if val == "off" || val.is_empty() {
+                if val == "off" {
                     this_w.core.set_property("humidifier-power", "OFF");
                     return None;
                 }
                 this_w.core.set_raw(0x1f7, 1);
                 let mode = normalize_ha_mode(val);
-                let clip = ha_to_clip_mode(&mode).unwrap_or_else(|| val.parse().unwrap_or(0));
-                {
-                    let mut inner = this_w.inner.lock();
-                    let was_silent = inner
-                        .mode_clip_prev
-                        .map(|m| SILENT_MODES.contains(&m))
-                        .unwrap_or(false);
-                    if mode == "Silent" && !was_silent {
-                        this_w.core.set_raw(0x1fa, 2);
-                        drop(inner);
-                        this_w.publish_fan_speed_state(Some("low"));
-                        this_w.inner.lock().mode_clip_prev = Some(clip);
-                    } else {
-                        inner.mode_clip_prev = Some(clip);
-                    }
+                let was_silent = this_w
+                    .inner
+                    .lock()
+                    .mode_clip_prev
+                    .is_some_and(|m| SILENT_MODES.contains(&m));
+                if mode == "Silent" && !was_silent {
+                    this_w.core.set_raw(0x1fa, 2);
+                    this_w.publish_fan_speed_state(Some("low"));
                 }
+                let clip = ha_to_clip_mode(&mode)?;
+                this_w.inner.lock().mode_clip_prev = Some(clip);
                 Some(PropertyValue::Int(clip as i64))
             }));
             mode.write_attach_static = Some(vec![0x1f7]);
@@ -302,27 +298,19 @@ impl Device {
             let this_r = self.clone();
             let this_w = self.clone();
             let mut fan = FieldDefinition::new("fan_speed", "").with_id(0x1fa);
-            fan.read_xform = Some(Box::new(|raw| {
-                Some(match raw {
-                    2 => "low".into(),
-                    6 => "high".into(),
-                    n => PropertyValue::Str(n.to_string()),
-                })
+            fan.read_xform = Some(Box::new(|raw| match raw {
+                2 => Some("low".into()),
+                6 => Some("high".into()),
+                _ => None,
             }));
             fan.read_callback = Some(Box::new(move |val| {
-                let s = match val {
-                    PropertyValue::Str(s) => s.clone(),
-                    other => other.as_string(),
-                };
-                this_r.publish_fan_speed_state(Some(&s));
+                this_r.publish_fan_speed_state(Some(&val.as_string()));
                 false
             }));
-            fan.write_xform = Some(Box::new(|val| {
-                Some(match val {
-                    "low" => 2i64.into(),
-                    "high" => 6i64.into(),
-                    other => other.parse::<i64>().ok()?.into(),
-                })
+            fan.write_xform = Some(Box::new(|val| match val {
+                "low" => Some(2i64.into()),
+                "high" => Some(6i64.into()),
+                _ => None,
             }));
             fan.write_callback = Some(Box::new(move |val| {
                 if val != 2 && val != 6 {
@@ -357,16 +345,10 @@ impl Device {
                 (30..=70).contains(&n)
             }));
             f.write_xform = Some(Box::new(move |val_str| {
-                let mut val: f64 = val_str.parse().ok()?;
-                if val < 30.0 {
-                    val = 30.0;
-                }
-                if val > 70.0 {
-                    val = 70.0;
-                }
-                val = val.round();
+                // NaN gets past upstream's clamps, and its TLV encoder writes it as 0
+                let val = js::number(val_str).map_or(0, |v| v.clamp(30.0, 70.0).round() as i64);
                 core_w.set_raw(0x1f7, 1);
-                Some(PropertyValue::Int(val as i64))
+                Some(PropertyValue::Int(val))
             }));
             f.write_attach_static = Some(vec![0x1f7, 0x1f9]);
             core.add_field(config, f, true);
@@ -456,8 +438,7 @@ impl Device {
             Some(PropertyValue::from(hours))
         }));
         f.write_xform = Some(Box::new(|val| {
-            let n: f64 = val.parse().ok()?;
-            Some(PropertyValue::Int((n * 60.0).round() as i64))
+            Some(PropertyValue::Int(js::number(val).map_or(0, |n| (n * 60.0).round() as i64)))
         }));
         self.core.add_field(config, f, true);
     }
@@ -827,6 +808,21 @@ mod tests {
     }
 
     #[test]
+    fn number_payloads_parse_like_javascript() {
+        let (_ha, thinq, dev) = build_ready();
+        for (payload, value) in [(" 45 ", 45), ("", 30), ("0x2d", 45), ("80", 70), ("abc", 0)] {
+            thinq.reset_recorder();
+            dev.set_property("humidifier-target_humidity", payload);
+            assert_eq!(parse_sent_tlvs(&thinq.outbox()[0])[0], (0x253, value), "{payload:?}");
+        }
+        for (payload, value) in [(" 2 ", 120), ("", 0), ("1.5", 90), ("abc", 0)] {
+            thinq.reset_recorder();
+            dev.set_property("off_timer-", payload);
+            assert_eq!(parse_sent_tlvs(&thinq.outbox()[0]), [(0x21b, value)], "{payload:?}");
+        }
+    }
+
+    #[test]
     fn ionizer_write() {
         let (_ha, thinq, dev) = build_ready();
         dev.set_property("ionizer-", "ON");
@@ -913,6 +909,48 @@ mod tests {
             let pkt = hex_encode(&thinq.outbox().last().unwrap());
             assert!(pkt.contains(needle), "{hours}h → {needle}, got {pkt}");
         }
+    }
+
+    #[test]
+    fn unknown_mode_and_fan_codes_publish_nothing() {
+        let (ha, _thinq, dev) = build_ready();
+        assert_eq!(prop(&ha, "humidifier-mode"), Some("Smart".into()));
+        dev.process_key_value(0x1f9, 3);
+        assert_eq!(prop(&ha, "humidifier-mode"), Some("Smart".into()));
+        dev.process_key_value(0x1fa, 4);
+        assert_eq!(prop(&ha, "fan_speed-"), Some("low".into()));
+
+        // an unknown mode is not remembered as the previous one either
+        dev.process_key_value(0x1fa, 6);
+        dev.set_mode_clip_prev(Some(19));
+        dev.process_key_value(0x1f9, 7);
+        dev.process_key_value(0x1f9, 2);
+        assert_eq!(prop(&ha, "humidifier-mode"), Some("Silent".into()));
+        assert_eq!(prop(&ha, "fan_speed-"), Some("high".into()));
+    }
+
+    #[test]
+    fn mode_writes_ignore_unknown_labels_and_empty_payloads() {
+        let (_ha, thinq, dev) = build_ready();
+        for payload in ["", "Turbo", "17", "mode3"] {
+            dev.set_property("humidifier-mode", payload);
+            assert!(thinq.outbox().is_empty(), "{payload:?}");
+        }
+        dev.set_property("humidifier-mode", "laundry");
+        assert_eq!(parse_sent_tlvs(&thinq.outbox()[0]), [(0x1f9, 21), (0x1f7, 1)]);
+        thinq.reset_recorder();
+        dev.set_property("humidifier-mode", "off");
+        assert_eq!(parse_sent_tlvs(&thinq.outbox()[0]), [(0x1f7, 0)]);
+    }
+
+    #[test]
+    fn numeric_fan_payloads_are_ignored() {
+        let (_ha, thinq, dev) = build_ready();
+        for payload in ["2", "6", "4"] {
+            dev.set_property("fan_speed-", payload);
+        }
+        assert!(thinq.outbox().is_empty());
+        assert_eq!(dev.get_raw(0x1fa), Some(2));
     }
 
     #[test]
