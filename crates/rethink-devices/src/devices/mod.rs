@@ -118,6 +118,7 @@ register_devices! {
         dev_2reft1dic4p_u => { "2REFT1DIC4P_U" },
         dev_2reftbdii4p_u => { "2REFTBDII4P_U" },
         vent_725601_ww => { "VENT_725601_WW" | "VENT_725601" | "Z-H0151B2SR" },
+        hwwa9s_f2u => { "HWWA9S_F2U" },
     }
     t1 {
         wtdn3 => { "WTDN3" },
