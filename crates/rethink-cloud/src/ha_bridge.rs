@@ -80,13 +80,12 @@ impl Thinq2Device for T2Adapter {
     fn meta(&self) -> &rethink_core::metadata::Metadata {
         &self.dev.meta
     }
+    // send_to_device already notifies the send listeners (monitor, packet learners); notifying
+    // here too would report every packet, ack and command twice.
     fn send_packet(&self, buf: &[u8]) {
-        self.dev
-            .notify_send(crate::devmgr::SendToDevice::T2Packet(buf.to_vec()));
         (self.dev.send_to_device)(crate::devmgr::SendToDevice::T2Packet(buf.to_vec()));
     }
     fn send_ack(&self, buf: &[u8]) {
-        // send_to_device already notifies the monitor. A second notify_send would log the ack twice.
         (self.dev.send_to_device)(crate::devmgr::SendToDevice::T2Ack(buf.to_vec()));
     }
     fn send(&self, cmd: &str, msg_type: i32, data: serde_json::Value) {
@@ -95,7 +94,6 @@ impl Thinq2Device for T2Adapter {
             msg_type,
             data,
         };
-        self.dev.notify_send(msg.clone());
         (self.dev.send_to_device)(msg);
     }
     fn on_data(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>) {
@@ -583,5 +581,43 @@ mod tests {
             data: serde_json::Value::Null,
         });
         assert_eq!(*seen.lock(), vec![vec![0xaa, 0x01]]);
+    }
+
+    #[test]
+    fn handler_sends_reach_send_listeners_once() {
+        // As in thinq2/device.rs: send_to_device itself notifies the send listeners.
+        let slot: Arc<Mutex<Option<Arc<ConnectedDevice>>>> = Arc::new(Mutex::new(None));
+        let notify = slot.clone();
+        let dev = ConnectedDevice::new(
+            "id".into(),
+            Platform::Thinq2,
+            Metadata::new("M", "M", "1"),
+            Arc::new(|_: Vec<u8>| {}),
+            Arc::new(move |msg: SendToDevice| {
+                if let Some(d) = notify.lock().as_ref() {
+                    d.notify_send(msg);
+                }
+            }),
+        );
+        *slot.lock() = Some(dev.clone());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        dev.add_send_handler(move |msg| {
+            record.lock().push(match msg {
+                SendToDevice::T2Packet(_) => "packet",
+                SendToDevice::T2Ack(_) => "ack",
+                SendToDevice::T2Clip { .. } => "clip",
+                SendToDevice::T1Json(_) => "t1",
+            })
+        });
+        let adapter = T2Adapter {
+            dev: dev.clone(),
+            handlers: Mutex::new(Vec::new()),
+        };
+        adapter.send_packet(&[0xaa, 0x04, 0x00, 0xbb]);
+        adapter.send_ack(&[0xaa, 0x04, 0x00, 0xbb]);
+        adapter.send("setMaskingInfo", 1, serde_json::Value::Null);
+        assert_eq!(*seen.lock(), ["packet", "ack", "clip"]);
+        *slot.lock() = None;
     }
 }
