@@ -110,7 +110,7 @@ fn washer_courses(code: u8) -> &'static str {
         0x5d => "WINDSPIN90",
         0x5e => "WOOL",
         0x5f => "SINGLE_SHIRTS",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_temps(code: u8) -> &'static str {
@@ -132,7 +132,7 @@ fn washer_temps(code: u8) -> &'static str {
         0x0e => "N/A",
         0x0f => "FL27_TEMP_ECOWARM",
         0x10 => "FL27_TEMP_WARM",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_soil_wash(code: u8) -> &'static str {
@@ -146,7 +146,7 @@ fn washer_soil_wash(code: u8) -> &'static str {
         0x06 => "SOILWASH_PREWASH",
         0x07 => "SOILWASH_SOAKING",
         0x08 => "SOILWASH_TURBO_WASH",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_rinse(code: u8) -> &'static str {
@@ -168,7 +168,7 @@ fn washer_rinse(code: u8) -> &'static str {
         0x0e => "N/A",
         0x0f => "RINSE_PLUS",
         0x10 => "RINSE_PLUS2",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_spin(code: u8) -> &'static str {
@@ -190,7 +190,7 @@ fn washer_spin(code: u8) -> &'static str {
         0x0e => "N/A",
         0x0f => "SPIN_HIGH",
         0x10 => "SPIN_EXTRA_HIGH",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_soak(code: u8) -> &'static str {
@@ -202,7 +202,7 @@ fn washer_soak(code: u8) -> &'static str {
         0x04 => "SOAK_120",
         0x05 => "SOAK_180",
         0x06 => "SOAK_240",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_water_level(code: u8) -> &'static str {
@@ -217,7 +217,7 @@ fn washer_water_level(code: u8) -> &'static str {
         0x07 => "WATERLEVEL_8",
         0x08 => "WATERLEVEL_9",
         0x09 => "WATERLEVEL_10",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_load_item(code: u8) -> &'static str {
@@ -226,7 +226,7 @@ fn washer_load_item(code: u8) -> &'static str {
         0x01 => "LOADITEM_1",
         0x02 => "LOADITEM_2",
         0x03 => "LOADITEM_3",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_load_level(code: u8) -> &'static str {
@@ -240,7 +240,7 @@ fn washer_load_level(code: u8) -> &'static str {
         0x06 => "LOAD_LEVEL_6",
         0x07 => "LOAD_LEVEL_7",
         0x08 => "LOAD_LEVEL_8",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_rinse_count(code: u8) -> &'static str {
@@ -254,7 +254,7 @@ fn washer_rinse_count(code: u8) -> &'static str {
         0x06 => "RINSE_6",
         0x07 => "RINSE_7",
         0x08 => "RINSE_8",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn device_buzzer(code: u8) -> &'static str {
@@ -264,7 +264,7 @@ fn device_buzzer(code: u8) -> &'static str {
         0x02 => "Medium",
         0x03 => "High",
         0x04 => "Very High",
-        _ => "unknown",
+        _ => "None",
     }
 }
 const DEVICE_BUZZER_VALUES: &[&str] = &["Off", "Low", "Medium", "High", "Very High"];
@@ -276,7 +276,7 @@ fn dryer_temp(code: u8) -> &'static str {
         0x03 => "TEMP_MEDIUM",
         0x04 => "TEMP_MEDIUMHIGH",
         0x05 => "TEMP_HIGH",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn dryer_time_dry(code: u8) -> &'static str {
@@ -289,7 +289,7 @@ fn dryer_time_dry(code: u8) -> &'static str {
         0x05 => "TIMEDRY_60",
         0x06 => "TIMEDRY_70",
         0x07 => "TIMEDRY_80",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_states(code: u8) -> &'static str {
@@ -339,7 +339,7 @@ fn washer_states(code: u8) -> &'static str {
         0x2f => "LAUNDRYCARE",
         0x30 => "EZDISPENSE_CLEANING",
         0x31 => "END_WAITING",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn washer_errors(code: u8) -> &'static str {
@@ -365,7 +365,7 @@ fn washer_errors(code: u8) -> &'static str {
         0x12 => "ERROR_E3",
         0x13 => "ERROR_PS",
         0x14 => "ERROR_DE1",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn dryer_errors(code: u8) -> &'static str {
@@ -391,7 +391,7 @@ fn dryer_errors(code: u8) -> &'static str {
         0x12 => "ERROR_NOFILTER",
         0x13 => "ERROR_EEPROM",
         0x14 => "ERROR_F1",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn dryer_states(code: u8) -> &'static str {
@@ -426,7 +426,7 @@ fn dryer_states(code: u8) -> &'static str {
         0x1b => "END_WAITING",
         0x1c => "DRUM_CARE",
         0x1f => "AI_LOAD_CHECK",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn dryer_dry_levels(code: u8) -> &'static str {
@@ -437,7 +437,7 @@ fn dryer_dry_levels(code: u8) -> &'static str {
         0x03 => "NORMAL",
         0x04 => "MORE",
         0x05 => "VERY",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn dryer_duct_clogging(code: u8) -> &'static str {
@@ -445,7 +445,7 @@ fn dryer_duct_clogging(code: u8) -> &'static str {
         0x00 => "NONE",
         0x01 => "LEVEL_1",
         0x02 => "LEVEL_2",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn dryer_courses(code: u8) -> &'static str {
@@ -509,7 +509,7 @@ fn dryer_courses(code: u8) -> &'static str {
         0x38 => "FULLLOADDRY",
         0x39 => "DEHUMIDIFICATION",
         0x3a => "TURBODRY",
-        _ => "unknown",
+        _ => "None",
     }
 }
 fn init_lcd_themes(code: u8) -> &'static str {
@@ -527,7 +527,7 @@ fn init_lcd_themes(code: u8) -> &'static str {
         0x0a => "New Years",
         0x0b => "Christmas",
         0x0c => "None",
-        _ => "unknown",
+        _ => "None",
     }
 }
 const INIT_LCD_THEMES_VALUES: &[&str] = &["Default", "Winter 1", "Winter 2", "Winter 3", "Spring 1", "Spring 2", "Summer 1", "Summer 2", "Fall 1", "Halloween", "New Years", "Christmas", "None"];
@@ -734,16 +734,43 @@ pub fn create(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Met
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{Thinq2Device, hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Metadata};
-    use crate::device_trait::DeviceHandler;
+    use rethink_core::{
+        hex_decode, hex_encode, wrap_aabb, Metadata, MockHaConnection, MockThinq2Device,
+        Thinq2Device,
+    };
 
     const DEVICE_ID: &str = "test-id";
-    const STATUS_WASHER_RUNNING: &str = "aad0360a00d0008542000100ec00be013200030e0e0e1600000000000000002d002d00000016010000070000020f0202022d2d00000000000c380000000000070401002a000000000000000000003c00000001000200000200000000201800810700000000070000000000000000013200030e0e0e1600000000000000002d002d000000160b0100070000020f0202022d2d00000010000c380000000000070401002a000000000000000000003c0000000100020000020000000020180081070000000007000000000000000023a9bb";
-    const STATE_RESYNC: &str = "aa71360a00710085f3000100eb005f013200030e0e0e1600000000000000002a002d000200160b2600070000020f0202022d2d00000010010c380000000000060401002a000000000000000000000000000001000200000000000000000000810700000000060000000000000000d05dbb";
-    const WASHER_DOOR_OPEN: &str = "aa42360a0042007d83000201030007100c010b1000330105002557544c5f4658555f4244565f4e415f30310000000102d71c0b8b010700000000000000000018babb";
-    const WASHER_DOOR_CLOSE: &str = "aa42360a0042007d84000201030007100c010b1001330105002557544c5f4658555f4244565f4e415f30310000000102d51c0b8b0107000000000000000000c4cebb";
-    const DRYER_DOOR_OPEN: &str = "aa4e360a004e007d850002010300130a0a01040a000021ff000000000000000105340105002557544c5f4658555f4244565f4e415f30310000000102d81c0b8b0107000000000000000000b590bb";
-    const DRYER_DOOR_CLOSE: &str = "aa4e360a004e007d860002010300130a0a01040a00002200000000000000000005340105002557544c5f4658555f4244565f4e415f30310000000102d71c0b8b0107000000000000000000b490bb";
+
+    // Real captures from an LG WashTower, and the packets upstream's tests expect to be sent.
+    const STATUS_WASHER_RUNNING: &str =
+        "aad0360a00d0008542000100ec00be013200030e0e0e1600000000000000002d002d00000016010000070000020f0202022d2d00000000000c380000000000070401002a000000000000000000003c00000001000200000200000000201800810700000000070000000000000000013200030e0e0e1600000000000000002d002d000000160b0100070000020f0202022d2d00000010000c380000000000070401002a000000000000000000003c0000000100020000020000000020180081070000000007000000000000000023a9bb";
+    const STATE_RESYNC: &str =
+        "aa71360a00710085f3000100eb005f013200030e0e0e1600000000000000002a002d000200160b2600070000020f0202022d2d00000010010c380000000000060401002a000000000000000000000000000001000200000000000000000000810700000000060000000000000000d05dbb";
+    const WASHER_DOOR_OPEN: &str =
+        "aa42360a0042007d83000201030007100c010b1000330105002557544c5f4658555f4244565f4e415f30310000000102d71c0b8b010700000000000000000018babb";
+    const WASHER_DOOR_CLOSE: &str =
+        "aa42360a0042007d84000201030007100c010b1001330105002557544c5f4658555f4244565f4e415f30310000000102d51c0b8b0107000000000000000000c4cebb";
+    const DRYER_DOOR_OPEN: &str =
+        "aa4e360a004e007d850002010300130a0a01040a000021ff000000000000000105340105002557544c5f4658555f4244565f4e415f30310000000102d81c0b8b0107000000000000000000b590bb";
+    const DRYER_DOOR_CLOSE: &str =
+        "aa4e360a004e007d860002010300130a0a01040a00002200000000000000000005340105002557544c5f4658555f4244565f4e415f30310000000102d71c0b8b0107000000000000000000b490bb";
+    const SEND_WASHER_POWER_ON: &str = "AA0DF0E50002013301020193BB";
+    const SEND_WASHER_POWER_OFF: &str = "AA0DF0E50002013301020090BB";
+    const SEND_DRYER_POWER_ON: &str = "AA0DF0E50002013401020192BB";
+    const SEND_DRYER_POWER_OFF: &str = "AA0DF0E50002013401020093BB";
+    const SEND_INIT_LCD_DEFAULT: &str = "AA0DF0E50002013301510041BB";
+    const SEND_INIT_LCD_SPRING2: &str = "AA0DF0E5000201330151054CBB";
+    const SEND_WASHER_BUZZER_OFF: &str = "AA0DF0E50002013301130083BB";
+    const SEND_WASHER_BUZZER_LOW: &str = "AA0DF0E50002013301130182BB";
+    const SEND_WASHER_BUZZER_VHIGH: &str = "AA0DF0E5000201330113048FBB";
+    const SEND_DRYER_BUZZER_OFF: &str = "AA0DF0E50002013401130082BB";
+    const SEND_DRYER_BUZZER_LOW: &str = "AA0DF0E5000201340113018DBB";
+    const SEND_DRYER_BUZZER_VHIGH: &str = "AA0DF0E5000201340113048EBB";
+    const SEND_START: &str = "AA0EF0ED1121010000001800B5BB";
+    const SEND_WASHER_REMOTE_MAINTAIN_ON: &str = "AA0AF0241001013358BB";
+    const SEND_WASHER_REMOTE_MAINTAIN_OFF: &str = "AA0AF0241001003359BB";
+    const SEND_DRYER_REMOTE_MAINTAIN_ON: &str = "AA0AF024100101345BBB";
+    const SEND_DRYER_REMOTE_MAINTAIN_OFF: &str = "AA0AF0241001003458BB";
 
     fn meta() -> Metadata { Metadata::new("WTL_FXU_BDV_NA_01", "WKEX200HBA", "1.0") }
     fn make() -> (std::sync::Arc<MockHaConnection>, std::sync::Arc<MockThinq2Device>, std::sync::Arc<Device>) {
@@ -755,67 +782,349 @@ mod tests {
     fn prop(ha: &MockHaConnection, n: &str) -> Option<String> {
         ha.device(DEVICE_ID)?.properties.get(n).map(|p| p.as_string())
     }
+    fn expect(ha: &MockHaConnection, name: &str, value: &str) {
+        assert_eq!(prop(ha, name).as_deref(), Some(value), "{name}");
+    }
+    fn outbox(thinq: &MockThinq2Device) -> Vec<String> {
+        thinq.outbox().iter().map(|b| hex_encode(b)).collect()
+    }
+
+    /// A synthetic 0x71 resync: 13-byte header, 95-byte block, one trailing byte.
+    fn build_resync(overrides: &[(usize, u8)]) -> Vec<u8> {
+        let mut inner = vec![0u8; 109];
+        inner[3] = 0x71;
+        for &(idx, val) in overrides {
+            inner[13 + idx] = val;
+        }
+        wrap_aabb(&inner)
+    }
 
     #[test]
-    fn config() {
+    fn config_exposes_expected_components() {
         let (ha, _, _) = make();
-        let devinfo = ha.device(DEVICE_ID).unwrap();
-        let comps = &devinfo.config.as_ref().unwrap().components;
-        for c in ["washer_state","washer_power","washer_door","dryer_state","dryer_power","init_lcd"] {
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        for c in [
+            "washer_state",
+            "washer_power",
+            "washer_door",
+            "washer_course",
+            "washer_temp",
+            "washer_spin",
+            "washer_remaining_time",
+            "washer_remote_maintain",
+            "dryer_state",
+            "dryer_power",
+            "dryer_door",
+            "dryer_course",
+            "dryer_remote_maintain",
+            "init_lcd",
+        ] {
             assert!(comps.contains_key(c), "missing {c}");
         }
+        assert_eq!(comps["init_lcd"]["platform"], "select");
         let opts = comps["init_lcd"]["options"].as_array().unwrap();
         assert!(opts.iter().any(|v| v == "Default"));
         assert!(opts.iter().any(|v| v == "Christmas"));
     }
 
     #[test]
-    fn status_resync_doors_writes() {
-        let (ha, thinq, dev) = make();
+    fn status_packet_decodes_washer_state() {
+        let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(STATUS_WASHER_RUNNING));
-        assert_eq!(prop(&ha, "washer/power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "washer/state").as_deref(), Some("RUNNING"));
-        assert_eq!(prop(&ha, "washer/course").as_deref(), Some("DELICATES"));
-        assert_eq!(prop(&ha, "washer/temp").as_deref(), Some("N/A"));
-        assert_eq!(prop(&ha, "washer/remaining_time").as_deref(), Some("45"));
-        assert_eq!(prop(&ha, "shared/init_lcd").as_deref(), Some("Summer 2"));
+        expect(&ha, "washer/power", "ON");
+        expect(&ha, "washer/state", "RUNNING");
+        expect(&ha, "washer/course", "DELICATES");
+        expect(&ha, "washer/temp", "N/A");
+        expect(&ha, "washer/remaining_time", "45");
+        expect(&ha, "washer/initial_time", "45");
+        expect(&ha, "shared/init_lcd", "Summer 2");
+    }
 
-        thinq.emit_data(&hex_decode(STATE_RESYNC));
-        assert_eq!(prop(&ha, "washer/power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "washer/course").as_deref(), Some("DELICATES"));
+    #[test]
+    fn status_packet_decodes_dryer_state() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(STATUS_WASHER_RUNNING));
+        expect(&ha, "dryer/power", "OFF");
+        expect(&ha, "dryer/state", "POWEROFF");
+        expect(&ha, "dryer/remaining_time", "60");
+    }
 
+    #[test]
+    fn washer_door_open() {
+        let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(WASHER_DOOR_OPEN));
-        assert_eq!(prop(&ha, "washer/door").as_deref(), Some("OPEN"));
+        expect(&ha, "washer/door", "OPEN");
+    }
+
+    #[test]
+    fn washer_door_close() {
+        let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(WASHER_DOOR_CLOSE));
-        assert_eq!(prop(&ha, "washer/door").as_deref(), Some("CLOSE"));
+        expect(&ha, "washer/door", "CLOSE");
+    }
+
+    #[test]
+    fn dryer_door_open() {
+        let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(DRYER_DOOR_OPEN));
-        assert_eq!(prop(&ha, "dryer/door").as_deref(), Some("OPEN"));
+        expect(&ha, "dryer/door", "OPEN");
+    }
+
+    #[test]
+    fn dryer_door_close() {
+        let (ha, thinq, _) = make();
         thinq.emit_data(&hex_decode(DRYER_DOOR_CLOSE));
-        assert_eq!(prop(&ha, "dryer/door").as_deref(), Some("CLOSE"));
+        expect(&ha, "dryer/door", "CLOSE");
+    }
 
-        thinq.reset_recorder();
-        dev.start();
-        assert_eq!(prop(&ha, "washer/door").as_deref(), Some("CLOSE"));
-        assert_eq!(prop(&ha, "dryer/door").as_deref(), Some("CLOSE"));
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0EF0ED1121010000001800B5BB");
+    #[test]
+    fn wrong_length_status_packet_is_ignored() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode("aaff360a00d000854200010090bb"));
+        assert!(ha.device(DEVICE_ID).unwrap().properties.is_empty());
+    }
 
+    #[test]
+    fn washer_power_on() {
+        let (_, thinq, dev) = make();
         thinq.reset_recorder();
         dev.set_property("washer/power", "ON");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0DF0E50002013301020193BB");
+        assert_eq!(outbox(&thinq), [SEND_WASHER_POWER_ON]);
+    }
+
+    #[test]
+    fn washer_power_off() {
+        let (_, thinq, dev) = make();
         thinq.reset_recorder();
         dev.set_property("washer/power", "OFF");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0DF0E50002013301020090BB");
+        assert_eq!(outbox(&thinq), [SEND_WASHER_POWER_OFF]);
+    }
+
+    #[test]
+    fn dryer_power_on() {
+        let (_, thinq, dev) = make();
         thinq.reset_recorder();
         dev.set_property("dryer/power", "ON");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0DF0E50002013401020192BB");
+        assert_eq!(outbox(&thinq), [SEND_DRYER_POWER_ON]);
+    }
+
+    #[test]
+    fn dryer_power_off() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("dryer/power", "OFF");
+        assert_eq!(outbox(&thinq), [SEND_DRYER_POWER_OFF]);
+    }
+
+    #[test]
+    fn init_lcd_sends_the_theme_index() {
+        let (_, thinq, dev) = make();
         thinq.reset_recorder();
         dev.set_property("shared/init_lcd", "Default");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0DF0E50002013301510041BB");
+        assert_eq!(outbox(&thinq)[0], SEND_INIT_LCD_DEFAULT);
+
         thinq.reset_recorder();
-        dev.set_property("washer/buzzer", "Low");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0DF0E50002013301130182BB");
+        dev.set_property("shared/init_lcd", "Spring 2");
+        assert_eq!(outbox(&thinq)[0], SEND_INIT_LCD_SPRING2);
+    }
+
+    #[test]
+    fn init_lcd_with_unknown_theme_sends_nothing() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("shared/init_lcd", "NotATheme");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn start_requests_full_state_and_defaults_doors_to_close() {
+        let (ha, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.start();
+        assert_eq!(outbox(&thinq), [SEND_START]);
+        expect(&ha, "washer/door", "CLOSE");
+        expect(&ha, "dryer/door", "CLOSE");
+    }
+
+    #[test]
+    fn state_resync_decodes_washer_state() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(STATE_RESYNC));
+        expect(&ha, "washer/power", "ON");
+        expect(&ha, "washer/state", "RUNNING");
+        expect(&ha, "washer/remaining_time", "42");
+        expect(&ha, "washer/initial_time", "45");
+        expect(&ha, "washer/buzzer", "Medium");
+        expect(&ha, "washer/remote_start", "ON");
+        expect(&ha, "washer/door_lock", "ON");
+        expect(&ha, "washer/add_garment", "OFF");
+        expect(&ha, "washer/child_lock", "OFF");
+        expect(&ha, "shared/init_lcd", "Summer 1");
+    }
+
+    #[test]
+    fn state_resync_decodes_dryer_state() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(STATE_RESYNC));
+        expect(&ha, "dryer/power", "OFF");
+        expect(&ha, "dryer/state", "POWEROFF");
+        expect(&ha, "dryer/remaining_time", "0");
+        expect(&ha, "dryer/buzzer", "Off");
+        expect(&ha, "dryer/duct_clogging", "NONE");
+        expect(&ha, "dryer/remote_start", "OFF");
+        expect(&ha, "dryer/child_lock", "OFF");
+    }
+
+    #[test]
+    fn wrong_length_state_resync_is_ignored() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode("aa0e360a00710000000000008abb"));
+        assert!(ha.device(DEVICE_ID).unwrap().properties.is_empty());
+    }
+
+    #[test]
+    fn washer_bitmask_sensors() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&build_resync(&[(39, 0xa0), (40, 0x01)]));
+        expect(&ha, "washer/add_garment", "ON");
+        expect(&ha, "washer/child_lock", "ON");
+        expect(&ha, "washer/remote_start", "OFF");
+    }
+
+    #[test]
+    fn dryer_bitmask_sensors() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&build_resync(&[(79, 0x50), (75, 0x01)]));
+        expect(&ha, "dryer/remote_start", "ON");
+        expect(&ha, "dryer/child_lock", "ON");
+        expect(&ha, "dryer/duct_clogging", "LEVEL_1");
+    }
+
+    #[test]
+    fn washer_buzzer_sends_the_level() {
+        let (_, thinq, dev) = make();
+        for (value, packet) in [
+            ("Off", SEND_WASHER_BUZZER_OFF),
+            ("Low", SEND_WASHER_BUZZER_LOW),
+            ("Very High", SEND_WASHER_BUZZER_VHIGH),
+        ] {
+            thinq.reset_recorder();
+            dev.set_property("washer/buzzer", value);
+            assert_eq!(outbox(&thinq)[0], packet, "{value}");
+        }
+    }
+
+    #[test]
+    fn washer_buzzer_with_unknown_value_sends_nothing() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("washer/buzzer", "Deafening");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn dryer_buzzer_sends_the_level() {
+        let (_, thinq, dev) = make();
+        for (value, packet) in [
+            ("Off", SEND_DRYER_BUZZER_OFF),
+            ("Low", SEND_DRYER_BUZZER_LOW),
+            ("Very High", SEND_DRYER_BUZZER_VHIGH),
+        ] {
+            thinq.reset_recorder();
+            dev.set_property("dryer/buzzer", value);
+            assert_eq!(outbox(&thinq)[0], packet, "{value}");
+        }
+    }
+
+    #[test]
+    fn dryer_buzzer_with_unknown_value_sends_nothing() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("dryer/buzzer", "VEYR_VERY_LOUD");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn washer_remote_maintain_is_block42_bit2() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&build_resync(&[(42, 0x04)]));
+        expect(&ha, "washer/remote_maintain", "ON");
+
+        let (ha2, thinq2, _) = make();
+        thinq2.emit_data(&build_resync(&[(42, 0x00)]));
+        expect(&ha2, "washer/remote_maintain", "OFF");
+    }
+
+    #[test]
+    fn dryer_remote_maintain_is_block80_bit1() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&build_resync(&[(80, 0x02)]));
+        expect(&ha, "dryer/remote_maintain", "ON");
+
+        let (ha2, thinq2, _) = make();
+        thinq2.emit_data(&build_resync(&[(80, 0x00)]));
+        expect(&ha2, "dryer/remote_maintain", "OFF");
+    }
+
+    #[test]
+    fn washer_remote_maintain_sends_on_and_off() {
+        let (_, thinq, dev) = make();
         thinq.reset_recorder();
         dev.set_property("washer/remote_maintain", "ON");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0AF0241001013358BB");
+        assert_eq!(outbox(&thinq)[0], SEND_WASHER_REMOTE_MAINTAIN_ON);
+
+        thinq.reset_recorder();
+        dev.set_property("washer/remote_maintain", "OFF");
+        assert_eq!(outbox(&thinq)[0], SEND_WASHER_REMOTE_MAINTAIN_OFF);
+    }
+
+    #[test]
+    fn dryer_remote_maintain_sends_on_and_off() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("dryer/remote_maintain", "ON");
+        assert_eq!(outbox(&thinq)[0], SEND_DRYER_REMOTE_MAINTAIN_ON);
+
+        thinq.reset_recorder();
+        dev.set_property("dryer/remote_maintain", "OFF");
+        assert_eq!(outbox(&thinq)[0], SEND_DRYER_REMOTE_MAINTAIN_OFF);
+    }
+
+    #[test]
+    fn unmapped_codes_publish_none() {
+        // Out-of-table codes for every enum-mapped block byte.
+        let (ha, thinq, _) = make();
+        let offsets = [
+            3, 4, 5, 6, 7, 9, 11, 12, 21, 23, 26, 29, 31, 48, 54, 56, 57, 58, 66, 68, 72, 75,
+        ];
+        let block: Vec<(usize, u8)> = offsets.into_iter().map(|i| (i, 0xfe)).collect();
+        thinq.emit_data(&build_resync(&block));
+        for name in [
+            "washer/soil_wash",
+            "washer/temp",
+            "washer/rinse",
+            "washer/spin",
+            "washer/course",
+            "washer/soak",
+            "washer/water_level",
+            "washer/load_item",
+            "washer/error",
+            "washer/state",
+            "washer/load_level",
+            "washer/rinse_count",
+            "washer/buzzer",
+            "shared/init_lcd",
+            "dryer/dry_level",
+            "dryer/temp",
+            "dryer/time_dry",
+            "dryer/course",
+            "dryer/state",
+            "dryer/error",
+            "dryer/buzzer",
+            "dryer/duct_clogging",
+        ] {
+            expect(&ha, name, "None");
+        }
+        expect(&ha, "washer/power", "ON");
     }
 }
