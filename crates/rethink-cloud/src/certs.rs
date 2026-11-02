@@ -10,7 +10,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use std::sync::Arc;
 
-pub use pki::{load_custom_root, load_or_create, root_certificate_pem, sign_device_csr};
+pub use pki::{load_custom_root, load_or_create};
 
 #[derive(Clone)]
 pub struct Ca {

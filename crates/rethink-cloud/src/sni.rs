@@ -52,10 +52,6 @@ impl CertificateIssuer {
         })
     }
 
-    pub fn ca_cert_pem(&self) -> &str {
-        &self.issuer.cert_pem
-    }
-
     pub fn default_hostname(&self) -> &str {
         &self.default_hostname
     }
