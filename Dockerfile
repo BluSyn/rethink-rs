@@ -71,9 +71,10 @@ RUN find crates html -type f \( \
         -o -name '*.woff2' -o -name '*.toml' \
       \) -exec touch {} +
 
-# Management UI shows this short SHA (fallback "dev" when unset / no .git).
-# Build: docker build --build-arg RETHINK_GIT_SHA=$(git rev-parse --short=7 HEAD) ...
-ARG RETHINK_GIT_SHA=dev
+# The startup banner and the management UI show this revision. .git is not part of the
+# build context, so it has to be passed in (it reads "unknown" otherwise):
+#   docker build --build-arg RETHINK_GIT_SHA=$(git describe --always --dirty --tags) ...
+ARG RETHINK_GIT_SHA
 ENV RETHINK_GIT_SHA=${RETHINK_GIT_SHA}
 
 # Rebuild only workspace packages; dependency objects remain from layer A.

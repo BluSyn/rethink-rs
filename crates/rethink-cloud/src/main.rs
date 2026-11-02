@@ -25,6 +25,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
+/// The build's git revision (see build.rs).
+const REVISION: &str = env!("RETHINK_GIT_SHA");
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -439,18 +442,18 @@ async fn main() -> Result<()> {
         match TcpListener::bind(&addr).await {
             Ok(listener) => {
                 eprintln!("[status] management UI listening on {addr}");
-                eprintln!("[status] rethink-cloud ready");
+                eprintln!("[status] rethink-cloud {REVISION} ready");
                 axum::serve(listener, app).await?;
             }
             Err(e) => {
                 eprintln!("[status] management bind failed on {addr}: {e}");
-                eprintln!("[status] rethink-cloud running without management UI");
+                eprintln!("[status] rethink-cloud {REVISION} running without management UI");
                 std::future::pending::<()>().await;
             }
         }
     } else {
         eprintln!("[status] management UI disabled");
-        eprintln!("[status] rethink-cloud ready");
+        eprintln!("[status] rethink-cloud {REVISION} ready");
         std::future::pending::<()>().await;
     }
 

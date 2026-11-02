@@ -48,6 +48,23 @@
             nav .brand-logo .logo {
                 height: 1em;
             }
+            /* Materialize's small-only breakpoint, where the brand is centred. The title moves up
+               to make room for the version under it. */
+            @media (max-width: 600px) {
+                nav .brand-logo {
+                    line-height: 42px;
+                }
+                nav .revision-under-title {
+                    position: absolute;
+                    left: 50%;
+                    bottom: 4px;
+                    transform: translateX(-50%);
+                    line-height: 1;
+                    font-size: 0.7rem;
+                    font-family: ui-monospace, monospace;
+                    white-space: nowrap;
+                }
+            }
             .page {
                 max-width: 1400px;
                 margin: 0 auto;
@@ -588,20 +605,28 @@
     <body class="offline">
         <nav role="navigation">
             <div class="nav-wrapper container">
+                <!-- Materialize centres the brand below the large breakpoint, where the full title
+                     would run into the version on the right. -->
                 <a id="logo-container" href="#" class="brand-logo">
                     <img class="logo" src="logo.svg" alt="" />
-                    Rethink management
+                    Rethink <span class="hide-on-med-and-down">management</span>
                 </a>
+                <!-- On a phone the brand sits in the middle of the bar, and a long git describe
+                     string on the right would run into it, so there it goes under the title. -->
                 <ul class="right hide-on-small-only">
                     <li>
                         <span
                             id="panel_git_sha"
                             class="grey-text text-lighten-1"
                             style="font-size: 11px; margin-right: 12px; font-family: ui-monospace, monospace"
-                            title="rethink-cloud build (git short SHA, or dev if unavailable)"
+                            title="rethink-cloud build (git describe, or unknown if unavailable)"
                         >__RETHINK_GIT_SHA__</span>
                     </li>
                 </ul>
+                <span
+                    class="revision-under-title grey-text text-lighten-1 hide-on-med-and-up"
+                    title="rethink-cloud build (git describe, or unknown if unavailable)"
+                >__RETHINK_GIT_SHA__</span>
             </div>
         </nav>
 

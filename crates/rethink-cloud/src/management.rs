@@ -696,8 +696,25 @@ fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
-/// Short git SHA from build.rs (`git rev-parse` or `RETHINK_GIT_SHA`), else `dev`.
+/// Git revision from build.rs (`RETHINK_GIT_SHA` or `git describe`), else `unknown`.
 const GIT_SHA: &str = env!("RETHINK_GIT_SHA");
+
+/// Fill the nav badges in. A `git describe` string may carry a tag name, and tag names
+/// may contain markup characters.
+fn inject_revision(html: &str, revision: &str) -> String {
+    let mut escaped = String::with_capacity(revision.len());
+    for c in revision.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            c => escaped.push(c),
+        }
+    }
+    html.replace("__RETHINK_GIT_SHA__", &escaped)
+}
 
 async fn static_file(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
@@ -711,9 +728,7 @@ async fn static_file(uri: axum::http::Uri) -> Response {
             // Inject build identity into the nav badge (placeholder in index.html).
             if c == "index.html" || c.ends_with("/index.html") {
                 if let Ok(s) = std::str::from_utf8(&body) {
-                    body = s
-                        .replace("__RETHINK_GIT_SHA__", GIT_SHA)
-                        .into_bytes();
+                    body = inject_revision(s, GIT_SHA).into_bytes();
                 }
             }
             return (
@@ -1519,6 +1534,24 @@ mod tests {
         let monitor = include_str!("../../../html/monitor.js");
         assert!(monitor.contains("typeLabel"));
         assert!(monitor.contains("json.type === 'packet'"));
+    }
+
+    #[test]
+    fn revision_badges_are_escaped_and_shown_on_every_screen_size() {
+        assert_eq!(
+            inject_revision("<b>__RETHINK_GIT_SHA__</b>", "v1.2-3-gabc1234-dirty"),
+            "<b>v1.2-3-gabc1234-dirty</b>"
+        );
+        assert_eq!(
+            inject_revision("<b>__RETHINK_GIT_SHA__</b>", r#"a&b<c>"d'"#),
+            "<b>a&amp;b&lt;c&gt;&quot;d&#39;</b>"
+        );
+
+        // One badge in the bar, and one under the title where the bar is too narrow for it.
+        let index = include_str!("../../../html/index.html");
+        assert_eq!(index.matches("__RETHINK_GIT_SHA__").count(), 2);
+        assert!(index.contains("revision-under-title"));
+        assert!(index.contains("hide-on-med-and-up"));
     }
 
     fn re_decode_for_test(hex: &str, direction: Option<&str>) -> Result<Value, String> {
