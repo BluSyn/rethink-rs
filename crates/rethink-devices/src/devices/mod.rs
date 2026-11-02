@@ -113,6 +113,7 @@ register_devices! {
         air_910604_ww => { "AIR_910604_WW" },
         st_b_e4h01y_apl => { "ST_B_E4H01Y_APL" },
         f24vdd => { "F24VDD" },
+        s5mpc => { "S5MPC" },
         rh90v9_ww => { "RH90V9_WW" },
         rc90u2_ww => { "RC90U2_WW" | "RC90V9_WW" | "RC90V9_AUS" },
         wfv474pgv => { "WFV474PGV" },
