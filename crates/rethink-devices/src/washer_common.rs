@@ -153,6 +153,44 @@ pub fn drying_mode(code: u32) -> Option<&'static str> {
 
 pub const DOSES: &[&str] = &["Off", "Low", "Medium", "High"];
 
+/// The "smart" (downloaded) courses, which read the same on every appliance seen so far.
+pub const SMART_COURSES: &[(u8, &str)] = &[
+    (0x34, "Kids Wear"),
+    (0x35, "School Uniform"),
+    (0x36, "Swimming Wear"),
+    (0x37, "Rainy Season"),
+    (0x38, "Gym Clothes"),
+    (0x39, "Jeans"),
+    (0x3a, "Blanket"),
+    (0x3b, "Sweat Stain"),
+    (0x3e, "Single Garment"),
+    (0x3f, "Colour Protection"),
+    (0x40, "Noise Minimize"),
+    (0x47, "Baby Care"),
+    (0x48, "Hygiene"),
+    (0x49, "Small Load"),
+    (0x4a, "Lingerie"),
+    (0x4b, "Wool"),
+    (0x4c, "Skin Care"),
+    (0x4d, "Cold Wash"),
+    (0x64, "Rinse + Spin"),
+    (0x65, "Lightly Soiled Items"),
+    (0x66, "Minimize Detergent Residue"),
+    (0x67, "1hr. Wash"),
+    (0x6b, "Sleeve Hems and Collars"),
+    (0x6c, "Juice and Food Stains"),
+    (0x6f, "Minimize Wrinkles"),
+    (0x71, "Quick Tub Clean"),
+    (0x79, "Drain"),
+    (0x7a, "Spin"),
+    (0x84, "Silent Wash"),
+    (0x86, "MicroPlastic Care"),
+];
+
+pub fn smart_course_name(code: u8) -> Option<&'static str> {
+    SMART_COURSES.iter().find(|(c, _)| *c == code).map(|(_, name)| *name)
+}
+
 pub fn error_message(code: usize) -> &'static str {
     ERRORS.get(code).and_then(|x| *x).unwrap_or("None")
 }
@@ -337,6 +375,8 @@ mod tests {
         assert_eq!(soil_level(4), Some("Intensive"));
         assert_eq!(course_name(0x1), Some("Cotton"));
         assert_eq!(course_name(0xffff), None);
+        assert_eq!(smart_course_name(0x65), Some("Lightly Soiled Items"));
+        assert_eq!(smart_course_name(0x00), None);
     }
 
     #[test]
