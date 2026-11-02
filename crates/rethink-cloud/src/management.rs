@@ -1113,6 +1113,32 @@ mod tests {
         );
     }
 
+    async fn body_bytes(resp: Response) -> axum::body::Bytes {
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn logo_and_favicon_are_served_as_images() {
+        let index = body_bytes(static_file(axum::http::Uri::from_static("/")).await).await;
+        let index = std::str::from_utf8(&index).unwrap();
+        assert!(index.contains(r#"<link rel="icon" type="image/png" href="favicon.png" />"#));
+        assert!(index.contains(r#"<img class="logo" src="logo.svg" alt="" />"#));
+
+        let favicon: &[u8] = include_bytes!("../../../html/favicon.png");
+        let logo: &[u8] = include_bytes!("../../../html/logo.svg");
+        for (path, mime, contents) in [
+            ("/favicon.png", "image/png", favicon),
+            ("/logo.svg", "image/svg+xml", logo),
+        ] {
+            let resp = static_file(axum::http::Uri::from_static(path)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], mime, "{path}");
+            assert_eq!(body_bytes(resp).await, contents, "{path} unmodified");
+        }
+    }
+
     #[test]
     fn bridge_status_distinguishes_disabled_offline_and_online() {
         assert_eq!(
