@@ -20,7 +20,6 @@ use rethink_core::config::load_config;
 use rethink_core::ha::HaMqttSink;
 use rethink_core::hassio::{self, StartupMode};
 use rethink_core::logging;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -408,8 +407,6 @@ async fn main() -> Result<()> {
     }
 
     // Management UI. Omitted management_port does not bind.
-    let mgmt_port = config.management_port.bind;
-
     let mgmt_state = management::MgmtState {
         ha: ha_sink.clone(),
         ha_bridge: ha_bridge.clone(),
@@ -438,16 +435,15 @@ async fn main() -> Result<()> {
             }),
         );
 
-    if let Some(mgmt_port) = mgmt_port {
-        let addr = SocketAddr::from(([0, 0, 0, 0], mgmt_port));
-        match TcpListener::bind(addr).await {
+    if let Some(addr) = config.management_port.bind_socket() {
+        match TcpListener::bind(&addr).await {
             Ok(listener) => {
-                eprintln!("[status] management UI listening on {mgmt_port}");
+                eprintln!("[status] management UI listening on {addr}");
                 eprintln!("[status] rethink-cloud ready");
                 axum::serve(listener, app).await?;
             }
             Err(e) => {
-                eprintln!("[status] management bind failed on {mgmt_port}: {e}");
+                eprintln!("[status] management bind failed on {addr}: {e}");
                 eprintln!("[status] rethink-cloud running without management UI");
                 std::future::pending::<()>().await;
             }

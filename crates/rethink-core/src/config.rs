@@ -65,9 +65,13 @@ impl Port {
 
     /// `host:port` for `TcpListener::bind`, or `None` when this port is not bound.
     pub fn bind_socket(&self) -> Option<String> {
-        self.bind.map(|port| {
-            let host = self.address.as_deref().unwrap_or("0.0.0.0");
-            format!("{host}:{port}")
+        self.bind.map(|port| match self.address.as_deref() {
+            None => format!("0.0.0.0:{port}"),
+            // An IPv6 literal needs brackets before the port can be appended.
+            Some(host) if host.contains(':') && !host.starts_with('[') => {
+                format!("[{host}]:{port}")
+            }
+            Some(host) => format!("{host}:{port}"),
         })
     }
 }
@@ -91,8 +95,12 @@ pub struct RawConfig {
     pub custom_root_cert_file: Option<String>,
     #[serde(default)]
     pub http_port: Option<PortSpec>,
-    pub https_port: PortSpec,
-    pub mqtts_port: PortSpec,
+    /// Optional like the other ports, but it has to be bound or advertised.
+    #[serde(default)]
+    pub https_port: Option<PortSpec>,
+    /// Optional like the other ports, but it has to be bound or advertised.
+    #[serde(default)]
+    pub mqtts_port: Option<PortSpec>,
     #[serde(default)]
     pub mqtt_port: Option<PortSpec>,
     #[serde(default)]
@@ -135,6 +143,8 @@ pub struct Config {
 pub enum ConfigError {
     Io(std::io::Error),
     Json(String),
+    /// Well-formed, but not a usable configuration.
+    Invalid(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -142,6 +152,7 @@ impl std::fmt::Display for ConfigError {
         match self {
             Self::Io(e) => write!(f, "IO error: {e}"),
             Self::Json(s) => write!(f, "JSON parse error: {s}"),
+            Self::Invalid(s) => f.write_str(s),
         }
     }
 }
@@ -150,7 +161,7 @@ impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::Json(_) => None,
+            Self::Json(_) | Self::Invalid(_) => None,
         }
     }
 }
@@ -194,15 +205,19 @@ fn parse_listen(input: Option<&PortSpec>) -> Port {
     }
 }
 
-fn parse_advertised(input: &PortSpec, url_base: &str, label: &str) -> Result<Port, ConfigError> {
-    let (bind, address, advertise) = listen_parts(input);
+fn parse_advertised(
+    input: Option<&PortSpec>,
+    url_base: &str,
+    label: &str,
+) -> Result<Port, ConfigError> {
+    let (bind, address, advertise) = input.map(listen_parts).unwrap_or_default();
     let advertise_url = match advertise {
         Some(Advertise::Url(url)) => url,
         Some(Advertise::Number(n)) => format!("{url_base}:{n}"),
         None => match bind {
             Some(port) => format!("{url_base}:{port}"),
             None => {
-                return Err(ConfigError::Json(format!(
+                return Err(ConfigError::Invalid(format!(
                     "The {label} port must be advertised"
                 )))
             }
@@ -224,11 +239,15 @@ pub fn normalize(raw: RawConfig) -> Result<Config, ConfigError> {
     let hostname = raw.hostname.clone();
     Ok(Config {
         https_port: parse_advertised(
-            &raw.https_port,
+            raw.https_port.as_ref(),
             &format!("https://{hostname}"),
             "https",
         )?,
-        mqtts_port: parse_advertised(&raw.mqtts_port, &format!("ssl://{hostname}"), "mqtts")?,
+        mqtts_port: parse_advertised(
+            raw.mqtts_port.as_ref(),
+            &format!("ssl://{hostname}"),
+            "mqtts",
+        )?,
         http_port: parse_listen(raw.http_port.as_ref()),
         mqtt_port: parse_listen(raw.mqtt_port.as_ref()),
         management_port: parse_listen(raw.management_port.as_ref()),
@@ -415,5 +434,94 @@ mod tests {
         assert!(!bridge_dns_uses_system(Some(&dns)));
         assert!(bridge_dns_uses_system(None));
         assert!(bridge_dns_uses_system(Some(&[])));
+    }
+
+    #[test]
+    fn the_shipped_example_configuration_parses() {
+        let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.jsonc"));
+        let cfg = parse_config_text(text).unwrap();
+        assert_eq!(cfg.https_port.bind_socket().as_deref(), Some("0.0.0.0:443"));
+        assert_eq!(
+            cfg.mqtts_port.advertise_url.as_deref(),
+            Some("ssl://rethink.lan:8883")
+        );
+        assert_eq!(cfg.management_port.bind, Some(44401));
+        assert!(!cfg.http_port.should_bind());
+    }
+
+    fn with_ports(ports: &str) -> String {
+        format!(
+            r#"{{
+  "hostname": "rethink.lan",
+  "homeassistant": {{
+    "mqtt_url": "mqtt://localhost:1883",
+    "discovery_prefix": "homeassistant",
+    "rethink_prefix": "rethink"
+  }},
+  "ca_key_file": "k",
+  "ca_cert_file": "c"{ports}
+}}"#
+        )
+    }
+
+    #[test]
+    fn an_advertised_port_that_is_neither_bound_nor_advertised_is_an_error() {
+        let err = parse_config_text(&with_ports(r#", "mqtts_port": 8883"#)).unwrap_err();
+        assert_eq!(err.to_string(), "The https port must be advertised");
+        let err = parse_config_text(&with_ports(r#", "https_port": 443"#)).unwrap_err();
+        assert_eq!(err.to_string(), "The mqtts port must be advertised");
+        // An empty object binds nothing and advertises nothing either.
+        let err = parse_config_text(&with_ports(r#", "https_port": {}, "mqtts_port": 8883"#))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "The https port must be advertised");
+        let err = parse_config_text(&with_ports(
+            r#", "https_port": { "bind": 0 }, "mqtts_port": 8883"#,
+        ))
+        .unwrap_err();
+        assert_eq!(err.to_string(), "The https port must be advertised");
+    }
+
+    #[test]
+    fn every_listener_binds_to_its_configured_address() {
+        let cfg = parse_config_text(&with_ports(
+            r#",
+  "https_port": { "bind": 4443, "address": "192.168.0.1", "advertise": 443 },
+  "mqtts_port": 8883,
+  "mqtt_port": { "bind": 1884, "address": "127.0.0.1" },
+  "management_port": { "bind": 44401, "address": "::1" },
+  "thinq1_port": { "address": "192.168.0.1" }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.https_port.bind_socket().as_deref(),
+            Some("192.168.0.1:4443")
+        );
+        assert_eq!(
+            cfg.https_port.advertise_url.as_deref(),
+            Some("https://rethink.lan:443")
+        );
+        assert_eq!(
+            cfg.mqtts_port.bind_socket().as_deref(),
+            Some("0.0.0.0:8883")
+        );
+        assert_eq!(
+            cfg.mqtt_port.bind_socket().as_deref(),
+            Some("127.0.0.1:1884")
+        );
+        assert_eq!(
+            cfg.management_port.bind_socket().as_deref(),
+            Some("[::1]:44401")
+        );
+        assert_eq!(
+            cfg.thinq1_port.bind_socket(),
+            None,
+            "an address alone does not bind"
+        );
+        assert!(cfg
+            .management_port
+            .bind_socket()
+            .unwrap()
+            .parse::<std::net::SocketAddr>()
+            .is_ok());
     }
 }
