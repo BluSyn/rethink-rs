@@ -7,9 +7,11 @@ use rethink_util::crc16::crc16;
 use rethink_util::sync::Mutex;
 use rethink_util::tlv::{self, Tlv};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar};
+use std::thread::{self, JoinHandle, ThreadId};
+use std::time::{Duration, Instant};
 
 /// ThinQ TLV types are 10-bit (`0..=1023`). Direct slots beat HashMap on the
 /// per-tag hot path (`process_key_value` / `get_raw`).
@@ -111,12 +113,24 @@ impl AabbDeviceCore {
 
     pub fn process_data_envelope<'a>(&self, buf: &'a [u8]) -> Option<&'a [u8]> {
         let inner = unwrap_aabb(buf)?;
+        self.ack(inner, buf[1] == 0xff);
+        Some(inner)
+    }
+
+    /// Ack `buf` as [`Self::process_data_envelope`] would, for strict handlers that validate and
+    /// process a frame (unwrapped with [`unwrap_aabb`]) before acknowledging it.
+    pub fn ack_after_processing(&self, buf: &[u8]) {
+        if let Some(inner) = unwrap_aabb(buf) {
+            self.ack(inner, buf[1] == 0xff);
+        }
+    }
+
+    fn ack(&self, inner: &[u8], long_frame: bool) {
         if self.auto_ack {
-            if let Some(ack) = aabb_delivery_ack(inner, buf[1] == 0xff) {
+            if let Some(ack) = aabb_delivery_ack(inner, long_frame) {
                 self.thinq.send_ack(&ack);
             }
         }
-        Some(inner)
     }
 
     pub fn publish_on_off(&self, prop: &str, on: bool) {
@@ -174,6 +188,263 @@ impl AabbDeviceCore {
     pub fn drop_device(&self) {
         self.ha
             .publish_property(&self.id, "availability", "offline".into());
+    }
+}
+
+// ── Serialized AABB writes ─────────────────────────────────────────────────
+
+/// How long [`AabbWriteQueue`] waits for the answer to a write.
+pub const WRITE_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// A write sent to the appliance: by us, or by the LG cloud while bridged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitedWrite {
+    pub write_type: u8,
+    pub own: bool,
+    pub inner: Vec<u8>,
+}
+
+/// The model's side of an [`AabbWriteQueue`]. Called with the queue locked: must not call into it.
+pub trait WriteModel: Send + Sync {
+    /// The type of write an outgoing frame's inner bytes carry, if it is one the appliance answers.
+    fn write_type(&self, inner: &[u8]) -> Option<u8>;
+    /// A write of a known type went out, ours or the LG cloud's.
+    fn write_sent(&self, _write: &AwaitedWrite) {}
+    /// Nothing answered within the timeout: every awaited write expired and no further writes go
+    /// out. A late reply cannot safely identify which write it answered, so only a new handler (a
+    /// reconnect) recovers.
+    fn write_timed_out(&self, expired: &[AwaitedWrite]);
+}
+
+type BuildWrite = Box<dyn FnOnce() -> Option<Vec<u8>> + Send>;
+
+struct QueuedWrite {
+    build: BuildWrite,
+    coalescing_key: Option<&'static str>,
+}
+
+#[derive(Default)]
+struct WriteState {
+    queue: VecDeque<QueuedWrite>,
+    /// Sent and not yet answered, oldest first.
+    awaiting: Vec<AwaitedWrite>,
+    deadline: Option<Instant>,
+    timer: Option<JoinHandle<()>>,
+    timer_running: bool,
+    blocked: bool,
+    stopped: bool,
+}
+
+struct WriteQueueShared {
+    core: Arc<AabbDeviceCore>,
+    model: Arc<dyn WriteModel>,
+    timeout: Duration,
+    state: Mutex<WriteState>,
+    timer_wake: Condvar,
+    /// The thread sending one of our writes. The send hooks it triggers report that same write.
+    own_sender: Mutex<Option<ThreadId>>,
+}
+
+/// One write at a time: the LG laundry machines answer a write that arrives while the previous one
+/// is still being applied with result 0x13 (busy). The LG cloud's writes while bridged are tracked
+/// like ours (see [`Thinq2Device::on_send_packet`]), and ours go out once every write sent has been
+/// answered. Replies carry no sequence number, so each is taken to answer the oldest write of its
+/// type. When no answer comes within the timeout (restarted by each write sent), the queue blocks
+/// for good: upstream's strict write tracking.
+pub struct AabbWriteQueue {
+    shared: Arc<WriteQueueShared>,
+}
+
+impl AabbWriteQueue {
+    pub fn new(core: Arc<AabbDeviceCore>, model: Arc<dyn WriteModel>, timeout: Duration) -> Self {
+        let shared = Arc::new(WriteQueueShared {
+            core: core.clone(),
+            model,
+            timeout,
+            state: Mutex::default(),
+            timer_wake: Condvar::new(),
+            own_sender: Mutex::new(None),
+        });
+        let weak = Arc::downgrade(&shared);
+        core.thinq.on_send_packet(Box::new(move |packet| {
+            if let Some(shared) = weak.upgrade() {
+                shared.packet_sent(packet);
+            }
+        }));
+        Self { shared }
+    }
+
+    pub fn writes_blocked(&self) -> bool {
+        self.shared.state.lock().blocked
+    }
+
+    /// `build` makes the write's inner bytes when it is due (`None` skips it), with the queue
+    /// locked. A keyed write replaces an unsent one with the same key; unkeyed writes are actions
+    /// and order barriers, never coalesced across.
+    pub fn queue_write(
+        &self,
+        build: impl FnOnce() -> Option<Vec<u8>> + Send + 'static,
+        coalescing_key: Option<&'static str>,
+    ) {
+        let build: BuildWrite = Box::new(build);
+        {
+            let mut st = self.shared.state.lock();
+            if st.blocked || st.stopped {
+                return;
+            }
+            if let Some(key) = coalescing_key {
+                let unsent = st
+                    .queue
+                    .iter_mut()
+                    .rev()
+                    .take_while(|write| write.coalescing_key.is_some())
+                    .find(|write| write.coalescing_key == Some(key));
+                if let Some(write) = unsent {
+                    write.build = build;
+                    return;
+                }
+            }
+            st.queue.push_back(QueuedWrite {
+                build,
+                coalescing_key,
+            });
+        }
+        self.next_write();
+    }
+
+    /// Call on a reply to a write of `write_type`: the write it answers, if `matches` accepts the
+    /// oldest one of that type. Older writes are never skipped.
+    pub fn write_answered(
+        &self,
+        write_type: u8,
+        matches: impl FnOnce(&AwaitedWrite) -> bool,
+    ) -> Option<AwaitedWrite> {
+        let mut st = self.shared.state.lock();
+        if st.blocked || st.stopped {
+            return None;
+        }
+        let i = st
+            .awaiting
+            .iter()
+            .position(|w| w.write_type == write_type)?;
+        if !matches(&st.awaiting[i]) {
+            return None;
+        }
+        let write = st.awaiting.remove(i);
+        if st.awaiting.is_empty() {
+            st.deadline = None;
+            self.shared.timer_wake.notify_all();
+        }
+        Some(write)
+    }
+
+    /// Send the next due write, unless one is still unanswered. Call after every frame, so a write
+    /// built then sees what the previous one changed.
+    pub fn next_write(&self) {
+        let frame = {
+            let mut st = self.shared.state.lock();
+            if st.blocked || st.stopped || !st.awaiting.is_empty() {
+                return;
+            }
+            let mut frame = None;
+            while frame.is_none() {
+                let Some(write) = st.queue.pop_front() else {
+                    break;
+                };
+                frame = (write.build)();
+            }
+            let Some(frame) = frame else {
+                return;
+            };
+            if let Some(write_type) = self.shared.model.write_type(&frame) {
+                let write = AwaitedWrite {
+                    write_type,
+                    own: true,
+                    inner: frame.clone(),
+                };
+                self.shared.track(&mut st, write);
+            }
+            frame
+        };
+        // Sent unlocked: a bridged write may be reporting itself to the queue meanwhile.
+        *self.shared.own_sender.lock() = Some(thread::current().id());
+        self.shared.core.send(&frame);
+        *self.shared.own_sender.lock() = None;
+    }
+
+    /// Drop every pending write and stop the timer (`retire`/`drop_device`).
+    pub fn stop(&self) {
+        let timer = {
+            let mut st = self.shared.state.lock();
+            st.stopped = true;
+            st.deadline = None;
+            st.queue.clear();
+            st.awaiting.clear();
+            self.shared.timer_wake.notify_all();
+            st.timer.take()
+        };
+        if let Some(timer) = timer {
+            let _ = timer.join();
+        }
+    }
+}
+
+impl WriteQueueShared {
+    fn packet_sent(self: &Arc<Self>, packet: &[u8]) {
+        if *self.own_sender.lock() == Some(thread::current().id()) {
+            return;
+        }
+        let Some(inner) = unwrap_aabb(packet) else {
+            return;
+        };
+        let Some(write_type) = self.model.write_type(inner) else {
+            return;
+        };
+        let mut st = self.state.lock();
+        if st.blocked || st.stopped {
+            return;
+        }
+        let write = AwaitedWrite {
+            write_type,
+            own: false,
+            inner: inner.to_vec(),
+        };
+        self.track(&mut st, write);
+    }
+
+    fn track(self: &Arc<Self>, st: &mut WriteState, write: AwaitedWrite) {
+        self.model.write_sent(&write);
+        st.awaiting.push(write);
+        st.deadline = Some(Instant::now() + self.timeout);
+        if st.timer_running {
+            self.timer_wake.notify_all();
+        } else {
+            st.timer_running = true;
+            let shared = self.clone();
+            st.timer = Some(thread::spawn(move || shared.run_timer()));
+        }
+    }
+
+    /// Runs while writes are awaited.
+    fn run_timer(&self) {
+        let mut st = self.state.lock();
+        while let Some(deadline) = st.deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                let expired = std::mem::take(&mut st.awaiting);
+                st.deadline = None;
+                st.blocked = true;
+                st.queue.clear();
+                self.model.write_timed_out(&expired);
+                break;
+            }
+            st = self
+                .timer_wake
+                .wait_timeout(st, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        st.timer_running = false;
     }
 }
 
@@ -936,6 +1207,138 @@ mod tests {
         core.process_tlv(&[Tlv::new(0x1f7, 1)]);
         assert!(values_seen.load(Ordering::Relaxed));
         assert!(thinq.outbox().is_empty(), "no values query follows");
+    }
+
+    /// `F0 <type> ...` writes.
+    #[derive(Default)]
+    struct TestWrites {
+        sent: Mutex<Vec<AwaitedWrite>>,
+        expired: Mutex<Vec<Vec<AwaitedWrite>>>,
+    }
+
+    impl WriteModel for TestWrites {
+        fn write_type(&self, inner: &[u8]) -> Option<u8> {
+            (inner.len() > 2 && inner[0] == 0xf0).then(|| inner[1])
+        }
+        fn write_sent(&self, write: &AwaitedWrite) {
+            self.sent.lock().push(write.clone());
+        }
+        fn write_timed_out(&self, expired: &[AwaitedWrite]) {
+            self.expired.lock().push(expired.to_vec());
+        }
+    }
+
+    fn write_queue(
+        timeout: Duration,
+    ) -> (
+        Arc<crate::MockThinq2Device>,
+        Arc<TestWrites>,
+        AabbWriteQueue,
+    ) {
+        let thinq = crate::MockThinq2Device::new("id", Metadata::new("M", "M", "1"));
+        let core = AabbDeviceCore::new(crate::MockHaConnection::new(), thinq.clone());
+        let model = Arc::new(TestWrites::default());
+        let queue = AabbWriteQueue::new(core, model.clone(), timeout);
+        (thinq, model, queue)
+    }
+
+    #[test]
+    fn write_queue_sends_one_write_at_a_time_and_tracks_bridged_writes() {
+        let (thinq, model, queue) = write_queue(WRITE_TIMEOUT);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 1]), None);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 2]), None);
+        assert_eq!(thinq.outbox(), [wrap_aabb(&[0xf0, 0xe5, 1])]);
+        // The LG cloud's write while bridged. Packets of no known type are not awaited.
+        thinq.send_packet(&wrap_aabb(&[0xf0, 0x24, 9]));
+        thinq.send_packet(&wrap_aabb(&[0x10, 0x24, 9]));
+        let bridged = queue.write_answered(0x24, |_| true);
+        assert_eq!(bridged.map(|write| write.own), Some(false));
+        queue.next_write();
+        assert_eq!(thinq.outbox().len(), 3);
+        // A reply is matched against the oldest write of its type only.
+        assert_eq!(
+            queue.write_answered(0xe5, |w| w.inner == [0xf0, 0xe5, 2]),
+            None
+        );
+        let own = queue.write_answered(0xe5, |w| w.inner == [0xf0, 0xe5, 1]);
+        assert_eq!(own.map(|write| write.own), Some(true));
+        queue.next_write();
+        assert_eq!(thinq.outbox().last(), Some(&wrap_aabb(&[0xf0, 0xe5, 2])));
+        let sent: Vec<_> = model
+            .sent
+            .lock()
+            .iter()
+            .map(|write| (write.inner.clone(), write.own))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (vec![0xf0, 0xe5, 1], true),
+                (vec![0xf0, 0x24, 9], false),
+                (vec![0xf0, 0xe5, 2], true),
+            ]
+        );
+        queue.stop();
+    }
+
+    #[test]
+    fn write_queue_coalesces_unsent_settings_up_to_the_last_action() {
+        let (thinq, _model, queue) = write_queue(WRITE_TIMEOUT);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 0]), None);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 1]), Some("a"));
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 2]), Some("a"));
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 3]), None);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 4]), Some("a"));
+        queue.queue_write(|| None, Some("b"));
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 5]), Some("a"));
+        for _ in 0..4 {
+            assert!(queue.write_answered(0xe5, |_| true).is_some());
+            queue.next_write();
+        }
+        let sent: Vec<u8> = thinq.outbox().iter().map(|packet| packet[4]).collect();
+        assert_eq!(sent, [0, 2, 3, 5]);
+        queue.stop();
+    }
+
+    #[test]
+    fn write_queue_fails_closed_once_a_write_times_out() {
+        let (thinq, model, queue) = write_queue(Duration::from_millis(50));
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 1]), None);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 2]), None);
+        thinq.send_packet(&wrap_aabb(&[0xf0, 0x24, 9]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !queue.writes_blocked() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let expired: Vec<Vec<Vec<u8>>> = model
+            .expired
+            .lock()
+            .iter()
+            .map(|writes| writes.iter().map(|write| write.inner.clone()).collect())
+            .collect();
+        assert_eq!(expired, [[vec![0xf0, 0xe5, 1], vec![0xf0, 0x24, 9]]]);
+        assert!(queue.writes_blocked());
+        assert_eq!(queue.write_answered(0xe5, |_| true), None);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 3]), None);
+        queue.next_write();
+        thinq.send_packet(&wrap_aabb(&[0xf0, 0x24, 8]));
+        assert_eq!(thinq.outbox().len(), 3);
+        assert_eq!(model.sent.lock().len(), 2);
+        queue.stop();
+    }
+
+    #[test]
+    fn write_queue_stop_drops_pending_writes_and_the_timer() {
+        let timeout = Duration::from_millis(300);
+        let (thinq, model, queue) = write_queue(timeout);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 1]), None);
+        queue.queue_write(|| Some(vec![0xf0, 0xe5, 2]), None);
+        queue.stop();
+        thread::sleep(timeout * 2);
+        assert!(model.expired.lock().is_empty());
+        assert_eq!(queue.write_answered(0xe5, |_| true), None);
+        queue.next_write();
+        assert_eq!(thinq.outbox().len(), 1);
     }
 
     /// Drive the same path a handler uses: `on_data` → `process_data_envelope`.
