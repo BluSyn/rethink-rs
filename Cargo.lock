@@ -1515,6 +1515,7 @@ dependencies = [
  "include_dir",
  "openssl",
  "rcgen",
+ "reqwest",
  "rethink-bridge",
  "rethink-core",
  "rethink-devices",
@@ -1541,6 +1542,7 @@ dependencies = [
  "rethink-util",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

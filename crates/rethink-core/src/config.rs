@@ -24,11 +24,11 @@ pub enum Advertise {
 /// a port may be advertised without being bound, and `advertise` may be a full URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortSpecFull {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise: Option<Advertise>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
 }
 
@@ -80,7 +80,7 @@ impl Port {
 pub struct BridgeConfig {
     pub storage_path: String,
     /// DoH URLs or plain DNS addresses, tried in order. Absent or empty uses the system resolver.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<Vec<String>>,
 }
 
@@ -91,31 +91,31 @@ pub struct RawConfig {
     pub ca_key_file: String,
     pub ca_cert_file: String,
     /// PEM served from `/route/certificate` instead of the builtin CA.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_root_cert_file: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_port: Option<PortSpec>,
     /// Optional like the other ports, but it has to be bound or advertised.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https_port: Option<PortSpec>,
     /// Optional like the other ports, but it has to be bound or advertised.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtts_port: Option<PortSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt_port: Option<PortSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub management_port: Option<PortSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinq1_http_port: Option<PortSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinq1_https_port: Option<PortSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinq1_port: Option<PortSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<BridgeConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<Vec<String>>,
 }
 

@@ -9,6 +9,7 @@ mod ha_bridge;
 mod ha_client;
 mod management;
 mod mqtt_broker;
+mod supervisor;
 mod thinq1;
 mod thinq2;
 
@@ -65,14 +66,18 @@ async fn main() -> Result<()> {
             options_path,
             data_dir,
         } => {
+            // Absolute, like upstream's resolve(): the rendered example names files in it.
+            let data_dir = std::path::absolute(&data_dir).unwrap_or(data_dir);
             eprintln!(
                 "[status] Home Assistant add-on mode, loading options from {}",
                 options_path.display()
             );
-            let text = std::fs::read_to_string(&options_path).with_context(|| {
-                format!("read hassio options {}", options_path.display())
-            })?;
-            let raw = hassio::load_hassio_options(&data_dir, &text).map_err(|e| anyhow::anyhow!(e))?;
+            let token = std::env::var("SUPERVISOR_TOKEN").ok();
+            let raw = hassio::load_hassio_config(&data_dir, &options_path, || {
+                supervisor::mqtt_service(supervisor::MQTT_SERVICE_URL, token.as_deref())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
             let config = rethink_core::config::normalize(raw)?;
             (config, data_dir)
         }

@@ -122,4 +122,6 @@ RUN mkdir -p /app/data && chown -R app:app /app
 USER app
 
 EXPOSE 443 8883 1884 46030 47878 44401
-CMD ["sh", "-c", "[ -f /app/data/config.json ] || cp /app/config.json /app/data/config.json; exec rethink-cloud /app/data/config.json"]
+# In Home Assistant add-on mode the manifest sets RETHINK_HASSIO_OPTIONS, and the configuration
+# comes from there rather than from a file - so neither seed nor pass one.
+CMD ["sh", "-c", "if [ -n \"$RETHINK_HASSIO_OPTIONS\" ]; then exec rethink-cloud; fi; [ -f /app/data/config.json ] || cp /app/config.json /app/data/config.json; exec rethink-cloud /app/data/config.json"]

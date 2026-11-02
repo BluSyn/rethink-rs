@@ -30,6 +30,8 @@ rcgen = { workspace = true }
 openssl = "0.10"
 tokio-openssl = "0.6"
 rumqttc = { workspace = true }
+# Asks the Home Assistant Supervisor for its MQTT service in add-on mode.
+reqwest = { workspace = true }
 clap = { workspace = true }
 include_dir = { workspace = true }
 uuid = { workspace = true }
