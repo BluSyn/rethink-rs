@@ -1,8 +1,11 @@
 //! WMVEL2137 — LG MVEL2033F over-the-range microwave (AABB class 0x41).
 //!
-//! Port of upstream master `831f3a4`. Not an alias of WMVEM1825: this unit has
-//! four vent speeds plus off (that one has two). Live captures while bridged to
-//! the LG cloud; offsets confirmed against ovenState at the same timestamp.
+//! Not an alias of WMVEM1825: this unit has four vent speeds plus off (that one
+//! has two). Live captures while bridged to the LG cloud; offsets confirmed
+//! against ovenState at the same timestamp. Sound, clock display and clock sync
+//! replay captured ThinQ preference writes; rec[35] reports the settings.
+//!
+//! Port of upstream commit 831f3a4 and PR #272.
 
 use crate::device_trait::DeviceHandler;
 use crate::js;
@@ -15,8 +18,6 @@ use std::sync::Arc;
 
 const CLASS_BYTE: u8 = 0x41;
 const RECORD_LEN: usize = 46;
-const FIELD_MARKER_OFFSET: usize = 35;
-const FIELD_MARKER: u8 = 0x53;
 const STATE_OFFSET: usize = 0;
 const COOK_MODE_OFFSET: usize = 5;
 const COOK_ITEM_OFFSET: usize = 6;
@@ -25,6 +26,30 @@ const REMAIN_TIME_OFFSET: usize = 16;
 const COOK_TIME_OFFSET: usize = 18;
 const TIMER_OFFSET: usize = 22;
 const VENT_LAMP_OFFSET: usize = 36;
+
+// rec[35]: packed settings. Sound Off -> On -> Off reads 0x50 -> 0x53 -> 0x50; hiding the clock
+// sets 0x04. Only the upper nibble checks record alignment, so a settings change never suppresses
+// status updates.
+const SETTINGS_OFFSET: usize = 35;
+const SETTINGS_PREFIX_MASK: u8 = 0xf0;
+const SETTINGS_PREFIX: u8 = 0x50;
+const SOUND_MASK: u8 = 0x03;
+const SOUND_ON: u8 = 0x03;
+const SOUND_OFF: u8 = 0x00;
+const CLOCK_HIDDEN_MASK: u8 = 0x04;
+
+// Captured sound-only preference write, every untouched field preserved (including the four zero
+// bytes near the end). The sound field is inner-body byte 7.
+const SOUND_COMMAND: &str = "f043210e8080800080808080800000000080";
+const SOUND_COMMAND_OFFSET: usize = 7;
+// Captured Show Clock without sync, which preserves sound and ends in 0x00 rather than 0x80. Sync
+// adds a 24-hour hour, minute, format byte 0x00 and second to the same write.
+const CLOCK_COMMAND: &str = "f043210e8080808000808080800000000000";
+const CLOCK_DISPLAY_COMMAND_OFFSET: usize = 8;
+const CLOCK_HOURS_OFFSET: usize = 4;
+const CLOCK_MINUTES_OFFSET: usize = 5;
+const CLOCK_FORMAT_OFFSET: usize = 6;
+const CLOCK_SECONDS_OFFSET: usize = 12;
 
 const CMD_SET: u8 = 0x01;
 const CMD_OFF: u8 = 0x00;
@@ -131,6 +156,20 @@ fn minutes_seconds(rec: &[u8], offset: usize) -> i64 {
 
 fn clamp_u8(value: f64, max: u8) -> u8 {
     value.round().clamp(0.0, f64::from(max)) as u8
+}
+
+/// `HH:MM:SS` local time, as the clock_sync command template renders it.
+fn parse_local_time(value: &str) -> Option<(u8, u8, u8)> {
+    let b = value.as_bytes();
+    if b.len() != 8 || b[2] != b':' || b[5] != b':' {
+        return None;
+    }
+    let field = |i: usize| {
+        let (tens, ones) = (b[i], b[i + 1]);
+        (tens.is_ascii_digit() && ones.is_ascii_digit()).then(|| (tens - b'0') * 10 + (ones - b'0'))
+    };
+    let (hours, minutes, seconds) = (field(0)?, field(3)?, field(6)?);
+    (hours < 24 && minutes < 60 && seconds < 60).then_some((hours, minutes, seconds))
 }
 
 pub struct Device {
@@ -256,8 +295,52 @@ impl Device {
                     "brightness_state_topic": "$this/light_level",
                     "brightness_command_topic": "$this/light_level/set",
                     "brightness_scale": MAX_LAMP_LEVEL,
+                    // Setting a level already turns the lamp on; a following ON would restore the
+                    // previous reported level before the appliance confirms the new one.
+                    "on_command_type": "brightness",
                     "name": "Cooktop light",
                     "icon": "mdi:lightbulb",
+                }),
+            ),
+            (
+                "sound".into(),
+                json!({
+                    "platform": "switch",
+                    "unique_id": "$deviceid-sound",
+                    "state_topic": "$this/sound",
+                    "command_topic": "$this/sound/set",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "name": "Sound",
+                    "icon": "mdi:volume-high",
+                    "entity_category": "config",
+                }),
+            ),
+            (
+                "clock_display".into(),
+                json!({
+                    "platform": "switch",
+                    "unique_id": "$deviceid-clock_display",
+                    "state_topic": "$this/clock_display",
+                    "command_topic": "$this/clock_display/set",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "name": "Clock display",
+                    "icon": "mdi:clock-outline",
+                    "entity_category": "config",
+                }),
+            ),
+            (
+                "clock_sync".into(),
+                json!({
+                    "platform": "button",
+                    "unique_id": "$deviceid-clock_sync",
+                    "command_topic": "$this/clock_sync/set",
+                    // HA renders its local time on press, avoiding the add-on container's timezone.
+                    "command_template": "{{ now().strftime('%H:%M:%S') }}",
+                    "name": "Sync clock",
+                    "icon": "mdi:clock-check-outline",
+                    "entity_category": "config",
                 }),
             ),
         ]
@@ -280,7 +363,8 @@ impl Device {
     }
 
     fn process_status(&self, rec: &[u8]) {
-        if rec.len() != RECORD_LEN || rec[FIELD_MARKER_OFFSET] != FIELD_MARKER {
+        if rec.len() != RECORD_LEN || rec[SETTINGS_OFFSET] & SETTINGS_PREFIX_MASK != SETTINGS_PREFIX
+        {
             return;
         }
         let item = u16::from(rec[COOK_ITEM_OFFSET]) << 8 | u16::from(rec[COOK_ITEM_OFFSET + 1]);
@@ -319,6 +403,18 @@ impl Device {
         self.core
             .publish_property("light_level", i64::from(lamp_level).into());
         self.core.publish_on_off("light_power", lamp_level != 0);
+
+        // Only the two app-confirmed sound settings are exposed; partial bit patterns are unknown.
+        let sound = match rec[SETTINGS_OFFSET] & SOUND_MASK {
+            SOUND_ON => "ON",
+            SOUND_OFF => "OFF",
+            _ => "None",
+        };
+        self.core.publish_property("sound", sound.into());
+        self.core.publish_on_off(
+            "clock_display",
+            rec[SETTINGS_OFFSET] & CLOCK_HIDDEN_MASK == 0,
+        );
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -363,6 +459,30 @@ impl Device {
         }
     }
 
+    fn set_sound(&self, on: bool) {
+        let mut command = hex_decode(SOUND_COMMAND);
+        command[SOUND_COMMAND_OFFSET] = if on { SOUND_ON } else { SOUND_OFF };
+        self.core.send(&command);
+    }
+
+    fn set_clock_display(&self, on: bool) {
+        let mut command = hex_decode(CLOCK_COMMAND);
+        command[CLOCK_DISPLAY_COMMAND_OFFSET] = if on { 0x00 } else { 0x01 };
+        self.core.send(&command);
+    }
+
+    fn set_clock(&self, local_time: &str) {
+        let Some((hours, minutes, seconds)) = parse_local_time(local_time) else {
+            return;
+        };
+        let mut command = hex_decode(CLOCK_COMMAND);
+        command[CLOCK_HOURS_OFFSET] = hours;
+        command[CLOCK_MINUTES_OFFSET] = minutes;
+        command[CLOCK_FORMAT_OFFSET] = 0x00;
+        command[CLOCK_SECONDS_OFFSET] = seconds;
+        self.core.send(&command);
+    }
+
     pub fn set_property(&self, prop: &str, mqtt_value: &str) {
         match prop {
             "fan_power" => {
@@ -393,6 +513,17 @@ impl Device {
                 };
                 self.set_lamp(clamp_u8(v, MAX_LAMP_LEVEL));
             }
+            "sound" => {
+                if mqtt_value == "ON" || mqtt_value == "OFF" {
+                    self.set_sound(mqtt_value == "ON");
+                }
+            }
+            "clock_display" => {
+                if mqtt_value == "ON" || mqtt_value == "OFF" {
+                    self.set_clock_display(mqtt_value == "ON");
+                }
+            }
+            "clock_sync" => self.set_clock(mqtt_value),
             _ => {}
         }
     }
@@ -477,6 +608,26 @@ mod tests {
     const TIMER_90_MINUTES: &str = "aa6241ec003000014000000000000000ff030d000000000000000000000000000000c3000000005300008080808001000000003000015500000000000000ff030d000000000000005a00000000000000c300000000530000808080800100000083bb";
     // A 90-minute cook: remaining reads a flat 90 minutes, the cook length 1 hour 30.
     const COOKING_90_MINUTES: &str = "aa6241ec073000004001000000000000ff030d000000000000000000000000000000c3000100005300008080808001000000023000004401000000000a00ff030d005a00011e00000000000000000000c7000100005300018080808001000000abbb";
+    // Another WMVEL2137, whose records carry 0x50 at rec[35] instead of 0x53.
+    const SAMPLE_MARKER_50_INITIAL: &str = "AA3441EB003000015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000E6BB";
+    const SAMPLE_MARKER_50_VENT_LOW: &str = "AA6241EC003100015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005001008080808001000000D8BB";
+    const SAMPLE_MARKER_50_LAMP_LOW: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005010008080808001000000CEBB";
+    // High, confirmed with the physical Light button.
+    const SAMPLE_MARKER_50_LAMP_HIGH: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005020008080808001000000FEBB";
+    const SAMPLE_MARKER_50_COOKING: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000023000004401000000000A00FF030D00001D00001E000000000000000000C700010000500001808080800100000092BB";
+    const SAMPLE_MARKER_50_PAUSED: &str = "AA6241EC023000004401000000000A00FF030D00001D00001E000000000000000000C7000100005000018080808001000000043000004401000000000A00FF030D00000A00001E000000000000000000C7000100005000018080808001000000A7BB";
+    // ThinQ Sound Off -> On -> Off.
+    const SOUND_ON_COMMAND: &str = "AA16F043210E8080800380808080800000000080F0BB";
+    const SOUND_OFF_COMMAND: &str = "AA16F043210E8080800080808080800000000080F7BB";
+    const SAMPLE_SOUND_ON: &str = "AA6241EC003100015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005300008080808001000000DABB";
+    const SAMPLE_SOUND_OFF: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005300008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000DBBB";
+    const SAMPLE_SETTINGS_54: &str = "AA6241EC003100015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005400008080808001000000C5BB";
+    // Hide, Show without sync, then Show with sync at 13:30:26 and 13:31:28.
+    const CLOCK_HIDE_COMMAND: &str = "AA16F043210E808080800180808080000000000076BB";
+    const CLOCK_SHOW_COMMAND: &str = "AA16F043210E808080800080808080000000000077BB";
+    const CLOCK_SYNC_133026: &str = "AA16F043210E0D1E0080008080801A000000000032BB";
+    const CLOCK_SYNC_133128: &str = "AA16F043210E0D1F0080008080801C00000000003FBB";
+    const SAMPLE_CLOCK_SHOWN: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005400008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005000008080808001000000DABB";
 
     #[test]
     fn config_published_on_device_creation() {
@@ -495,6 +646,9 @@ mod tests {
             "timer",
             "fan_power",
             "light_power",
+            "sound",
+            "clock_display",
+            "clock_sync",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected);
@@ -576,6 +730,38 @@ mod tests {
             hex_encode(&thinq.outbox()[0]),
             "AA0EF043220480800101808046BB"
         );
+    }
+
+    #[test]
+    fn ha_brightness_turn_on_does_not_overwrite_high_with_the_previous_reported_low() {
+        let (ha, thinq, dev) = make();
+        feed(&thinq, SAMPLE_MARKER_50_LAMP_LOW);
+        thinq.reset_recorder();
+
+        // HA's basic MQTT light defaults to brightness followed by ON. Replay the order its
+        // discovery setting selects, before the appliance can acknowledge the new level.
+        let device = ha.device(DEVICE_ID).unwrap();
+        let light = &device.config.as_ref().unwrap().components["light_power"];
+        let on_command_type = light
+            .get("on_command_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("last");
+        if on_command_type == "first" {
+            dev.set_property("light_power", "ON");
+        }
+        dev.set_property("light_level", "2");
+        if on_command_type == "last" {
+            dev.set_property("light_power", "ON");
+        }
+
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(sent, ["AA0EF043220480800102808041BB"]);
+        assert_eq!(prop(&ha, "light_level").as_deref(), Some("1"));
+
+        // only the real high-lamp report advances the published state
+        feed(&thinq, SAMPLE_MARKER_50_LAMP_HIGH);
+        assert_eq!(prop(&ha, "light_level").as_deref(), Some("2"));
+        assert_eq!(prop(&ha, "light_power").as_deref(), Some("ON"));
     }
 
     #[test]
@@ -761,6 +947,160 @@ mod tests {
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Off"));
         assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("0"));
         assert_eq!(prop(&ha, "light_level").as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn captured_0x50_marker_replies_publish_initial_state_and_physical_hood_changes() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_MARKER_50_INITIAL);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Idle"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "fan_power").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "light_power").as_deref(), Some("OFF"));
+
+        feed(&thinq, SAMPLE_MARKER_50_VENT_LOW);
+        assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("1"));
+        assert_eq!(prop(&ha, "fan_power").as_deref(), Some("ON"));
+        assert_eq!(prop(&ha, "light_level").as_deref(), Some("0"));
+
+        feed(&thinq, SAMPLE_MARKER_50_LAMP_LOW);
+        assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "fan_power").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "light_level").as_deref(), Some("1"));
+        assert_eq!(prop(&ha, "light_power").as_deref(), Some("ON"));
+    }
+
+    #[test]
+    fn captured_0x50_marker_deltas_publish_cooking_and_paused_countdowns() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_MARKER_50_COOKING);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Cooking"));
+        assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Microwave"));
+        assert_eq!(prop(&ha, "power_level").as_deref(), Some("100"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("29"));
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("30"));
+
+        feed(&thinq, SAMPLE_MARKER_50_PAUSED);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Paused"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("10"));
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("30"));
+    }
+
+    #[test]
+    fn sound_commands_match_the_captured_app_writes_and_wait_for_reported_state() {
+        let (ha, thinq, dev) = make();
+        feed(&thinq, SAMPLE_SOUND_OFF);
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("OFF"));
+        thinq.reset_recorder();
+
+        dev.set_property("sound", "ON");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), SOUND_ON_COMMAND);
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("OFF"));
+        feed(&thinq, "AA084100430063BB");
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("OFF"));
+        feed(&thinq, SAMPLE_SOUND_ON);
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("ON"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Idle"));
+        assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "light_level").as_deref(), Some("0"));
+
+        thinq.reset_recorder();
+        dev.set_property("sound", "OFF");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), SOUND_OFF_COMMAND);
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("ON"));
+        feed(&thinq, SAMPLE_SOUND_OFF);
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("OFF"));
+
+        thinq.reset_recorder();
+        dev.set_property("sound", "unexpected");
+        assert_eq!(thinq.outbox().len(), 0);
+    }
+
+    #[test]
+    fn other_captured_settings_flags_do_not_suppress_status_updates() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_SETTINGS_54);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Idle"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "fan_power").as_deref(), Some("OFF"));
+    }
+
+    #[test]
+    fn clock_display_matches_the_captured_hide_show_writes_and_reported_visibility() {
+        let (ha, thinq, dev) = make();
+        feed(&thinq, SAMPLE_CLOCK_SHOWN);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("ON"));
+        thinq.reset_recorder();
+
+        dev.set_property("clock_display", "OFF");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), CLOCK_HIDE_COMMAND);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("ON"));
+        feed(&thinq, SAMPLE_SETTINGS_54);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Idle"));
+
+        thinq.reset_recorder();
+        dev.set_property("clock_display", "ON");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), CLOCK_SHOW_COMMAND);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("OFF"));
+        feed(&thinq, SAMPLE_CLOCK_SHOWN);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("ON"));
+
+        // the visibility bit is independent of the sound setting
+        feed(&thinq, SAMPLE_SOUND_ON);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("ON"));
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("ON"));
+
+        thinq.reset_recorder();
+        dev.set_property("clock_display", "unexpected");
+        assert_eq!(thinq.outbox().len(), 0);
+    }
+
+    #[test]
+    fn clock_sync_matches_both_captured_local_times_including_seconds() {
+        let (ha, thinq, dev) = make();
+        feed(&thinq, SAMPLE_SETTINGS_54);
+        thinq.reset_recorder();
+
+        // HA-local HH:MM:SS payloads, not the UTC log timestamps of the captures
+        dev.set_property("clock_sync", "13:30:26");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), CLOCK_SYNC_133026);
+        assert_eq!(prop(&ha, "clock_display").as_deref(), Some("OFF"));
+        thinq.reset_recorder();
+        dev.set_property("clock_sync", "13:31:28");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), CLOCK_SYNC_133128);
+    }
+
+    #[test]
+    fn malformed_and_out_of_range_clock_payloads_send_nothing() {
+        let (_, thinq, dev) = make();
+        for value in [
+            "PRESS", "", "1:30:00", "24:00:00", "13:60:00", "13:30:60", "-1:00:00",
+        ] {
+            dev.set_property("clock_sync", value);
+        }
+        assert_eq!(thinq.outbox().len(), 0);
+    }
+
+    #[test]
+    fn partial_sound_bit_patterns_publish_unknown_without_discarding_the_record() {
+        let (ha, thinq, _) = make();
+        let mut frame = hex_decode(SAMPLE_MARKER_50_INITIAL);
+        frame[4 + 35] = 0x51;
+        thinq.emit_data(&frame);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Idle"));
+        assert_eq!(prop(&ha, "sound").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn unrecognized_settings_prefixes_publish_nothing() {
+        let (ha, thinq, _) = make();
+        let mut frame = hex_decode(SAMPLE_MARKER_50_INITIAL);
+        frame[4 + 35] = 0x60;
+        thinq.emit_data(&frame);
+        assert!(ha.device(DEVICE_ID).unwrap().properties.is_empty());
     }
 
     #[test]
