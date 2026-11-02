@@ -579,7 +579,7 @@ impl Device {
             }
             "set_delay_end" => {
                 // 0 is none; modelJson's reserveTimeHour allows 3..19.
-                if let Ok(hours) = value.trim().parse::<f64>() {
+                if let Some(hours) = crate::js::number(value) {
                     let allowed = hours == 0.0
                         || ((3.0..=19.0).contains(&hours) && programme.is_some_and(|p| p.delay));
                     if hours.fract() == 0.0 && allowed {
@@ -1801,5 +1801,21 @@ mod tests {
             json!(["No spin", "400 rpm", "800 rpm", "1000 rpm", "1200 rpm", "1400 rpm", "Max"])
         );
         assert_eq!(options("set_rinse"), json!(["Normal", "Rinse+"]));
+    }
+
+    #[test]
+    fn delay_end_payloads_parse_like_javascript_number() {
+        // The captured delayed start, reached with payloads upstream's Number() also accepts.
+        for payload in ["3", " 3 ", "3.0", "0x3"] {
+            let washer = connect(&[NO_COURSE_REMOTE_START_2]);
+            washer.press(&[("set_course", "Cotton"), ("set_delay_end", payload), ("start", "")]);
+            assert_eq!(washer.sent(), [hex(LG_START_DELAYED)], "{payload:?}");
+        }
+        // Not integral, or not a number: the delay stays unset.
+        for payload in ["3.5", "abc"] {
+            let washer = connect(&[NO_COURSE_REMOTE_START_2]);
+            washer.press(&[("set_course", "Cotton"), ("set_delay_end", payload)]);
+            assert_eq!(get(&washer.ha, "set_delay_end"), int(0), "{payload:?}");
+        }
     }
 }
