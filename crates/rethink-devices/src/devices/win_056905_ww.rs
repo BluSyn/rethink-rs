@@ -127,11 +127,10 @@ impl Device {
                 modes2ha.get(raw as usize).and_then(|m| *m).map(|s| s.into())
             }));
             mode.write_xform = Some(Box::new(move |val| {
-                // Faithful to TS: setProperty('power', ...) uses short name (no match in fields_by_ha).
                 if val == "off" {
-                    core_w.set_property("power", "OFF");
+                    core_w.set_property("climate-power", "OFF");
                 } else {
-                    core_w.set_property("power", "ON");
+                    core_w.set_property("climate-power", "ON");
                 }
                 let modes2clip: &[(&str, i64)] =
                     &[("cool", 0), ("fan_only", 2), ("heat", 4), ("dry", 8)];
@@ -266,6 +265,7 @@ pub fn create(
 mod tests {
     use super::*;
     use rethink_core::{hex_encode, MockHaConnection, MockThinq2Device};
+    use rethink_util::tlv;
 
     const DEVICE_ID: &str = "test-id";
 
@@ -295,5 +295,52 @@ mod tests {
         assert_eq!(climate["platform"], "climate");
         assert_eq!(climate["modes"], json!(["off", "cool", "fan_only", "heat"]));
         assert_eq!(climate["fan_modes"], json!(["low", "high"]));
+    }
+
+    /// A unit in cool, fan low, 22 °C, swing off; powered as given.
+    fn make_device(power: u32) -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        let ha = MockHaConnection::new();
+        let thinq = MockThinq2Device::new(DEVICE_ID, meta());
+        let dev = Device::new(ha.clone(), thinq.clone(), meta());
+        let d = dev.clone();
+        ha.on_set_property(move |id, prop, value| {
+            if id == DEVICE_ID {
+                d.set_property(prop, value);
+            }
+        });
+        for (id, v) in [(0x1f7, power), (0x1f9, 0), (0x1fa, 2), (0x1fe, 44), (0x322, 0)] {
+            dev.set_raw(id, v);
+        }
+        thinq.reset_recorder();
+        (ha, thinq, dev)
+    }
+
+    fn sent_tlvs(thinq: &MockThinq2Device) -> Vec<Vec<(u16, u32)>> {
+        thinq
+            .outbox()
+            .iter()
+            .map(|p| tlv::parse(&p[11..p.len() - 2]).into_iter().map(|e| (e.t, e.v)).collect())
+            .collect()
+    }
+
+    #[test]
+    fn mode_off_turns_the_unit_off() {
+        let (ha, thinq, _dev) = make_device(1);
+        ha.set_property(DEVICE_ID, "climate", "mode_command", "off");
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(sent, ["01010400000065020101027DC00576"]); // 0x1f7=0
+    }
+
+    #[test]
+    fn mode_from_off_turns_the_unit_on() {
+        let (ha, thinq, _dev) = make_device(0);
+        ha.set_property(DEVICE_ID, "climate", "mode_command", "heat");
+        assert_eq!(
+            sent_tlvs(&thinq),
+            [
+                vec![(0x1f7, 1), (0x1f9, 0)],
+                vec![(0x1f9, 4), (0x1f7, 1), (0x1fa, 2), (0x1fe, 44), (0x322, 0)],
+            ]
+        );
     }
 }
