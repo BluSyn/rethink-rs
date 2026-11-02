@@ -903,9 +903,11 @@ impl Device {
 
         let auto_dry_setting = self.core.get_raw(0x350).unwrap_or(0) & 0x10 != 0;
         if self.has_cap_or_tag(0x2cc, 4, 0x20e) && auto_dry_setting {
+            // Withdraws the plain `autodry` entity, which this fork publishes as a switch (upstream:
+            // a binary_sensor); a tombstone only removes the component on the platform it names.
             config
                 .components
-                .insert("autodry".into(), json!({"platform": "binary_sensor"}));
+                .insert("autodry".into(), json!({"platform": "switch"}));
             self.add_config_switch_values(
                 &mut config,
                 0x20e,
@@ -2530,7 +2532,7 @@ mod tests {
         assert_eq!(c["beep"]["json_attributes_topic"], "$this/beep-attributes");
         assert!(c.contains_key("starttimer"));
         assert!(c.contains_key("stoptimer"));
-        assert_eq!(c["autodry"], json!({"platform": "binary_sensor"}));
+        assert_eq!(c["autodry"], json!({"platform": "switch"}));
         assert!(!c.contains_key("energysave"));
         assert_eq!(c["energy_current"]["device_class"], "power");
         assert_eq!(
