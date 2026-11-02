@@ -16,6 +16,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 const STATUS_LENGTH: usize = 68;
+/// The LRFXS3106S sends the same status block cut off after byte 42, so it is 43 bytes long.
+const STATUS_LENGTH_SHORT: usize = 43;
 const COMMAND_LENGTH: usize = 118;
 const FRESH_AIR_FILTER: usize = 35;
 const WATER_FILTER: usize = 36;
@@ -187,8 +189,14 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
+        // 68 on the LRFXC2606S, 43 on the LRFXS3106S; a frame is matched against both.
         if let Some(rec) = process_common_status(buf, 0x10, STATUS_LENGTH) {
             self.process_status(rec);
+            return;
+        }
+        if let Some(rec) = process_common_status(buf, 0x10, STATUS_LENGTH_SHORT) {
+            self.process_status(rec);
+            return;
         }
         if buf.len() >= 4 && buf[0] == 0x10 && buf[1] == 0xc5 {
             self.process_usage(&buf[2..]);
@@ -196,7 +204,7 @@ impl Device {
     }
 
     fn process_status(&self, rec: &[u8]) {
-        if rec.len() < STATUS_LENGTH {
+        if rec.len() < STATUS_LENGTH_SHORT {
             return;
         }
         let unit = if rec[8] != 0 {
@@ -322,6 +330,17 @@ mod tests {
     const FRAME_SABBATH_ON: &str = "AA8E10EC0207060102000000000001FFFFFF00FFFF00FFFFFFFFFFFFFF021A0505FF00000101FF6464FFFFFF01FF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0078FF00000207060102000000000001FFFFFF01FFFF00FFFFFFFFFFFFFF021A0505FF00000101FF6464FFFFFF01FF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0078FF00008ABB";
     const FRAME_USAGE_GALLON: &str = "AA3810C5030801000000000302000000000003000000000111000000018A120000000000130000000010210ECC001E8A2201A70001A7E7BB";
 
+    // The LRFXS3106S reports the same model ID but a 43-byte status block. These frames were captured
+    // from one through the Home Assistant app, each change made at the front panel and read back from it.
+    // It starts at 36 °F / 0 °F, Ice Plus off, doors closed, °F.
+    const SHORT_INITIAL: &str = "AA3110EB0208060104020600000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF00B2BB";
+    const SHORT_DOOR_OPEN: &str = "AA5C10EC0208060104020600000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF000208060104020601000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF0070BB";
+    const SHORT_FRIDGE_35: &str = "AA5C10EC0208060104020601000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF000209060104020601000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF0072BB";
+    const SHORT_ICE_PLUS_ON: &str = "AA5C10EC0208060104020601000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF000208060204020601000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF0072BB";
+    const SHORT_USAGE: &str = "AA3810C52A0801000400001F02000000000003000100000511004A000144120000000000130004000024210133000E332200000001604BBB";
+    const SHORT_WATER_FILTER_RESET: &str = "AA5C10EC0208060104020601000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0000FFFFFFFFFF000208060104020001000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0064FFFFFFFFFF00D1BB";
+    const SHORT_AIR_FILTER_RESET: &str = "AA5C10EC0208060104020001000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF0064FFFFFFFFFF000208060102020001000001FFFFFF00FFFF00FFFFFFFFFFFFFF02000101FF00000101FF6464FFFFFFFFFF0011BB";
+
     fn meta() -> Metadata {
         Metadata::new("2REF11EIDG__4", "2REF11EIDG__4", "")
     }
@@ -435,5 +454,36 @@ mod tests {
     #[test]
     fn registry_resolves() {
         assert!(crate::registry::t2_factory("2REF11EIDG__4").is_some());
+    }
+
+    #[test]
+    fn short_43_byte_status_block_decodes_the_same_way() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(SHORT_INITIAL));
+        assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("36"));
+        assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "door").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "ice_plus").as_deref(), Some("OFF"));
+        thinq.emit_data(&hex_decode(SHORT_DOOR_OPEN));
+        assert_eq!(prop(&ha, "door").as_deref(), Some("ON"));
+        thinq.emit_data(&hex_decode(SHORT_FRIDGE_35));
+        assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("35"));
+        thinq.emit_data(&hex_decode(SHORT_ICE_PLUS_ON));
+        assert_eq!(prop(&ha, "ice_plus").as_deref(), Some("ON"));
+        thinq.emit_data(&hex_decode(SHORT_USAGE));
+        assert_eq!(prop(&ha, "water_dispensed").as_deref(), Some("3.635"));
+    }
+
+    #[test]
+    fn short_frame_reports_filter_life_in_same_bytes() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(SHORT_INITIAL));
+        assert_eq!(prop(&ha, "water_filter").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "fresh_air_filter").as_deref(), Some("0"));
+        thinq.emit_data(&hex_decode(SHORT_WATER_FILTER_RESET));
+        assert_eq!(prop(&ha, "water_filter").as_deref(), Some("100"));
+        assert_eq!(prop(&ha, "fresh_air_filter").as_deref(), Some("0"));
+        thinq.emit_data(&hex_decode(SHORT_AIR_FILTER_RESET));
+        assert_eq!(prop(&ha, "fresh_air_filter").as_deref(), Some("100"));
     }
 }
