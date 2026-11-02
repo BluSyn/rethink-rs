@@ -1,5 +1,6 @@
 //! RAC_056905_WW (alias RAC_0B0001_WW) — LG room air conditioner.
 //! Cassette CST_570004_WW has its own handler (different mode/fan/swing tables).
+//! The DUCT_626301_WW handler is this one with its own fan speeds.
 
 use crate::ac_tables::{rac_air_temp, rac_pipe_temp};
 use crate::device_trait::DeviceHandler;
@@ -35,6 +36,11 @@ fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
 
 /// HA climate mode per 0x1f9 code, in HA's list order.
 const MODES: [(&str, u32); 5] = [("cool", 0), ("dry", 1), ("fan_only", 2), ("heat", 4), ("auto", 6)];
+
+/// HA fan mode per 0x1fa code, in HA's list order.
+pub type FanModes = &'static [(&'static str, u32)];
+const FAN_MODES: FanModes =
+    &[("auto", 8), ("very low", 2), ("low", 3), ("medium", 4), ("high", 5), ("very high", 6)];
 
 type SwingModes = &'static [(&'static str, u32)];
 /// 0x321 vane positions, in HA's list order.
@@ -106,14 +112,26 @@ struct Inner {
 
 pub struct Device {
     pub core: Arc<TlvDeviceCore>,
+    fan_modes: FanModes,
     inner: Mutex<Inner>,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
+        Self::with_fan_modes(ha, thinq, meta, FAN_MODES)
+    }
+
+    /// A variant with its own 0x1fa fan speeds (DUCT_626301_WW).
+    pub fn with_fan_modes(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        fan_modes: FanModes,
+    ) -> Arc<Self> {
         let core = TlvDeviceCore::new(ha, thinq);
         let this = Arc::new(Self {
             core: core.clone(),
+            fan_modes,
             inner: Mutex::new(Inner {
                 meta,
                 initial_values_received: false,
@@ -462,7 +480,7 @@ impl Device {
                 "precision": 0.5,
                 "min_temp": self.temp_limit(&[0x2e1, 0x2e3, 0x2eb], false).unwrap_or(18.0),
                 "max_temp": self.temp_limit(&[0x2e2, 0x2e4, 0x2ec], true).unwrap_or(30.0),
-                "fan_modes": ["auto", "very low", "low", "medium", "high", "very high"],
+                "fan_modes": self.fan_modes.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             }),
         );
 
@@ -650,34 +668,19 @@ impl Device {
 
         // fan_mode
         {
+            let fan_modes = self.fan_modes;
             let mut f = FieldDefinition::new("climate", "fan_mode").with_id(0x1fa);
-            f.read_xform = Some(Box::new(|raw| {
-                let modes2ha: [Option<&str>; 9] = [
-                    None,
-                    None,
-                    Some("very low"),
-                    Some("low"),
-                    Some("medium"),
-                    Some("high"),
-                    Some("very high"),
-                    None,
-                    Some("auto"),
-                ];
-                modes2ha
-                    .get(raw as usize)
-                    .and_then(|m| *m)
-                    .map(|s| s.into())
+            f.read_xform = Some(Box::new(move |raw| {
+                fan_modes
+                    .iter()
+                    .find(|(_, code)| *code == raw)
+                    .map(|(name, _)| (*name).into())
             }));
-            f.write_xform = Some(Box::new(|val| {
-                match val {
-                    "very low" => Some(2i64.into()),
-                    "low" => Some(3i64.into()),
-                    "medium" => Some(4i64.into()),
-                    "high" => Some(5i64.into()),
-                    "very high" => Some(6i64.into()),
-                    "auto" => Some(8i64.into()),
-                    _ => None,
-                }
+            f.write_xform = Some(Box::new(move |val| {
+                fan_modes
+                    .iter()
+                    .find(|(name, _)| *name == val)
+                    .map(|(_, code)| i64::from(*code).into())
             }));
             f.write_attach_static = Some(vec![0x1f9, 0x1fe]);
             self.core.add_field(&mut config, f, true);
@@ -2126,6 +2129,10 @@ mod tests {
         let device = ha.device(DEVICE_ID).expect("HA configuration published");
         let c = &device.config.as_ref().unwrap().components;
         assert_eq!(c["climate"]["platform"], "climate");
+        assert_eq!(
+            c["climate"]["fan_modes"],
+            json!(["auto", "very low", "low", "medium", "high", "very high"])
+        );
         assert!(c.contains_key("jet"));
         assert!(c.contains_key("energysave"));
         assert!(c.contains_key("autodry"));
