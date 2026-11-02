@@ -41,6 +41,9 @@ impl Device {
                 ("active", json!({"platform":"binary_sensor","unique_id":"$deviceid-active","state_topic":"$this/active","name":"Active","icon":"mdi:washing-machine"})),
                 ("tub_clean_count", json!({"platform":"sensor","unique_id":"$deviceid-tub_clean_count","state_topic":"$this/tub_clean_count","name":"Washes since drum clean","icon":"mdi:washing-machine-alert","entity_category":"diagnostic"})),
                 ("delay_remaining", json!({"platform":"sensor","unique_id":"$deviceid-delay_remaining","state_topic":"$this/delay_remaining","device_class":"duration","unit_of_measurement":"min","name":"Delay remaining","icon":"mdi:clock-start"})),
+                // Withdrawn in favour of upstream's entities (tub_clean is now tub_clean_count)
+                ("pre_state", json!({"platform":"sensor"})),
+                ("tub_clean", json!({"platform":"sensor"})),
             ],
         );
         core.set_config(base);
@@ -249,7 +252,7 @@ mod tests {
         let status_options = comps["status"]["options"].as_array().unwrap();
         assert!(status_options.contains(&json!("Washing")));
         assert!(status_options.contains(&json!("Error")));
-        assert_eq!(comps.len(), 19);
+        assert_eq!(comps.len(), 19 + 2);
         assert_eq!(
             comps["tub_clean_count"],
             json!({"platform":"sensor","unique_id":"$deviceid-tub_clean_count","state_topic":"$this/tub_clean_count","name":"Washes since drum clean","icon":"mdi:washing-machine-alert","entity_category":"diagnostic"})
@@ -276,6 +279,19 @@ mod tests {
                 "Error"
             ])
         );
+    }
+
+    #[test]
+    fn withdrawn_entities_are_tombstoned() {
+        let (ha, thinq, _) = make();
+        let devinfo = ha.device(DEVICE_ID).unwrap();
+        let comps = &devinfo.config.as_ref().unwrap().components;
+        assert_eq!(comps["pre_state"], json!({"platform": "sensor"}));
+        assert_eq!(comps["tub_clean"], json!({"platform": "sensor"}));
+        emit(&thinq, SAMPLE_WASHING_EC);
+        let published = props(&ha);
+        assert!(!published.contains_key("pre_state"));
+        assert!(!published.contains_key("tub_clean"));
     }
 
     #[test]
