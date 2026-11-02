@@ -64,6 +64,7 @@ register_devices! {
         dev_2rebglubd1p_a => { "2REBGLUBD1P_A" },
         dev_2res1ve600fwc => { "2RES1VE600FWC" | "2RES1VE61NFWA" },
         y_v8_y___w_b32qeuk => { "Y_V8_Y___W.B32QEUK" },
+        y_v8_y___w_b_2qeuk => { "Y_V8_Y___W.B_2QEUK" },
         f_v8_y___w_b_2qeuk => {
             "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK" | "F_V__Y___W.B__QEUK"
         },
