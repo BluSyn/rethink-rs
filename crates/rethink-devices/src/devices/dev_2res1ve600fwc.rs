@@ -3,7 +3,7 @@
 use crate::device_trait::DeviceHandler;
 use crate::fridge_common::{
     pack_status, status_at, Status, TemperatureUnit, CMD_F017, ST_ANY_DOOR_OPEN, ST_EXPRESS_FREEZE,
-    ST_FREEZER_SETPOINT, ST_FRIDGE_SETPOINT, ST_TEMP_UNIT,
+    ST_FREEZER_SETPOINT, ST_FRESH_AIR_FILTER, ST_FRIDGE_SETPOINT, ST_TEMP_UNIT,
 };
 use rethink_util::sync::Mutex;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
@@ -14,6 +14,10 @@ use serde_json::json;
 use std::sync::Arc;
 
 const STATUS_LENGTH: usize = 12;
+/// 2RES1VE61NFWA (GSX961MCCZ) is the only one of the two models with a Pure N Fresh filter.
+const AIR_FILTER_MODEL: &str = "2RES1VE61NFWA";
+/// REPLACE, as confirmed on 2RES1VE61NFWA and as used by 2REF11EII__M2.
+const FRESH_AIR_REPLACE: u8 = 4;
 
 fn fridge_range(unit: TemperatureUnit) -> (String, i32, i32) {
     match unit {
@@ -68,6 +72,7 @@ fn convert_from_freezer_temperature(unit: TemperatureUnit, input: u8) -> Option<
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     temperature_unit: Mutex<Option<TemperatureUnit>>,
+    has_air_filter: bool,
     meta: Metadata,
 }
 
@@ -77,6 +82,7 @@ impl Device {
         let this = Arc::new(Self {
             core,
             temperature_unit: Mutex::new(None),
+            has_air_filter: thinq.meta().model_id == AIR_FILTER_MODEL,
             meta,
         });
         let t = this.clone();
@@ -102,6 +108,20 @@ impl Device {
             ("express_freeze".into(), json!({"platform":"switch","unique_id":"$deviceid-express_freeze","state_topic":"$this/express_freeze","command_topic":"$this/express_freeze/set","icon":"mdi:snowflake","name":"Express Freeze"})),
             ("door".into(), json!({"platform":"binary_sensor","device_class":"door","unique_id":"$deviceid-door","state_topic":"$this/door","name":"Door"})),
         ].into_iter().collect();
+        if self.has_air_filter {
+            config.components.insert(
+                "fresh_air_filter_replace".into(),
+                json!({
+                    "platform": "binary_sensor",
+                    "device_class": "problem",
+                    "entity_category": "diagnostic",
+                    "icon": "mdi:air-filter",
+                    "unique_id": "$deviceid-fresh_air_filter_replace",
+                    "state_topic": "$this/fresh_air_filter_replace",
+                    "name": "Fresh air filter health",
+                }),
+            );
+        }
         self.core.set_config(config);
     }
 
@@ -127,6 +147,12 @@ impl Device {
         );
         self.core
             .publish_on_off("express_freeze", status_at(cur, ST_EXPRESS_FREEZE) == 2);
+        if self.has_air_filter {
+            self.core.publish_on_off(
+                "fresh_air_filter_replace",
+                status_at(cur, ST_FRESH_AIR_FILTER) == FRESH_AIR_REPLACE,
+            );
+        }
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -218,11 +244,24 @@ mod tests {
     const SAMPLE_DELTA_EXPRESS_FREEZE_OFF: &str =
         "AA1E10EC02030502FFFFFF0001FF01FF02030501FFFFFF0001FF01FF80BB";
 
-    fn make() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+    // Captures from a 2RES1VE61NFWA (GSX961MCCZ) around a Pure N Fresh filter change.
+    const AIR_FILTER_MODEL_ID: &str = "2RES1VE61NFWA";
+    // The panel asks for a filter change: cur[4] = 4.
+    const SAMPLE_DELTA_AIR_FILTER_REPLACE: &str =
+        "AA1E10EC020405010402000001000100020405010402000001000100B9BB";
+    // Pure N Fresh held 3 s, the panel clears the icon: cur[4] 4 -> 2.
+    const SAMPLE_DELTA_AIR_FILTER_RESET: &str =
+        "AA1E10EC020405010402000001000100020405010202000001000100BFBB";
+
+    fn make_model(model_id: &str) -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
         let ha = MockHaConnection::new();
-        let meta = Metadata::new("2RES1VE600FWC", "2RES1VE600FWC", "1.0");
+        let meta = Metadata::new(model_id, model_id, "1.0");
         let thinq = MockThinq2Device::new(DEVICE_ID, meta.clone());
         (ha.clone(), thinq.clone(), Device::new(ha, thinq, meta))
+    }
+
+    fn make() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        make_model("2RES1VE600FWC")
     }
 
     fn prop(ha: &MockHaConnection, name: &str) -> Option<String> {
@@ -401,5 +440,38 @@ mod tests {
         thinq.reset_recorder();
         dev.set_property("nonsense", "whatever");
         assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn air_filter_change_request_publishes_replace_on() {
+        let (ha, thinq, _) = make_model(AIR_FILTER_MODEL_ID);
+        emit(&thinq, SAMPLE_DELTA_AIR_FILTER_REPLACE);
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(
+            comps["fresh_air_filter_replace"]["device_class"],
+            json!("problem")
+        );
+        assert_eq!(prop(&ha, "fresh_air_filter_replace").as_deref(), Some("ON"));
+    }
+
+    #[test]
+    fn air_filter_panel_reset_clears_replace() {
+        let (ha, thinq, _) = make_model(AIR_FILTER_MODEL_ID);
+        emit(&thinq, SAMPLE_DELTA_AIR_FILTER_REPLACE);
+        assert_eq!(prop(&ha, "fresh_air_filter_replace").as_deref(), Some("ON"));
+        emit(&thinq, SAMPLE_DELTA_AIR_FILTER_RESET);
+        assert_eq!(
+            prop(&ha, "fresh_air_filter_replace").as_deref(),
+            Some("OFF")
+        );
+    }
+
+    #[test]
+    fn air_filter_not_exposed_on_the_filterless_2res1ve600fwc() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_DELTA_AIR_FILTER_REPLACE);
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert!(!comps.contains_key("fresh_air_filter_replace"));
+        assert!(prop(&ha, "fresh_air_filter_replace").is_none());
     }
 }
