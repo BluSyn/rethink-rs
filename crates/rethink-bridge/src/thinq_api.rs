@@ -245,6 +245,33 @@ impl Client {
         Ok(Self::parse_home_devices(&body))
     }
 
+    async fn thinq2_uri(&mut self) -> anyhow::Result<String> {
+        self.ensure_gateway()
+            .await?
+            .get("thinq2Uri")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("missing thinq2Uri"))
+    }
+
+    /// The device's status snapshot as the LG cloud reports it.
+    pub async fn device_status(&mut self, device_id: &str) -> anyhow::Result<Value> {
+        let thinq2 = self.thinq2_uri().await?;
+        self.api_fetch(&format!("{thinq2}/service/devices/{device_id}"), "GET", None)
+            .await
+    }
+
+    /// Drive a device the way the LG app does (`control-sync`).
+    pub async fn control_sync(&mut self, device_id: &str, body: Value) -> anyhow::Result<Value> {
+        let thinq2 = self.thinq2_uri().await?;
+        self.api_fetch(
+            &format!("{thinq2}/service/devices/{device_id}/control-sync"),
+            "POST",
+            Some(body),
+        )
+        .await
+    }
+
     pub async fn remove_device(&self, device_id: &str) -> anyhow::Result<()> {
         let g = self
             .gateway

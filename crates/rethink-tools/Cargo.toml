@@ -25,6 +25,10 @@ path = "src/bin/rethink_mcp.rs"
 name = "lgcloud-monitor"
 path = "src/bin/lgcloud_monitor.rs"
 
+[[bin]]
+name = "thinq-control"
+path = "src/bin/thinq_control.rs"
+
 [dependencies]
 rethink-util = { workspace = true }
 rethink-core = { workspace = true }

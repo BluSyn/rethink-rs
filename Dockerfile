@@ -39,7 +39,7 @@ RUN set -eux; \
     mkdir -p crates/rethink-setup/src; \
     printf 'fn main() {}\n' > crates/rethink-setup/src/main.rs; \
     mkdir -p crates/rethink-tools/src/bin; \
-    for bin in packet_parser packet_sender rethink_capture rethink_mcp lgcloud_monitor; do \
+    for bin in packet_parser packet_sender rethink_capture rethink_mcp lgcloud_monitor thinq_control; do \
       printf 'fn main() {}\n' > "crates/rethink-tools/src/bin/${bin}.rs"; \
     done; \
     mkdir -p html; \
@@ -56,6 +56,7 @@ RUN cargo build --release \
              target/release/rethink-capture \
              target/release/rethink-mcp \
              target/release/lgcloud-monitor \
+             target/release/thinq-control \
              target/release/deps/rethink_* \
     && rm -rf target/release/.fingerprint/rethink-* \
               target/release/incremental
@@ -85,6 +86,7 @@ RUN cargo build --release \
              target/release/rethink-capture \
              target/release/rethink-mcp \
              target/release/lgcloud-monitor \
+             target/release/thinq-control \
     && mkdir -p /out \
     && cp target/release/rethink-cloud \
           target/release/rethink-setup \
@@ -93,6 +95,7 @@ RUN cargo build --release \
           target/release/rethink-capture \
           target/release/rethink-mcp \
           target/release/lgcloud-monitor \
+          target/release/thinq-control \
           /out/
 
 FROM debian:bookworm-slim AS runtime
@@ -111,6 +114,7 @@ COPY --from=build /out/packet-sender /usr/local/bin/packet-sender
 COPY --from=build /out/rethink-capture /usr/local/bin/rethink-capture
 COPY --from=build /out/rethink-mcp /usr/local/bin/rethink-mcp
 COPY --from=build /out/lgcloud-monitor /usr/local/bin/lgcloud-monitor
+COPY --from=build /out/thinq-control /usr/local/bin/thinq-control
 COPY config.jsonc /app/config.json
 
 RUN mkdir -p /app/data && chown -R app:app /app
