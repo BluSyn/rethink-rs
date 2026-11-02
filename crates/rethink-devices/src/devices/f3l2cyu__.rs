@@ -37,6 +37,26 @@ const DOOR_OFFSET: usize = 17;
 const DOOR_CLOSED: u8 = 0x02;
 const PHASE_OFF: u8 = 0x00;
 
+const STATUS_OPTIONS: &[&str] = &[
+    "Off",
+    "Standby",
+    "Paused",
+    "Delayed",
+    "Detecting",
+    "Error",
+    "Filling",
+    "Detergent amount",
+    "Washing",
+    "Pre-wash",
+    "Rinsing",
+    "Rinse hold",
+    "Spinning",
+    "Drying",
+    "End",
+    "Refreshing",
+    "Smart Diagnosis",
+];
+
 fn status_map() -> HashMap<u8, &'static str> {
     HashMap::from([
         (0x00, "Off"),
@@ -119,7 +139,7 @@ impl Device {
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
         let comps = [
             ("power", json!({"platform":"binary_sensor","unique_id":"$deviceid-power","state_topic":"$this/power","name":"Power","icon":"mdi:washing-machine","device_class":"running"})),
-            ("status", json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine"})),
+            ("status", json!({"platform":"sensor","unique_id":"$deviceid-status","state_topic":"$this/status","name":"Status","icon":"mdi:state-machine","device_class":"enum","options":STATUS_OPTIONS})),
             ("course", json!({"platform":"sensor","unique_id":"$deviceid-course","state_topic":"$this/course","name":"Course","icon":"mdi:pin-outline"})),
             ("remaining_time", json!({"platform":"sensor","unique_id":"$deviceid-remaining_time","state_topic":"$this/remaining_time","name":"Remaining time","icon":"mdi:timer-outline","device_class":"duration","unit_of_measurement":"min"})),
             ("reserve_time", json!({"platform":"sensor","unique_id":"$deviceid-reserve_time","state_topic":"$this/reserve_time","name":"Delay Wash time remaining","icon":"mdi:clock-outline","device_class":"duration","unit_of_measurement":"min"})),
@@ -173,7 +193,7 @@ impl Device {
             course_map()
                 .get(&rec[COURSE_OFFSET])
                 .copied()
-                .unwrap_or("unknown")
+                .unwrap_or("None")
                 .into(),
         );
         self.core.publish_property(
@@ -199,7 +219,7 @@ impl Device {
             soil_map()
                 .get(&rec[SOIL_OFFSET])
                 .copied()
-                .unwrap_or("unknown")
+                .unwrap_or("None")
                 .into(),
         );
         self.core.publish_property(
@@ -207,7 +227,7 @@ impl Device {
             spin_map()
                 .get(&rec[SPIN_OFFSET])
                 .copied()
-                .unwrap_or("unknown")
+                .unwrap_or("None")
                 .into(),
         );
         self.core.publish_property(
@@ -215,7 +235,7 @@ impl Device {
             temp_map()
                 .get(&rec[TEMP_OFFSET])
                 .copied()
-                .unwrap_or("unknown")
+                .unwrap_or("None")
                 .into(),
         );
         self.core.publish_property(
@@ -277,9 +297,76 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{Thinq2Device, MockHaConnection, MockThinq2Device, Metadata};
+    use rethink_core::{hex_decode, Metadata, MockHaConnection, MockThinq2Device, Thinq2Device};
 
     const DEVICE_ID: &str = "test-id";
+
+    // Real 0xEB/0xEC frames captured from a WM3900HBA (F3L2CYU2E.ABLEUUS), from upstream's tests.
+    const EB_RECONNECT_IDLE: &str =
+        "aa2020eb001805000000000000000000000000000000000000003318000068bb";
+    const NORMAL_IDLE: &str =
+        "aa3a20ec0018050000000000000000000000000000000000000033170000001805002e002e07000304040100000080000000000033170000f8bb";
+    const COURSE_TOWELS: &str =
+        "aa3a20ec001805002900290a000303020200000000000000000033170007001805010101010b0003050403000000000000000000331700001cbb";
+    const COURSE_SPEEDWASH: &str =
+        "aa3a20ec001805010101010b000305040300000000000000000033170000001805000f000f0c0001050601000000000000000000331700074fbb";
+    const COURSE_RINSE_SPIN: &str =
+        "aa3a20ec001805000f000f0c000105060100000000000000000033170007001805000b000b0d0000040000000000000000000000331700077fbb";
+    const COURSE_SMALL_LOAD: &str =
+        "aa3a20ec001805000b000b0d000004000000000000000000000033170007001805002d002d0e000304040200000000000000000033170f0025bb";
+    const COURSE_TUB_CLEAN: &str =
+        "aa3a20ec001805002d002d0e000304040200000000000000000033170f00001805011d011d01000003000200000004000000000033170000ddbb";
+    const SOIL_NORMAL_HEAVY: &str =
+        "aa3a20ec001805002e002e070003040401000000800000000000331700000018050033003307000404040100000080000000010033170000fdbb";
+    const SPIN_EXTRA_HIGH: &str =
+        "aa3a20ec001805002e002e07000304040100000080000000010033170000001805003a003a07000305040100000080000000010033170000e2bb";
+    const TEMP_HOT: &str =
+        "aa3a20ec001805002e002e07000304040100000080000000010033170000001805002e002e07000304060100000080000000010033170000f5bb";
+    const COLD_WASH_ON: &str =
+        "aa3a20ec001805002e002e0700030404010000008000000001003317000000180501060106070003040201000000801000000100331700000bbb";
+    const EXTRA_RINSE_ON_1: &str =
+        "aa3a20ec001805002e002e0700030404010000008000000001003317000000180500330033070003040411000000c0000000010033170000adbb";
+    const PRE_WASH_ON: &str =
+        "aa3a20ec001805002e002e0700030404010000008000000001003317000000180501010101070003040401000000880000000100331700001bbb";
+    const STEAM_ON: &str =
+        "aa3a20ec001805002e002e07000304040100000080000000010033170000001805020b020b070000040001000000840000000100331700000cbb";
+    const SELECTING_TO_WASHING: &str =
+        "aa3a20ec001805000f000f0c000105060100000000800200020033170007001817000f000f0c00010506010000000080020000053317000702bb";
+    const WASHING: &str =
+        "aa3a20ec001817000f000f0c000105060100000000800200000533170007001817000e000f0c0001050601000000008002000005331700073ebb";
+    const RINSING: &str =
+        "aa3a20ec001817000d000f0c00010506010000000080020012053317000700181e000c000f0c000005060100000000800200231733170007e1bb";
+    const RINSING_LOCKED_CLOSED: &str =
+        "aa3a20ec00181e000c000f0c00000506010000000080020023173317000700181e000b000f0c00000506010000000080020024173317000789bb";
+    const SPINNING: &str =
+        "aa3a20ec00181e000a000f0c0000050601000000008002002506331700070018280009000f0c000005000000000000800200261e3317000780bb";
+    const COMPLETE: &str =
+        "aa3a20ec0018280001000f0c000005000000000000800200391e3317000700183c00010000fe000000000000000000000000402833180000d4bb";
+    const PAUSE_UNLOCKS: &str =
+        "aa3a20ec00181e000b000f0c000005060100000000800200241733170007001806000b000f0c000005060100000000000200251e3317000719bb";
+    const DOOR_OPENS_WHILE_PAUSED: &str =
+        "aa3a20ec001806000b000f0c000005060100000000000200251e33170007001806000b000f0c000005060100000000000000251e33170007efbb";
+    const RESUME_RELOCKS: &str =
+        "aa3a20ec00181e000b000f0c000005060100000000000000251e3317000700181e000b000f0c0000050601000000008000002506331700076dbb";
+    const DOOR_CLOSES_AGAIN: &str =
+        "aa3a20ec00181e000b000f0c00000506010000000080000025063317000700181e000b000f0c000005060100000000800200250633170007efbb";
+    const DELAY_1H_ARMED_STILL_SELECTING: &str =
+        "aa3a20ec001805000f000f0c000105060100000000000000400033180007001805000f000f0c000105060100010002000000400033180007eabb";
+    const TURBO_ON_STILL_SELECTING: &str =
+        "aa3a20ec001805000f000f0c000105060100010002000000400033180007001805000f000f0c00010506010001008200000040003318000717bb";
+    const DELAY_PENDING_LOCKS_DOOR: &str =
+        "aa3a20ec001805000f000f0c00010506010001008200000040003318000700180a000f000f0c00010506010001008280000040053318000719bb";
+    const DELAY_DOOR_CLOSES: &str =
+        "aa3a20ec00180a000f000f0c00010506010001008280000040053318000700180a000f000f0c000105060100010082800200000533180007cdbb";
+    const APP_PAUSE: &str =
+        "aa3a20ec00180a000f000f0c000105060100003a82800200000533180007001806000f000f0c000105060100003a82800200000a3318000798bb";
+    const APP_RESUME_3H: &str =
+        "aa3a20ec001806000f000f0c000105060100003a82800200000a3318000700180a000f000f0c000105060100030082800200000633180007c2bb";
+    const RESERVE_TICKS: &str =
+        "aa3a20ec00180a000f000f0c00010506010003008280020000063318000700180a000f000f0c000105060100023b82800200000633180007cfbb";
+    const APP_POWEROFF: &str =
+        "aa3a20ec00180a000f000f0c000105060100023a8280020000063318000700180000010000fe000000000000000000000200000a331800001abb";
+
     fn meta() -> Metadata { Metadata::new("F3L2CYU__", "F3L2CYU__", "1.0") }
     fn make() -> (std::sync::Arc<MockHaConnection>, std::sync::Arc<MockThinq2Device>, std::sync::Arc<Device>) {
         let ha = MockHaConnection::new();
@@ -340,5 +427,196 @@ mod tests {
         assert_eq!(prop(&ha, "door_lock").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "cold_wash").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "door").as_deref(), Some("OFF"));
+    }
+
+    fn emit(thinq: &MockThinq2Device, frame: &str) {
+        thinq.emit_data(&hex_decode(frame));
+    }
+
+    fn expect(ha: &MockHaConnection, name: &str, value: &str) {
+        assert_eq!(prop(ha, name).as_deref(), Some(value), "{name}");
+    }
+
+    #[test]
+    fn status_is_an_enum_over_every_status_label() {
+        let (ha, _, _) = make();
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(comps["status"]["device_class"], "enum");
+        assert_eq!(comps["status"]["options"], json!(STATUS_OPTIONS));
+        let mut labels: Vec<&str> = status_map().into_values().collect();
+        labels.sort_unstable();
+        labels.dedup();
+        let mut options = STATUS_OPTIONS.to_vec();
+        options.sort_unstable();
+        assert_eq!(labels, options);
+    }
+
+    #[test]
+    fn eb_single_record_frames_decode_with_the_ec_offsets() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, EB_RECONNECT_IDLE);
+        expect(&ha, "power", "ON");
+        expect(&ha, "status", "Standby");
+        expect(&ha, "course", "None");
+        expect(&ha, "door", "ON");
+    }
+
+    #[test]
+    fn idle_selecting_on_normal_settles_to_defaults() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, NORMAL_IDLE);
+        expect(&ha, "power", "ON");
+        expect(&ha, "status", "Standby");
+        expect(&ha, "course", "Normal");
+        expect(&ha, "remaining_time", "46");
+        expect(&ha, "soil", "Normal");
+        expect(&ha, "spin", "High");
+        expect(&ha, "temp", "Warm");
+        expect(&ha, "turbo_wash", "ON");
+        expect(&ha, "door", "ON");
+        expect(&ha, "door_lock", "OFF");
+    }
+
+    #[test]
+    fn course_byte_identifies_each_program() {
+        let (ha, thinq, _) = make();
+        for (frame, course) in [
+            (COURSE_TOWELS, "Towels"),
+            (COURSE_SPEEDWASH, "Speed Wash"),
+            (COURSE_RINSE_SPIN, "Rinse+Spin"),
+            (COURSE_SMALL_LOAD, "Small Load"),
+            (COURSE_TUB_CLEAN, "Tub Clean"),
+        ] {
+            emit(&thinq, frame);
+            expect(&ha, "course", course);
+        }
+    }
+
+    #[test]
+    fn single_variable_settings_toggles_decode() {
+        let (ha, thinq, _) = make();
+
+        emit(&thinq, SOIL_NORMAL_HEAVY);
+        expect(&ha, "soil", "Normal-Heavy");
+
+        emit(&thinq, SPIN_EXTRA_HIGH);
+        expect(&ha, "spin", "Extra High");
+
+        emit(&thinq, TEMP_HOT);
+        expect(&ha, "temp", "Hot");
+
+        emit(&thinq, COLD_WASH_ON);
+        expect(&ha, "cold_wash", "ON");
+        expect(&ha, "temp", "Cold");
+
+        emit(&thinq, EXTRA_RINSE_ON_1);
+        expect(&ha, "extra_rinse", "ON");
+        expect(&ha, "extra_rinse_count", "1");
+
+        emit(&thinq, PRE_WASH_ON);
+        expect(&ha, "pre_wash", "ON");
+
+        emit(&thinq, STEAM_ON);
+        expect(&ha, "steam", "ON");
+    }
+
+    #[test]
+    fn speed_wash_run_phases_and_countdown() {
+        let (ha, thinq, _) = make();
+
+        emit(&thinq, SELECTING_TO_WASHING);
+        expect(&ha, "status", "Washing");
+        expect(&ha, "remaining_time", "15");
+
+        emit(&thinq, WASHING);
+        expect(&ha, "status", "Washing");
+        expect(&ha, "remaining_time", "14");
+
+        emit(&thinq, RINSING);
+        expect(&ha, "status", "Rinsing");
+        expect(&ha, "remaining_time", "12");
+
+        emit(&thinq, SPINNING);
+        expect(&ha, "status", "Spinning");
+        expect(&ha, "remaining_time", "9");
+
+        emit(&thinq, COMPLETE);
+        expect(&ha, "status", "End");
+        // The Complete frame parks the course byte on the 0xfe sentinel.
+        expect(&ha, "course", "None");
+    }
+
+    #[test]
+    fn pause_unlocks_door_and_resume_relocks() {
+        let (ha, thinq, _) = make();
+
+        emit(&thinq, RINSING_LOCKED_CLOSED);
+        expect(&ha, "door_lock", "ON");
+        expect(&ha, "door", "OFF");
+
+        emit(&thinq, PAUSE_UNLOCKS);
+        expect(&ha, "status", "Paused");
+        expect(&ha, "door_lock", "OFF");
+        expect(&ha, "door", "OFF");
+
+        emit(&thinq, DOOR_OPENS_WHILE_PAUSED);
+        expect(&ha, "door", "ON");
+        expect(&ha, "door_lock", "OFF");
+
+        emit(&thinq, RESUME_RELOCKS);
+        expect(&ha, "status", "Rinsing");
+        expect(&ha, "door_lock", "ON");
+
+        emit(&thinq, DOOR_CLOSES_AGAIN);
+        expect(&ha, "door", "OFF");
+        expect(&ha, "door_lock", "ON");
+    }
+
+    #[test]
+    fn delay_wash_countdown_remote_pause_resume_and_power_off() {
+        let (ha, thinq, _) = make();
+
+        emit(&thinq, DELAY_1H_ARMED_STILL_SELECTING);
+        expect(&ha, "status", "Standby");
+        expect(&ha, "delay_wash", "ON");
+        expect(&ha, "reserve_time", "60");
+
+        emit(&thinq, TURBO_ON_STILL_SELECTING);
+        expect(&ha, "turbo_wash", "ON");
+
+        emit(&thinq, DELAY_PENDING_LOCKS_DOOR);
+        expect(&ha, "status", "Delayed");
+        expect(&ha, "door_lock", "ON");
+
+        emit(&thinq, DELAY_DOOR_CLOSES);
+        expect(&ha, "door", "OFF");
+
+        emit(&thinq, APP_PAUSE);
+        expect(&ha, "status", "Paused");
+
+        emit(&thinq, APP_RESUME_3H);
+        expect(&ha, "status", "Delayed");
+        expect(&ha, "reserve_time", "180");
+
+        emit(&thinq, RESERVE_TICKS);
+        expect(&ha, "reserve_time", "179");
+
+        emit(&thinq, APP_POWEROFF);
+        expect(&ha, "power", "OFF");
+        expect(&ha, "status", "Off");
+        expect(&ha, "remaining_time", "0");
+        expect(&ha, "reserve_time", "0");
+        expect(&ha, "course", "None");
+    }
+
+    #[test]
+    fn unknown_and_non_envelope_frames_are_ignored() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, NORMAL_IDLE);
+        let before = prop(&ha, "status");
+        emit(&thinq, "aa0720d81795bb");
+        emit(&thinq, "aa09207200000010bb");
+        emit(&thinq, "001122");
+        assert_eq!(prop(&ha, "status"), before);
     }
 }
