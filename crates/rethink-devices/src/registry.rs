@@ -110,4 +110,100 @@ mod tests {
         let fv7_alias = t2_factory("F_V7_Y___W.B__QEUK").unwrap();
         assert!(std::ptr::fn_addr_eq(fv7, fv7_alias));
     }
+
+    /// Deterministic xorshift, so a failing frame reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    /// Truncated and malformed AABB frames for every common class/type, TLV-shaped frames, and
+    /// random bytes.
+    fn malformed_frames() -> Vec<Vec<u8>> {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut out = vec![vec![], vec![0xaa], vec![0xaa, 0xbb], vec![0xaa, 0x04, 0x00, 0xbb]];
+        let classes = [0x10u8, 0x20, 0x30, 0x32, 0x33, 0x34, 0x40, 0x50, 0x60];
+        let types = [
+            0xebu8, 0xec, 0xe2, 0xd8, 0x0a, 0xcd, 0xbd, 0x72, 0x7f, 0x31, 0xc5, 0x10, 0xde, 0x41,
+            0x88, 0x92, 0x00, 0x60, 0x1f, 0x43,
+        ];
+        for class in classes {
+            for ty in types {
+                for len in 0..120 {
+                    let mut random = vec![class, ty];
+                    random.extend(rng.bytes(len));
+                    out.push(rethink_core::wrap_aabb(&random));
+                    let mut zeros = vec![class, ty];
+                    zeros.resize(len + 2, 0);
+                    out.push(rethink_core::wrap_aabb(&zeros));
+                }
+            }
+        }
+        for len in 0..40 {
+            for kind in [0x87u8, 0xa7] {
+                let mut tlv = vec![0x01, 0x00, 0x04, 0x00, 0x00, 0x00, kind, 0x02, 0x01, 0x00, len as u8];
+                tlv.extend(rng.bytes(len));
+                tlv.extend([0x00, 0x00]);
+                out.push(tlv.clone());
+                tlv.truncate(tlv.len().saturating_sub(3));
+                out.push(tlv);
+            }
+            let mut priv_resp = vec![0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x87, 0xfd, 0x10, 0x00, 0x05, 0xfe];
+            priv_resp.extend(rng.bytes(len));
+            out.push(priv_resp);
+            let mut priv_data = vec![0x01, 0xff, 0x04, 0x00, 0x00, 0x00, 0x87, 0xfd, 0x03, 0x00, len as u8];
+            priv_data.extend(rng.bytes(len));
+            out.push(priv_data);
+        }
+        for _ in 0..2000 {
+            let len = (rng.next() % 200) as usize;
+            out.push(rng.bytes(len));
+        }
+        out
+    }
+
+    /// A panic in a data handler would take down that appliance's connection task.
+    #[test]
+    fn no_handler_panics_on_malformed_frames() {
+        use rethink_core::{MockHaConnection, MockThinq1Device, MockThinq2Device, Metadata};
+        use rethink_core::{Thinq1Device, Thinq2Device};
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let frames = malformed_frames();
+        let first_panic = |emit: &dyn Fn(&[u8])| {
+            frames
+                .iter()
+                .find(|f| catch_unwind(AssertUnwindSafe(|| emit(f))).is_err())
+                .map(|f| rethink_core::hex_encode(f))
+        };
+        let mut failures = Vec::new();
+        for model in all_t2_model_ids() {
+            let meta = Metadata::new(model, model, "1.0");
+            let thinq = MockThinq2Device::new("id", meta.clone());
+            let dev = t2_factory(model).unwrap()(MockHaConnection::new(), thinq.clone(), meta);
+            dev.start();
+            if let Some(frame) = first_panic(&|f| thinq.emit_data(f)) {
+                failures.push(format!("{model}: {frame}"));
+            }
+        }
+        for model in all_t1_model_ids() {
+            let meta = Metadata::new(model, model, "1.0");
+            let thinq = MockThinq1Device::new("id", meta.clone());
+            let dev = t1_factory(model).unwrap()(MockHaConnection::new(), thinq.clone(), meta);
+            dev.start();
+            if let Some(frame) = first_panic(&|f| thinq.emit_data(f)) {
+                failures.push(format!("ThinQ1 {model}: {frame}"));
+            }
+        }
+        assert!(failures.is_empty(), "handlers panicked: {failures:#?}");
+    }
 }
