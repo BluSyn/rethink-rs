@@ -149,18 +149,18 @@ impl Device {
             ("soil", json!({"platform":"sensor","unique_id":"$deviceid-soil","state_topic":"$this/soil","name":"Soil level","icon":"mdi:liquid-spot"})),
             ("spin", json!({"platform":"sensor","unique_id":"$deviceid-spin","state_topic":"$this/spin","name":"Spin","icon":"mdi:autorenew"})),
             ("temp", json!({"platform":"sensor","unique_id":"$deviceid-temp","state_topic":"$this/temp","name":"Temperature","icon":"mdi:thermometer"})),
-            ("rinse_count", json!({"platform":"sensor","unique_id":"$deviceid-rinse_count","state_topic":"$this/rinse_count","name":"Rinse count","icon":"mdi:water","state_class":"measurement"})),
-            ("extra_rinse", json!({"platform":"binary_sensor","unique_id":"$deviceid-extra_rinse","state_topic":"$this/extra_rinse","name":"Extra rinse","icon":"mdi:water-sync"})),
-            ("extra_rinse_count", json!({"platform":"sensor","unique_id":"$deviceid-extra_rinse_count","state_topic":"$this/extra_rinse_count","name":"Extra rinse count","icon":"mdi:water-sync","state_class":"measurement"})),
+            ("rinse_count", json!({"platform":"sensor","unique_id":"$deviceid-rinse_count","state_topic":"$this/rinse_count","name":"Rinses remaining","icon":"mdi:water-sync","state_class":"measurement"})),
+            ("extra_rinse", json!({"platform":"binary_sensor","unique_id":"$deviceid-extra_rinse","state_topic":"$this/extra_rinse","name":"Extra rinse","icon":"mdi:water-plus"})),
+            ("extra_rinse_count", json!({"platform":"sensor","unique_id":"$deviceid-extra_rinse_count","state_topic":"$this/extra_rinse_count","name":"Extra rinse count","icon":"mdi:water-plus","state_class":"measurement"})),
             ("pre_wash", json!({"platform":"binary_sensor","unique_id":"$deviceid-pre_wash","state_topic":"$this/pre_wash","name":"Pre-wash","icon":"mdi:water-sync"})),
             ("steam", json!({"platform":"binary_sensor","unique_id":"$deviceid-steam","state_topic":"$this/steam","name":"Steam","icon":"mdi:kettle-steam"})),
             ("cold_wash", json!({"platform":"binary_sensor","unique_id":"$deviceid-cold_wash","state_topic":"$this/cold_wash","name":"Cold wash","icon":"mdi:snowflake"})),
-            ("rinse_spin", json!({"platform":"binary_sensor","unique_id":"$deviceid-rinse_spin","state_topic":"$this/rinse_spin","name":"Rinse+Spin","icon":"mdi:rotate-right"})),
+            ("rinse_spin", json!({"platform":"binary_sensor","unique_id":"$deviceid-rinse_spin","state_topic":"$this/rinse_spin","name":"Rinse + Spin","icon":"mdi:water-sync"})),
             ("delay_wash", json!({"platform":"binary_sensor","unique_id":"$deviceid-delay_wash","state_topic":"$this/delay_wash","name":"Delay Wash","icon":"mdi:clock-plus-outline"})),
             ("door_lock", json!({"platform":"binary_sensor","unique_id":"$deviceid-door_lock","state_topic":"$this/door_lock","name":"Door lock","icon":"mdi:lock","entity_category":"diagnostic"})),
-            ("child_lock", json!({"platform":"binary_sensor","unique_id":"$deviceid-child_lock","state_topic":"$this/child_lock","name":"Child lock","icon":"mdi:lock","entity_category":"diagnostic"})),
-            ("load_level", json!({"platform":"sensor","unique_id":"$deviceid-load_level","state_topic":"$this/load_level","name":"Load level","icon":"mdi:scale","state_class":"measurement"})),
-            ("tub_clean_count", json!({"platform":"sensor","unique_id":"$deviceid-tub_clean_count","state_topic":"$this/tub_clean_count","name":"Tub clean count","icon":"mdi:counter","entity_category":"diagnostic","state_class":"measurement"})),
+            ("child_lock", json!({"platform":"binary_sensor","unique_id":"$deviceid-child_lock","state_topic":"$this/child_lock","name":"Control lock","icon":"mdi:lock-outline"})),
+            ("load_level", json!({"platform":"sensor","unique_id":"$deviceid-load_level","state_topic":"$this/load_level","name":"Load level","icon":"mdi:weight","state_class":"measurement","entity_category":"diagnostic"})),
+            ("tub_clean_count", json!({"platform":"sensor","unique_id":"$deviceid-tub_clean_count","state_topic":"$this/tub_clean_count","name":"Washes since Tub Clean","icon":"mdi:counter","entity_category":"diagnostic"})),
         ];
         let mut components = Map::new();
         for (k, v) in comps {
@@ -195,7 +195,7 @@ impl Device {
             .publish_property("status", status_name(phase).into());
         self.core.publish_property(
             "course",
-            named(COURSE, rec[COURSE_OFFSET]).unwrap_or("unknown").into(),
+            named(COURSE, rec[COURSE_OFFSET]).unwrap_or("None").into(),
         );
         self.core.publish_property(
             "remaining_time",
@@ -226,15 +226,15 @@ impl Device {
         );
         self.core.publish_property(
             "soil",
-            named(SOIL, rec[SOIL_OFFSET]).unwrap_or("unknown").into(),
+            named(SOIL, rec[SOIL_OFFSET]).unwrap_or("None").into(),
         );
         self.core.publish_property(
             "spin",
-            named(SPIN, rec[SPIN_OFFSET]).unwrap_or("unknown").into(),
+            named(SPIN, rec[SPIN_OFFSET]).unwrap_or("None").into(),
         );
         self.core.publish_property(
             "temp",
-            named(TEMP, rec[TEMP_OFFSET]).unwrap_or("unknown").into(),
+            named(TEMP, rec[TEMP_OFFSET]).unwrap_or("None").into(),
         );
         self.core
             .publish_property("rinse_count", ((rec[RINSE_OFFSET] & 0x0f) as i64).into());
@@ -304,7 +304,7 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{hex_decode, MockHaConnection, MockThinq2Device, Metadata, Thinq2Device};
+    use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Metadata, Thinq2Device};
 
     const DEVICE_ID: &str = "test-id";
     fn meta() -> Metadata {
@@ -324,21 +324,73 @@ mod tests {
         ha.device(DEVICE_ID)?.properties.get(n).map(|p| p.as_string())
     }
 
-    // Fixtures from upstream PR #135
-    const EB_OFF: &str = "aa2020eb00180000010000fe0000000000000000000000000005332b00001abb";
-    const DIAL_NORMAL: &str =
-        "aa3a20ec00180502150215050005050402000000000000000000332e000000180501030103060003040402000000000000000000332e00001fbb";
+    /// A fresh device fed `frames` in order, like upstream's `feed()`.
+    fn feed(frames: &[&str]) -> std::sync::Arc<MockHaConnection> {
+        let (ha, thinq, _) = make();
+        for frame in frames {
+            thinq.emit_data(&hex_decode(frame));
+        }
+        ha
+    }
+
+    fn expect(ha: &MockHaConnection, name: &str, value: &str) {
+        assert_eq!(prop(ha, name).as_deref(), Some(value), "{name}");
+    }
+
+    // Real frames from upstream's tests, each cross-checked there against the LG cloud.
     const DIAL_SPEED_WASH: &str =
         "aa3a20ec001805010101010a0003050403000000000000000000332e0000001805000f000f0b0001050601000000000000000000332e000713bb";
-    const CHILD_LOCK_ON: &str =
-        "aa3a20ec00180501030103060003040402000000000000000000332e000000180501030103060003040402000000010000000000332e000076bb";
+    const DIAL_DOWNLOADED: &str =
+        "aa3a20ec001805000f000f0b0001050601000000000000000000332e0007001805002d002d0c0003050402000000000000000000332e0f00f9bb";
+    const DIAL_TUB_CLEAN: &str =
+        "aa3a20ec001805002d002d0c0003050402000000000000000000332e0f00001805011d011d010000030002000000040000000000332e0000e0bb";
+    const DIAL_NORMAL: &str =
+        "aa3a20ec00180502150215050005050402000000000000000000332e000000180501030103060003040402000000000000000000332e00001fbb";
     const COLD_WASH_ON: &str =
         "aa3a20ec00180501210121060003030702000000000000000000332e000000180501170117060003030202000000001000000000332e0000c0bb";
+    const EXTRA_RINSE_2: &str =
+        "aa3a20ec001805010e010e060003030412000000400000000000332e000000180501190119060003030422000000400000000000332e000047bb";
+    const CHILD_LOCK_ON: &str =
+        "aa3a20ec00180501030103060003040402000000000000000000332e000000180501030103060003040402000000010000000000332e000076bb";
+    const STEAM_ON: &str =
+        "aa3a20ec00180501030103060003040402000000000000000000332e0000001805021c021c060000040002000000040000000000332e000006bb";
+    const PRE_WASH_ON: &str =
+        "aa3a20ec00180501030103060003040402000000000000000000332e000000180501120112060003040402000000080000000000332e00001dbb";
+    const DELAY_2H: &str =
+        "aa3a20ec00180501030103060003040402000000000000000000332e000000180501030103060003040402000200020000000000332e000073bb";
+    const RINSE_SPIN_ON: &str =
+        "aa3a20ec00180501000100040003030402000000000000000100332e0007001805000c000c040000030001000000200000000100332e00071bbb";
+    const RINSING: &str =
+        "aa3a20ec001805000c000c040000030001000000200000000100332e000700181e000c000c040000030001000000208000000105332e00074fbb";
+    const ADD_GARMENTS: &str =
+        "aa3a20ec00181e000c000c040000030001000000208002000005332e0007001815000c000c04000003000100000020001200001e332e00070fbb";
+    const PAUSED: &str =
+        "aa3a20ec001815000c000c04000003000100000020001200001e332e0007001806000c000c040000030001000000200010000015332e0007b5bb";
+    const RUN_COMPLETE: &str =
+        "aa3a20ec0018280001000c040000030000000000208002000e1e332e000700183c00010000fe0000000000000000000000000e28332e000031bb";
+    const EB_OFF: &str = "aa2020eb00180000010000fe0000000000000000000000000005332b00001abb";
+    const SELECTING: &str =
+        "aa3a20ec00180000010000fe0000000000000000000000000005332b000000180501030103060003040402000000008000000000332b0000d5bb";
+    const SENSING: &str =
+        "aa3a20ec00180501030103060003040402000000008000000000332b000000181401030103060003040402000000008000000005332b000065bb";
+    const DOOR_CLOSES: &str =
+        "aa3a20ec00181401030103060003040402000000008000000005332b000000181401030103060003040402000000008002000005332b000013bb";
     const WASHING_START: &str =
-        "aa3a20ec00181401030103060003040402000000008000000005332b000000181701140114060003040402000000008002000014332b0004d5bb";
+        "aa3a20ec00181401030103060003040402000000008002000005332b000000181701140114060003040402000000008002000014332b0004d5bb";
+    const WASHING_MINUTE_LATER: &str =
+        "aa3a20ec00181701140114060003040402000000008002000014332b000400181701130114060003040402000000008002000114332b0004edbb";
+    const WASHING_TO_RINSING: &str =
+        "aa3a20ec001817003a0114060003040402000000008002002414332b000400181e00390114060000040402000000008002002617332b000407bb";
+    const SPINNING: &str =
+        "aa3a20ec00181e00150114060000040401000000008002003f17332b00040018280014011406000004000000000000800200411e332b00041abb";
     const CYCLE_COMPLETE: &str =
         "aa3a20ec0018280001011406000004000000000000800200671e332b000400183c00010000fe0000000000000000000000006c28332c0000aabb";
-    const E2_STALE_REPLAY: &str = "aa2020e203181401030103060003040402000000008000006c05332b000030bb";
+    const OFF: &str =
+        "aa3a20ec00183c00010000fe0000000000000000000000006c28332c000000180000010000fe0000000000000000000000006c3c332c000001bb";
+    const SECOND_RUN_WASHING: &str =
+        "aa3a20ec00181401030103060003040402000000008002000005332d0000001817003a003a060003040402000000008002000014332d000398bb";
+    const E2_STALE_REPLAY: &str =
+        "aa2020e203181401030103060003040402000000008000006c05332b000030bb";
 
     #[test]
     fn config_components() {
@@ -356,14 +408,9 @@ mod tests {
         assert!(comps.contains_key("rinse_spin"));
         assert!(comps.contains_key("tub_clean_count"));
         assert!(!comps.contains_key("turbo_wash")); // model has no TurboWash
-    }
-
-    #[test]
-    fn eb_off() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(EB_OFF));
-        assert_eq!(prop(&ha, "power").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Off"));
+        // The tub clean counter resets at each Tub Clean, so it must not be total_increasing.
+        assert!(comps["tub_clean_count"].get("state_class").is_none());
+        assert!(comps["child_lock"].get("entity_category").is_none());
     }
 
     #[test]
@@ -377,51 +424,198 @@ mod tests {
     }
 
     #[test]
-    fn course_table_not_f3l2() {
-        // 0x06 is Normal here; F3L2 would call it Heavy Duty
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(DIAL_NORMAL));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
-
-        thinq.emit_data(&hex_decode(DIAL_SPEED_WASH));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Speed Wash"));
+    fn eb_single_record_frames_decode_with_the_ec_offsets() {
+        let p = feed(&[EB_OFF]);
+        expect(&p, "power", "OFF");
+        expect(&p, "status", "Off");
+        expect(&p, "course", "None");
+        expect(&p, "remaining_time", "0");
+        expect(&p, "tub_clean_count", "43");
     }
 
     #[test]
-    fn child_lock_and_cold_wash() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(CHILD_LOCK_ON));
-        assert_eq!(prop(&ha, "child_lock").as_deref(), Some("ON"));
-
-        thinq.emit_data(&hex_decode(COLD_WASH_ON));
-        assert_eq!(prop(&ha, "cold_wash").as_deref(), Some("ON"));
+    fn course_table_is_this_models_own() {
+        expect(&feed(&[DIAL_NORMAL]), "course", "Normal");
+        expect(&feed(&[DIAL_SPEED_WASH]), "course", "Speed Wash");
+        expect(&feed(&[DIAL_DOWNLOADED]), "course", "Downloaded");
+        expect(&feed(&[DIAL_TUB_CLEAN]), "course", "Tub Clean");
     }
 
     #[test]
-    fn washing_and_complete_timers() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(WASHING_START));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
-        assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        // remaining = 1*60+20 = 80
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("80"));
-
-        thinq.emit_data(&hex_decode(CYCLE_COMPLETE));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
-        // idle phases zero timers
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("0"));
+    fn selecting_remaining_and_initial_time_agree() {
+        let p = feed(&[SELECTING]);
+        expect(&p, "power", "ON");
+        expect(&p, "status", "Standby");
+        expect(&p, "course", "Normal");
+        expect(&p, "soil", "Normal");
+        expect(&p, "spin", "High");
+        expect(&p, "temp", "Warm");
+        expect(&p, "remaining_time", "63");
+        expect(&p, "initial_time", "63");
     }
 
     #[test]
-    fn ignores_e2_stale_replay() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(CYCLE_COMPLETE));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
-        thinq.emit_data(&hex_decode(E2_STALE_REPLAY));
-        // must not knock back to Detecting
-        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
+    fn sensing_is_a_distinct_phase() {
+        let p = feed(&[SELECTING, SENSING]);
+        expect(&p, "status", "Detecting");
+        expect(&p, "remaining_time", "63");
+    }
+
+    #[test]
+    fn rinse_byte_packs_rinse_and_extra_rinse_counts() {
+        let plain = feed(&[DIAL_NORMAL]);
+        expect(&plain, "rinse_count", "2");
+        expect(&plain, "extra_rinse_count", "0");
+        expect(&plain, "extra_rinse", "OFF");
+
+        let extra = feed(&[EXTRA_RINSE_2]);
+        expect(&extra, "extra_rinse", "ON");
+        expect(&extra, "extra_rinse_count", "2");
+        expect(&extra, "rinse_count", "2");
+    }
+
+    #[test]
+    fn option_bits_each_isolate_cleanly() {
+        let lock = feed(&[CHILD_LOCK_ON]);
+        expect(&lock, "child_lock", "ON");
+        expect(&lock, "steam", "OFF");
+        expect(&lock, "pre_wash", "OFF");
+        expect(&lock, "delay_wash", "OFF");
+
+        expect(&feed(&[STEAM_ON]), "steam", "ON");
+        expect(&feed(&[PRE_WASH_ON]), "pre_wash", "ON");
+
+        let rs = feed(&[RINSE_SPIN_ON]);
+        expect(&rs, "rinse_spin", "ON");
+        expect(&rs, "child_lock", "OFF");
+        expect(&rs, "extra_rinse", "OFF");
+    }
+
+    #[test]
+    fn cold_wash_forces_the_temperature_index() {
+        let p = feed(&[COLD_WASH_ON]);
+        expect(&p, "cold_wash", "ON");
+        expect(&p, "temp", "Cold");
+        expect(&p, "child_lock", "OFF");
+    }
+
+    #[test]
+    fn delay_wash_exposes_its_reserve_clock() {
+        let p = feed(&[DELAY_2H]);
+        expect(&p, "delay_wash", "ON");
+        expect(&p, "reserve_time", "120");
+    }
+
+    #[test]
+    fn door_position_is_never_published() {
+        let open = feed(&[SENSING]);
+        assert_eq!(prop(&open, "door"), None);
+        expect(&open, "door_lock", "ON");
+
+        let shut = feed(&[SENSING, DOOR_CLOSES]);
+        assert_eq!(prop(&shut, "door"), None);
+        expect(&shut, "door_lock", "ON");
+    }
+
+    #[test]
+    fn initial_time_pins_while_remaining_counts_down() {
+        let start = feed(&[SENSING, WASHING_START]);
+        expect(&start, "status", "Washing");
+        expect(&start, "remaining_time", "80");
+        expect(&start, "initial_time", "80");
+
+        let later = feed(&[SENSING, WASHING_START, WASHING_MINUTE_LATER]);
+        expect(&later, "remaining_time", "79");
+        expect(&later, "initial_time", "80");
+
+        let second = feed(&[SECOND_RUN_WASHING]);
+        expect(&second, "remaining_time", "58");
+        expect(&second, "initial_time", "58");
+    }
+
+    #[test]
+    fn add_garments_unlocks_the_door_and_pause_follows() {
+        let running = feed(&[RINSE_SPIN_ON, RINSING]);
+        expect(&running, "status", "Rinsing");
+        expect(&running, "door_lock", "ON");
+        expect(&running, "load_level", "7");
+
+        let adding = feed(&[RINSE_SPIN_ON, RINSING, ADD_GARMENTS]);
+        expect(&adding, "status", "Filling");
+        expect(&adding, "door_lock", "OFF");
+
+        let paused = feed(&[RINSE_SPIN_ON, RINSING, ADD_GARMENTS, PAUSED]);
+        expect(&paused, "status", "Paused");
+        expect(&paused, "door_lock", "OFF");
+    }
+
+    #[test]
+    fn settings_drop_out_as_they_stop_applying() {
+        let rinsing = feed(&[WASHING_START, WASHING_TO_RINSING]);
+        expect(&rinsing, "status", "Rinsing");
+        expect(&rinsing, "soil", "None");
+        expect(&rinsing, "temp", "Warm");
+        expect(&rinsing, "initial_time", "80");
+
+        let spinning = feed(&[WASHING_START, WASHING_TO_RINSING, SPINNING]);
+        expect(&spinning, "status", "Spinning");
+        expect(&spinning, "temp", "None");
+        expect(&spinning, "door_lock", "ON");
+    }
+
+    #[test]
+    fn completing_a_cycle_unlocks_and_counts_the_wash() {
+        let before = feed(&[WASHING_START, SPINNING]);
+        expect(&before, "tub_clean_count", "43");
+
+        let done = feed(&[WASHING_START, SPINNING, CYCLE_COMPLETE]);
+        expect(&done, "status", "End");
+        expect(&done, "power", "ON");
+        expect(&done, "tub_clean_count", "44");
+        expect(&done, "door_lock", "OFF");
+        expect(&done, "remaining_time", "0");
+        expect(&done, "initial_time", "0");
+    }
+
+    #[test]
+    fn rinse_spin_run_lands_on_complete() {
+        let p = feed(&[RINSING, RUN_COMPLETE]);
+        expect(&p, "status", "End");
+        expect(&p, "course", "None");
+        expect(&p, "tub_clean_count", "46");
+    }
+
+    #[test]
+    fn powering_off_clears_the_selection() {
+        let p = feed(&[WASHING_START, SPINNING, CYCLE_COMPLETE, OFF]);
+        expect(&p, "status", "Off");
+        expect(&p, "power", "OFF");
+        expect(&p, "course", "None");
+        expect(&p, "remaining_time", "0");
+    }
+
+    #[test]
+    fn e2_post_cycle_replay_is_ignored() {
+        let p = feed(&[WASHING_START, SPINNING, CYCLE_COMPLETE, E2_STALE_REPLAY]);
+        expect(&p, "status", "End");
+        expect(&p, "tub_clean_count", "44");
+        expect(&p, "remaining_time", "0");
+    }
+
+    #[test]
+    fn start_requests_a_status_snapshot() {
+        let (_, thinq, dev) = make();
+        DeviceHandler::start(dev.as_ref());
+        let sent: Vec<String> = thinq.outbox().iter().map(|b| hex_encode(b)).collect();
+        assert_eq!(sent, ["AA0EF0ED1121010000001800B5BB"]);
+    }
+
+    #[test]
+    fn non_status_frames_publish_nothing() {
+        for junk in ["aa0720d800fcbb", "aa09207200c9005bbb", "aa0a20ec001805010cbb"] {
+            let p = feed(&[junk]);
+            assert!(p.device(DEVICE_ID).unwrap().properties.is_empty(), "{junk}");
+        }
     }
 
     #[test]
