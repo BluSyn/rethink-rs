@@ -2,30 +2,46 @@
 //!
 //! Session membership is **live-only** (mirrors TypeScript `bridgedDevices`):
 //! - `sessions` contains only active bridge sessions with wired handlers
+//! - a session is registered and wired before its LG connection is made; the connection runs
+//!   (and reconnects) in the background until the session's [`StopSignal`] fires
 //! - local `on_close` stops upstream and **removes** the session (want_enabled + storage remain)
+//! - a new connection of the same appliance replaces and stops the older session; the older
+//!   connection's close leaves the new one alone
 //! - `status_for(id)` == live session present
-//! - reconnect re-attaches via `start_session` when saved state / want_enabled exists
+//! - reconnect re-attaches via `start_session` when saved state exists
 
 mod account;
 pub mod oauth2;
 pub mod pair;
 pub mod resolver;
 pub mod state;
+pub mod stop;
 pub mod thinq1_conn;
 pub mod thinq2_conn;
 pub mod thinq_api;
 pub mod util;
 
+#[cfg(test)]
+mod test_support;
+
 pub use state::{BridgeState, Credentials, Environment, JsonStorage};
+pub use stop::StopSignal;
 pub use util::{subprocess, SubprocessError, SubprocessOptions};
 
 use rethink_util::sync::Mutex;
 use pair::{Thinq1DeviceState, Thinq2DeviceState};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use thinq1_conn::{connect_thinq1, Thinq1Handle};
 use thinq2_conn::{connect_thinq2, LgToDevice, Thinq2Handle};
+use tokio::sync::mpsc;
+
+/// Pause before a dropped LG link is reconnected (upstream `RECONNECT_PERIOD`).
+#[cfg(not(test))]
+pub const RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+pub const RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Minimal local device view for bridge enable/disable (avoids cyclic deps on cloud).
 pub trait LocalDevice: Send + Sync {
@@ -68,11 +84,32 @@ struct BridgedSession {
     /// Upstream pairing payload retained for the life of the live session.
     #[allow(dead_code)]
     lg_state: serde_json::Value,
-    /// Set true when detaching; forward tasks exit.
-    stopped: Arc<AtomicBool>,
+    /// Tells this session apart from earlier and later ones of the same device.
+    generation: u64,
+    /// Fired when detaching: every task of the session exits and the LG socket closes.
+    stop: StopSignal,
     /// Upstream MQTT (or equivalent) is up.
     link_up: Arc<AtomicBool>,
-    upstream: Mutex<Option<UpstreamHandle>>,
+    upstream: UpstreamHandle,
+}
+
+impl BridgedSession {
+    fn send_from_local(&self, buf: &[u8]) {
+        if self.stop.is_stopped() {
+            return;
+        }
+        match &self.upstream {
+            UpstreamHandle::T2(h) => {
+                let h = h.clone();
+                let data = buf.to_vec();
+                tokio::spawn(async move {
+                    let _ = h.send_from_local(&data).await;
+                });
+            }
+            UpstreamHandle::T1(h) => h.send_from_local(buf),
+            UpstreamHandle::Mock => {}
+        }
+    }
 }
 
 pub struct Bridge {
@@ -84,6 +121,10 @@ pub struct Bridge {
     /// What the owner calls each appliance, from the ThinQ account (see `account.rs`).
     device_names: Mutex<HashMap<String, String>>,
     names_changed: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
+    next_generation: AtomicU64,
+    /// Held while a session is registered and while disable/logout change what is wanted, so a
+    /// session never outlives a disable or logout that raced with its start.
+    registry: Mutex<()>,
 }
 
 impl Bridge {
@@ -96,6 +137,8 @@ impl Bridge {
             logged_in: Mutex::new(logged_in),
             device_names: Mutex::new(HashMap::new()),
             names_changed: Mutex::new(Vec::new()),
+            next_generation: AtomicU64::new(0),
+            registry: Mutex::new(()),
         })
     }
 
@@ -127,15 +170,23 @@ impl Bridge {
 
     /// Stop upstream and remove from live map; keep want_enabled + device state.
     pub fn detach_session(&self, id: &str) {
-        if let Some(sess) = self.sessions.lock().remove(id) {
-            sess.stopped.store(true, Ordering::SeqCst);
-            if let Some(up) = sess.upstream.lock().take() {
-                match up {
-                    UpstreamHandle::T2(h) => h.stop(),
-                    UpstreamHandle::T1(h) => h.stop(),
-                    UpstreamHandle::Mock => {}
-                }
+        let removed = self.sessions.lock().remove(id);
+        if let Some(sess) = removed {
+            sess.stop.stop();
+        }
+    }
+
+    /// [`Bridge::detach_session`], but only while `generation` is still the live session.
+    fn detach_generation(&self, id: &str, generation: u64) {
+        let removed = {
+            let mut sessions = self.sessions.lock();
+            match sessions.get(id) {
+                Some(sess) if sess.generation == generation => sessions.remove(id),
+                _ => None,
             }
+        };
+        if let Some(sess) = removed {
+            sess.stop.stop();
         }
     }
 
@@ -176,6 +227,7 @@ impl Bridge {
     }
 
     pub async fn logout(&self) -> anyhow::Result<()> {
+        let _registry = self.registry.lock();
         self.storage.set_credentials(None);
         *self.logged_in.lock() = false;
         self.clear_names();
@@ -218,8 +270,7 @@ impl Bridge {
         // Saved state: re-attach to current LocalDevice Arc (reconnect path).
         if let Some(saved) = self.storage.get_device_state_json(&id) {
             report("Restoring saved bridge session");
-            self.start_session(device, saved).await?;
-            self.want_enabled.lock().insert(id);
+            self.start_session(device, saved)?;
             return Ok(true);
         }
 
@@ -292,27 +343,26 @@ impl Bridge {
         report("Device registered successfully");
         self.storage
             .set_device_state_json(&id, Some(lg_state.clone()));
-        self.start_session(device, lg_state).await?;
-        self.want_enabled.lock().insert(id);
+        self.start_session(device, lg_state)?;
         // Registering may have just given the appliance its name.
         let this = self.clone();
         tokio::spawn(async move { this.refresh_names_with(&client, &creds.refresh_token).await });
         Ok(true)
     }
 
-    /// Open upstream (or mock) and wire bidirectional forward; register live session.
-    pub async fn start_session(
+    /// Register a live session for `device` and wire both directions, replacing (and stopping)
+    /// an earlier session of the same device. Nothing here waits for LG: the connection runs in
+    /// the background until the session stops, so a disable, logout or close always finds the
+    /// session it has to stop. A device that is no longer wanted (disabled, logged out) gets
+    /// no session.
+    pub fn start_session(
         self: &Arc<Self>,
         device: Arc<dyn LocalDevice>,
         lg_state: serde_json::Value,
     ) -> anyhow::Result<()> {
         let id = device.id().to_string();
-        // Replace any stale entry (should not happen if detach is correct).
-        self.detach_session(&id);
-
         let model_name = device.model_name().to_string();
         let device_type = device.device_type().map(|s| s.to_string());
-        let stopped = Arc::new(AtomicBool::new(false));
 
         let test_mode = lg_state
             .get("testMode")
@@ -324,12 +374,14 @@ impl Bridge {
             || lg_state.get("mqtt_server").is_some()
             || lg_state.get("platform").and_then(|v| v.as_str()) == Some("thinq2");
 
+        let registry = self.registry.lock();
+        if !self.is_logged_in() || self.storage.get_device_state_json(&id).is_none() {
+            return Ok(());
+        }
+
+        let stop = StopSignal::new();
         let upstream = if test_mode {
             // Unit-test path: no network; still wire local handlers for lifecycle.
-            let stop = stopped.clone();
-            device.on_data(Box::new(move |_buf| {
-                let _ = stop.load(Ordering::SeqCst);
-            }));
             UpstreamHandle::Mock
         } else if is_t2 {
             let state: Thinq2DeviceState =
@@ -337,78 +389,52 @@ impl Bridge {
             if state.mqtt_server.is_empty() {
                 anyhow::bail!("ThinQ2 state missing mqttServer — re-enable to re-pair");
             }
-            let (handle, mut from_lg) =
-                connect_thinq2(&state, &id, &model_name, device.deploy_payload()).await?;
-
+            let (handle, from_lg) = connect_thinq2(
+                &state,
+                &id,
+                &model_name,
+                device.deploy_payload(),
+                stop.clone(),
+            )?;
             let dev = device.clone();
-            let stop_f = stopped.clone();
-            tokio::spawn(async move {
-                while let Some(msg) = from_lg.recv().await {
-                    if stop_f.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    deliver_lg_to_device(dev.as_ref(), msg);
-                }
+            spawn_forward(stop.clone(), from_lg, move |msg| {
+                deliver_lg_to_device(dev.as_ref(), msg)
             });
-
-            let h = handle.clone();
-            let stop_l = stopped.clone();
-            device.on_data(Box::new(move |buf| {
-                if stop_l.load(Ordering::SeqCst) {
-                    return;
-                }
-                let h = h.clone();
-                let data = buf.to_vec();
-                tokio::spawn(async move {
-                    let _ = h.send_from_local(&data).await;
-                });
-            }));
-
             UpstreamHandle::T2(handle)
         } else {
             let t1 = parse_t1_state(&lg_state)?;
-            let (handle, mut from_lg) =
-                connect_thinq1(&t1, &id, &model_name, device_type.as_deref()).await?;
-
+            let (handle, from_lg) =
+                connect_thinq1(&t1, &id, &model_name, device_type.as_deref(), stop.clone())?;
             let dev = device.clone();
-            let stop_f = stopped.clone();
-            tokio::spawn(async move {
-                while let Some(body) = from_lg.recv().await {
-                    if stop_f.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    dev.send_json_to_local(body);
-                }
+            spawn_forward(stop.clone(), from_lg, move |body| {
+                dev.send_json_to_local(body)
             });
-
-            let h = handle.clone();
-            let stop_l = stopped.clone();
-            device.on_data(Box::new(move |buf| {
-                if stop_l.load(Ordering::SeqCst) {
-                    return;
-                }
-                h.send_from_local(buf);
-            }));
-
             UpstreamHandle::T1(handle)
         };
 
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let session = Arc::new(BridgedSession {
             device_id: id.clone(),
             lg_state,
-            stopped: stopped.clone(),
+            generation,
+            stop,
             link_up: Arc::new(AtomicBool::new(test_mode)),
-            upstream: Mutex::new(Some(upstream)),
+            upstream,
         });
+        let replaced = self.sessions.lock().insert(id.clone(), session.clone());
+        if let Some(old) = replaced {
+            old.stop.stop();
+        }
+        self.want_enabled.lock().insert(id.clone());
+        drop(registry);
 
-        // Local close → detach (remove from map + stop upstream). want_enabled stays.
+        device.on_data(Box::new(move |buf| session.send_from_local(buf)));
+
+        // Local close → detach this session (a newer one stays). want_enabled stays.
         let bridge = self.clone();
-        let id_close = id.clone();
         device.on_close(Box::new(move || {
-            bridge.detach_session(&id_close);
+            bridge.detach_generation(&id, generation);
         }));
-
-        self.sessions.lock().insert(id, session);
         Ok(())
     }
 
@@ -429,40 +455,45 @@ impl Bridge {
     }
 
     pub async fn disable(&self, device_id: &str) -> anyhow::Result<()> {
+        let _registry = self.registry.lock();
         self.storage.set_device_state_json(device_id, None);
         self.detach_session(device_id);
         self.want_enabled.lock().remove(device_id);
         Ok(())
     }
 
-    /// When a local device appears, auto-restore bridge if previously enabled and not live.
+    /// When a local device appears, auto-restore bridge if previously enabled. A session still
+    /// registered for the id belongs to an earlier connection of the appliance and is replaced.
     pub fn on_local_device(self: &Arc<Self>, device: Arc<dyn LocalDevice>) {
         let id = device.id().to_string();
-        if !self.want_enabled.lock().contains(&id)
-            && self.storage.get_device_state_json(&id).is_none()
-        {
-            return;
-        }
-        // Live session already — do not double-attach.
-        if self.sessions.lock().contains_key(&id) {
-            return;
-        }
         let Some(state) = self.storage.get_device_state_json(&id) else {
             return;
         };
-        let this = self.clone();
-        let id_for_log = id.clone();
-        tokio::spawn(async move {
-            match this.start_session(device, state).await {
-                Ok(()) => {
-                    this.want_enabled.lock().insert(id);
-                }
-                Err(e) => {
-                    eprintln!("[bridge] auto-restore failed for {id_for_log}: {e}");
-                }
-            }
-        });
+        if let Err(e) = self.start_session(device, state) {
+            eprintln!("[bridge] auto-restore failed for {id}: {e}");
+        }
     }
+}
+
+/// Deliver LG → device messages until the session stops.
+fn spawn_forward<T: Send + 'static>(
+    stop: StopSignal,
+    mut from_lg: mpsc::UnboundedReceiver<T>,
+    deliver: impl Fn(T) + Send + 'static,
+) {
+    tokio::spawn(async move {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                _ = stop.stopped() => break,
+                msg = from_lg.recv() => msg,
+            };
+            match msg {
+                Some(msg) => deliver(msg),
+                None => break,
+            }
+        }
+    });
 }
 
 fn normalize_t2_state(v: serde_json::Value) -> serde_json::Value {
@@ -530,15 +561,20 @@ fn parse_t1_state(v: &serde_json::Value) -> anyhow::Result<Thinq1DeviceState> {
 mod lifecycle_tests {
     use super::*;
     use crate::pair::{format_device_packet, parse_lg_packet_payload};
+    use crate::test_support::{
+        eventually, expect_closed, read_t1_frame, write_t1_frame, HttpStub, TestPki, TlsStub, WAIT,
+    };
     use crate::thinq1_conn::format_status_body;
     use crate::thinq2_conn::LgToDevice;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Real mock: stores handlers; simulate_close fires them.
     struct MockLocal {
         id: String,
         platform: String,
         to_local: Mutex<Vec<Vec<u8>>>,
+        json_to_local: Mutex<Vec<serde_json::Value>>,
         acks: Mutex<Vec<Vec<u8>>>,
         managed: AtomicBool,
         data_handlers: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
@@ -552,6 +588,7 @@ mod lifecycle_tests {
                 id: id.into(),
                 platform: platform.into(),
                 to_local: Mutex::new(Vec::new()),
+                json_to_local: Mutex::new(Vec::new()),
                 acks: Mutex::new(Vec::new()),
                 managed: AtomicBool::new(false),
                 data_handlers: Mutex::new(Vec::new()),
@@ -606,7 +643,9 @@ mod lifecycle_tests {
         fn is_managed(&self) -> bool {
             self.managed.load(Ordering::SeqCst)
         }
-        fn send_json_to_local(&self, _body: serde_json::Value) {}
+        fn send_json_to_local(&self, body: serde_json::Value) {
+            self.json_to_local.lock().push(body);
+        }
         fn data_handler_count(&self) -> usize {
             self.data_handler_regs.load(Ordering::SeqCst)
         }
@@ -689,16 +728,9 @@ mod lifecycle_tests {
         );
 
         // enable short-circuit must NOT return Ok(true) with no live session
-        // New device Arc (reconnect)
+        // New device Arc (reconnect); the session is registered before on_local_device returns.
         let local2 = MockLocal::new(id, "thinq2");
         bridge.on_local_device(local2.clone() as Arc<dyn LocalDevice>);
-        // on_local_device spawns async — poll until live or timeout
-        for _ in 0..50 {
-            if bridge.status_for(id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
         assert!(
             bridge.status_for(id),
             "on_local_device must re-attach live session after close"
@@ -801,6 +833,256 @@ mod lifecycle_tests {
             .unwrap();
         assert!(bridge.status_for(id));
         assert!(b.data_handler_count() >= 1);
+    }
+
+    #[tokio::test]
+    async fn a_reconnected_device_replaces_the_old_session_and_its_late_close_is_ignored() {
+        let bridge = test_bridge();
+        let id = "dev-replace";
+        bridge
+            .storage
+            .set_device_state_json(id, Some(mock_saved_state()));
+
+        let old = MockLocal::new(id, "thinq2");
+        bridge.on_local_device(old.clone() as Arc<dyn LocalDevice>);
+        let first = bridge
+            .sessions
+            .lock()
+            .get(id)
+            .cloned()
+            .expect("bridged on connect");
+
+        // The appliance reconnects before the close of its old connection has come through.
+        let new = MockLocal::new(id, "thinq2");
+        bridge.on_local_device(new.clone() as Arc<dyn LocalDevice>);
+        let second = bridge
+            .sessions
+            .lock()
+            .get(id)
+            .cloned()
+            .expect("bridged on reconnect");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(first.stop.is_stopped(), "the replaced session is stopped");
+        assert!(!second.stop.is_stopped());
+
+        old.simulate_close();
+        assert!(
+            bridge
+                .sessions
+                .lock()
+                .get(id)
+                .is_some_and(|s| Arc::ptr_eq(s, &second)),
+            "the old connection's close leaves the new session alone"
+        );
+        new.simulate_close();
+        assert!(!bridge.status_for(id));
+        assert!(second.stop.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn a_logged_out_bridge_does_not_restore_sessions() {
+        let bridge = test_bridge();
+        let id = "dev-logged-out";
+        bridge
+            .storage
+            .set_device_state_json(id, Some(mock_saved_state()));
+        bridge.logout().await.unwrap();
+        bridge.on_local_device(MockLocal::new(id, "thinq2") as Arc<dyn LocalDevice>);
+        assert!(!bridge.status_for(id));
+        assert!(!bridge.want_enabled.lock().contains(id));
+    }
+
+    fn t1_saved_state(rti_port: u16, http_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "platform": "thinq1",
+            "rtiServer": format!("127.0.0.1:{rti_port}"),
+            "httpServer": http_url,
+        })
+    }
+
+    #[tokio::test]
+    async fn stopping_a_thinq1_session_closes_the_lg_link() {
+        let pki = TestPki::new();
+        let mut rti = TlsStub::start(pki.server_config(&pki.leaf(&["rti.test"]), false)).await;
+        let http = HttpStub::start(false).await;
+        let bridge = test_bridge();
+        let id = "t1-stop";
+        bridge
+            .storage
+            .set_device_state_json(id, Some(t1_saved_state(rti.port, &http.url)));
+        let local = MockLocal::new(id, "thinq1");
+        assert!(bridge
+            .enable(local.clone() as Arc<dyn LocalDevice>, None, None)
+            .await
+            .unwrap());
+
+        let (mut lg, _) = rti.next().await;
+        assert_eq!(
+            read_t1_frame(&mut lg).await.unwrap()["Body"]["Cmd"],
+            "Alive"
+        );
+        assert_eq!(
+            http.accepted.load(Ordering::SeqCst),
+            1,
+            "TotalDeviceInfoSvc first"
+        );
+
+        // LG starts the session; the appliance's status goes up.
+        write_t1_frame(&mut lg, &serde_json::json!({"Body": {"CmdOpt": "Start"}})).await;
+        local.emit_data(&[0xAA, 0x01]);
+        let status = read_t1_frame(&mut lg).await.unwrap();
+        assert_eq!(status["Body"]["CmdWId"], format!("n-{id}"));
+        assert_eq!(status["Body"]["Data"], "qgE=");
+
+        // A command reaches the appliance and is acked.
+        let command = serde_json::json!({
+            "Header": {"x-lgedm-deviceId": id},
+            "Body": {"CmdWId": "cmd-1", "Cmd": "Control"},
+        });
+        write_t1_frame(&mut lg, &command).await;
+        assert_eq!(
+            read_t1_frame(&mut lg).await.unwrap()["Body"],
+            serde_json::json!({"CmdWId": "cmd-1", "ReturnCode": "0000"})
+        );
+        eventually("the command is forwarded", || {
+            local.json_to_local.lock().len() == 1
+        })
+        .await;
+
+        bridge.disable(id).await.unwrap();
+        // What LG sends now is neither acked nor forwarded: the link is gone.
+        write_t1_frame(
+            &mut lg,
+            &serde_json::json!({"Body": {"CmdWId": "cmd-2", "Cmd": "Control"}}),
+        )
+        .await;
+        assert!(
+            read_t1_frame(&mut lg).await.is_none(),
+            "the LG link closes on stop"
+        );
+        local.emit_data(&[0xAA, 0x02]);
+        tokio::time::sleep(RECONNECT_PERIOD * 3).await;
+        assert_eq!(local.json_to_local.lock().len(), 1);
+        assert!(
+            rti.accepted.try_recv().is_err(),
+            "a stopped session does not reconnect"
+        );
+        assert_eq!(http.accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_thinq1_session_stopped_while_connecting_is_gone_for_good() {
+        for how in ["disable", "logout", "close"] {
+            let http = HttpStub::start(true).await;
+            let rti = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let bridge = test_bridge();
+            let id = "t1-connecting";
+            let state = t1_saved_state(rti.local_addr().unwrap().port(), &http.url);
+            bridge.storage.set_device_state_json(id, Some(state));
+            let local = MockLocal::new(id, "thinq1");
+            assert!(bridge
+                .enable(local.clone() as Arc<dyn LocalDevice>, None, None)
+                .await
+                .unwrap());
+            assert!(bridge.status_for(id), "{how}: registered before LG answers");
+            eventually("TotalDeviceInfoSvc in flight", || {
+                http.accepted.load(Ordering::SeqCst) == 1
+            })
+            .await;
+
+            match how {
+                "disable" => bridge.disable(id).await.unwrap(),
+                "logout" => bridge.logout().await.unwrap(),
+                _ => local.simulate_close(),
+            }
+            assert!(!bridge.status_for(id), "{how}");
+            eventually("the in-flight POST is dropped", || {
+                http.closed.load(Ordering::SeqCst) == 1
+            })
+            .await;
+
+            // Nothing comes back afterwards, and the RTI server never hears from it.
+            tokio::time::sleep(RECONNECT_PERIOD * 3).await;
+            assert!(!bridge.status_for(id), "{how}");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), rti.accept())
+                    .await
+                    .is_err(),
+                "{how}: no RTI connection"
+            );
+            assert_eq!(http.accepted.load(Ordering::SeqCst), 1, "{how}: no retry");
+            assert_eq!(
+                bridge.want_enabled.lock().contains(id),
+                how == "close",
+                "{how}: only a close keeps the device wanted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_thinq1_handshake_in_flight_is_dropped_on_stop() {
+        use tokio::io::AsyncReadExt;
+        let http = HttpStub::start(false).await;
+        // Accepts and never answers the ClientHello.
+        let rti = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge = test_bridge();
+        let id = "t1-handshake";
+        let state = t1_saved_state(rti.local_addr().unwrap().port(), &http.url);
+        bridge.storage.set_device_state_json(id, Some(state));
+        let local = MockLocal::new(id, "thinq1");
+        bridge
+            .enable(local.clone() as Arc<dyn LocalDevice>, None, None)
+            .await
+            .unwrap();
+        let (mut sock, _) = tokio::time::timeout(WAIT, rti.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut record = [0u8; 1];
+        sock.read_exact(&mut record).await.unwrap();
+        assert_eq!(record[0], 0x16, "a TLS handshake record");
+
+        bridge.disable(id).await.unwrap();
+        expect_closed(&mut sock, "the handshake socket").await;
+    }
+
+    #[tokio::test]
+    async fn a_dropped_thinq1_link_is_reconnected() {
+        let pki = TestPki::new();
+        let mut rti = TlsStub::start(pki.server_config(&pki.leaf(&["rti.test"]), false)).await;
+        let http = HttpStub::start(false).await;
+        let bridge = test_bridge();
+        let id = "t1-reconnect";
+        bridge
+            .storage
+            .set_device_state_json(id, Some(t1_saved_state(rti.port, &http.url)));
+        let local = MockLocal::new(id, "thinq1");
+        bridge
+            .enable(local.clone() as Arc<dyn LocalDevice>, None, None)
+            .await
+            .unwrap();
+
+        let (mut lg, _) = rti.next().await;
+        assert_eq!(
+            read_t1_frame(&mut lg).await.unwrap()["Body"]["Cmd"],
+            "Alive"
+        );
+        drop(lg);
+
+        let (mut again, _) = rti.next().await;
+        assert_eq!(
+            read_t1_frame(&mut again).await.unwrap()["Body"]["Cmd"],
+            "Alive"
+        );
+        assert_eq!(
+            http.accepted.load(Ordering::SeqCst),
+            2,
+            "TotalDeviceInfoSvc before every connection"
+        );
+        assert!(bridge.status_for(id));
+
+        bridge.disable(id).await.unwrap();
+        expect_closed(&mut again, "the link after disable").await;
     }
 
     #[test]

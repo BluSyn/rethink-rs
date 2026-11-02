@@ -3,9 +3,14 @@
 use crate::pair::{
     classify_lg_downlink, format_device_packet, upstream_pre_deploy, LgDownlink, Thinq2DeviceState,
 };
-use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, TlsConfiguration, Transport};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::stop::StopSignal;
+use rumqttc::{
+    AsyncClient, Event, EventLoop, Incoming, MqttOptions, Outgoing, QoS, TlsConfiguration,
+    Transport,
+};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Cloneable handle: local→LG send + stop.
@@ -16,12 +21,12 @@ pub struct Thinq2Handle {
     device_id: String,
     model_name: String,
     pub_topic: String,
-    stopped: Arc<AtomicBool>,
+    stop: StopSignal,
 }
 
 impl Thinq2Handle {
     pub async fn send_from_local(&self, data: &[u8]) -> anyhow::Result<()> {
-        if self.stopped.load(Ordering::SeqCst) {
+        if self.stop.is_stopped() {
             return Ok(());
         }
         let hex_data = rethink_util::hex::encode_upper(data);
@@ -35,11 +40,7 @@ impl Thinq2Handle {
     }
 
     pub fn stop(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
-        let c = self.client.clone();
-        tokio::spawn(async move {
-            let _ = c.disconnect().await;
-        });
+        self.stop.stop();
     }
 }
 
@@ -50,12 +51,14 @@ pub enum LgToDevice {
     Ack(Vec<u8>),
 }
 
-/// Open LG MQTT; returns handle + channel of LG→local packets and delivery acks.
-pub async fn connect_thinq2(
+/// Open LG MQTT; returns handle + channel of LG→local packets and delivery acks. The event
+/// loop runs until `stop`, then disconnects and drops the connection.
+pub fn connect_thinq2(
     state: &Thinq2DeviceState,
     device_id: &str,
     model_name: &str,
     deploy: Option<serde_json::Value>,
+    stop: StopSignal,
 ) -> anyhow::Result<(Thinq2Handle, mpsc::UnboundedReceiver<LgToDevice>)> {
     let mqtt_url = state.mqtt_server.replace("ssl://", "mqtts://");
     let url = url::Url::parse(&mqtt_url)
@@ -79,7 +82,6 @@ pub async fn connect_thinq2(
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
     let (tx, rx) = mpsc::unbounded_channel();
     let mid = Arc::new(AtomicU32::new(10000));
-    let stopped = Arc::new(AtomicBool::new(false));
 
     let sub_topic = state.sub_topic.clone();
     let prov_topic = state.prov_topic.clone();
@@ -88,15 +90,19 @@ pub async fn connect_thinq2(
     let model = model_name.to_string();
     let mid_c = mid.clone();
     let client_c = client.clone();
-    let stopped_c = stopped.clone();
+    let stop_c = stop.clone();
 
     tokio::spawn(async move {
+        let mut connected = false;
         loop {
-            if stopped_c.load(Ordering::SeqCst) {
-                break;
-            }
-            match eventloop.poll().await {
+            let event = tokio::select! {
+                biased;
+                _ = stop_c.stopped() => break,
+                event = eventloop.poll() => event,
+            };
+            match event {
                 Ok(Event::Incoming(Incoming::ConnAck(_))) => {
+                    connected = true;
                     eprintln!("[bridge] {did} connected");
                     let _ = client_c.subscribe(&sub_topic, QoS::AtLeastOnce).await;
                     let m = mid_c.fetch_add(1, Ordering::SeqCst) + 1;
@@ -157,12 +163,21 @@ pub async fn connect_thinq2(
                     break;
                 }
                 Err(e) => {
+                    connected = false;
                     eprintln!("[bridge] {did} mqtt error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tokio::select! {
+                        biased;
+                        _ = stop_c.stopped() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    }
                 }
                 _ => {}
             }
         }
+        if connected && stop_c.is_stopped() {
+            disconnect(&client_c, &mut eventloop).await;
+        }
+        // Dropping the event loop closes the connection.
     });
 
     let handle = Thinq2Handle {
@@ -171,8 +186,22 @@ pub async fn connect_thinq2(
         device_id: device_id.to_string(),
         model_name: model_name.to_string(),
         pub_topic: state.pub_topic.clone(),
-        stopped,
+        stop,
     };
     Ok((handle, rx))
 }
 
+/// Best-effort MQTT DISCONNECT before the connection is dropped.
+async fn disconnect(client: &AsyncClient, eventloop: &mut EventLoop) {
+    if client.try_disconnect().is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Ok(event) = eventloop.poll().await {
+            if event == Event::Outgoing(Outgoing::Disconnect) {
+                break;
+            }
+        }
+    })
+    .await;
+}

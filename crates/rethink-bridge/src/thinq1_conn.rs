@@ -1,15 +1,27 @@
 //! ThinQ1 upstream RTI TLS connection (port of bridge/thinq1connection.ts).
+//!
+//! One task per bridged session owns the link: it posts TotalDeviceInfoSvc, opens the RTI TLS
+//! connection, serves it, and reconnects after [`RECONNECT_PERIOD`] when it drops. Stopping the
+//! session's [`StopSignal`] drops that task and with it the socket, so nothing is read, acked
+//! or sent afterwards.
 
 use crate::pair::Thinq1DeviceState;
+use crate::stop::StopSignal;
+use crate::RECONNECT_PERIOD;
 use rethink_util::length_prefixed_frame::{self, Splitter};
+use rethink_util::sync::Mutex;
 use rustls::pki_types::{CertificateDer, ServerName};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::TlsConnector;
+
+const ALIVE_PERIOD: Duration = Duration::from_secs(60);
 
 /// Cloneable send handle for local→LG status.
 #[derive(Clone)]
@@ -17,17 +29,21 @@ pub struct Thinq1Handle {
     write_tx: mpsc::UnboundedSender<Vec<u8>>,
     is_live: Arc<AtomicBool>,
     device_id: String,
-    last_state: Arc<rethink_util::sync::Mutex<Option<Vec<u8>>>>,
-    stopped: Arc<AtomicBool>,
+    last_state: Arc<Mutex<Option<Vec<u8>>>>,
+    stop: StopSignal,
 }
 
 impl Thinq1Handle {
     pub fn send_from_local(&self, data: &[u8]) {
-        if self.stopped.load(Ordering::SeqCst) {
+        if self.stop.is_stopped() {
             return;
         }
         *self.last_state.lock() = Some(data.to_vec());
-        eprintln!("[bridge] {} -> {}", self.device_id, rethink_util::hex::encode(data));
+        eprintln!(
+            "[bridge] {} -> {}",
+            self.device_id,
+            rethink_util::hex::encode(data)
+        );
         if !self.is_live.load(Ordering::SeqCst) {
             return;
         }
@@ -37,172 +53,226 @@ impl Thinq1Handle {
     }
 
     pub fn stop(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
+        self.stop.stop();
     }
 }
 
-pub async fn connect_thinq1(
+/// Start the session's connection task; it runs until `stop`.
+pub fn connect_thinq1(
     state: &Thinq1DeviceState,
     device_id: &str,
     model_name: &str,
     device_type: Option<&str>,
+    stop: StopSignal,
 ) -> anyhow::Result<(Thinq1Handle, mpsc::UnboundedReceiver<serde_json::Value>)> {
-    let _ = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()?
-        .post(format!(
-            "{}/lgehadm/api/Device/TotalDeviceInfoSvc",
-            state.http_server.trim_end_matches('/')
-        ))
-        .header("Accept", "text/xml")
-        .header("content-type", "text/xml;charset=utf-8")
-        .header("x-lgedm-userid", "lgehadmUser")
-        .header(
-            "x-lgedm-password",
-            "bxLoLAZ+rp3oJDbEzRuIfAG4YumeqwWM9l6uUH6TupQ=",
-        )
-        .header("x-lgedm-deviceid", device_id)
-        .header("x-lgedm-devicetype", device_type.unwrap_or("201"))
-        .body(format!(
-            "<lgedmRoot><countryCode>WW</countryCode><modelName>{model_name}</modelName>\
-             <itemList><item>THINQ_TIME_SYNC_URI</item>\
-             <elementList><elementCode>pushDetailYn</elementCode>\
-             <elementValue>Y</elementValue></elementList></itemList></lgedmRoot>"
-        ))
-        .send()
-        .await;
-
-    eprintln!("[bridge] {device_id} connecting to {}", state.rti_server);
     let (host, port) = parse_host_port(&state.rti_server)?;
-
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier))
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(config));
-    let tcp = TcpStream::connect((host.as_str(), port)).await?;
-    let server_name = ServerName::try_from(host.clone())
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .to_owned();
-    let tls = connector.connect(server_name, tcp).await?;
-    let (mut reader, mut writer) = tokio::io::split(tls);
-
-    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (write_tx, write_rx) = mpsc::unbounded_channel();
     let (from_lg_tx, from_lg_rx) = mpsc::unbounded_channel();
-    let is_live = Arc::new(AtomicBool::new(false));
-    let stopped = Arc::new(AtomicBool::new(false));
-    let last_state = Arc::new(rethink_util::sync::Mutex::new(None::<Vec<u8>>));
-
-    let did = device_id.to_string();
+    let handle = Thinq1Handle {
+        write_tx,
+        is_live: Arc::new(AtomicBool::new(false)),
+        device_id: device_id.to_string(),
+        last_state: Arc::new(Mutex::new(None)),
+        stop: stop.clone(),
+    };
+    let link = Link {
+        state: state.clone(),
+        host,
+        port,
+        device_id: device_id.to_string(),
+        model_name: model_name.to_string(),
+        device_type: device_type.unwrap_or("201").to_string(),
+        is_live: handle.is_live.clone(),
+        last_state: handle.last_state.clone(),
+        from_lg: from_lg_tx,
+        stop: stop.clone(),
+    };
     tokio::spawn(async move {
-        while let Some(frame) = write_rx.recv().await {
-            if writer.write_all(&frame).await.is_err() {
-                break;
-            }
+        tokio::select! {
+            biased;
+            _ = stop.stopped() => {}
+            _ = link.run(write_rx) => {}
         }
     });
+    Ok((handle, from_lg_rx))
+}
 
-    // Alive
-    let _ = write_tx.send(length_prefixed_frame::make(format_alive(&did).as_bytes()));
-    let write_tx_alive = write_tx.clone();
-    let did_alive = did.clone();
-    let stopped_a = stopped.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+struct Link {
+    state: Thinq1DeviceState,
+    host: String,
+    port: u16,
+    device_id: String,
+    model_name: String,
+    device_type: String,
+    is_live: Arc<AtomicBool>,
+    last_state: Arc<Mutex<Option<Vec<u8>>>>,
+    from_lg: mpsc::UnboundedSender<serde_json::Value>,
+    stop: StopSignal,
+}
+
+impl Link {
+    async fn run(self, mut outgoing: mpsc::UnboundedReceiver<Vec<u8>>) {
         loop {
-            interval.tick().await;
-            if stopped_a.load(Ordering::SeqCst) {
-                break;
+            if let Some(tls) = self.connect().await {
+                eprintln!("[bridge] {} connected", self.device_id);
+                // Status queued for an earlier link is stale; LG asks again with Start.
+                while outgoing.try_recv().is_ok() {}
+                if let Err(e) = self.serve(tls, &mut outgoing).await {
+                    eprintln!(
+                        "[bridge] Error communicating with {}: {e}",
+                        self.state.rti_server
+                    );
+                }
+                self.is_live.store(false, Ordering::SeqCst);
+                eprintln!("[bridge] {} disconnected", self.device_id);
             }
-            if write_tx_alive
-                .send(length_prefixed_frame::make(format_alive(&did_alive).as_bytes()))
-                .is_err()
-            {
-                break;
+            tokio::time::sleep(RECONNECT_PERIOD).await;
+        }
+    }
+
+    /// TotalDeviceInfoSvc, then the RTI TLS handshake. `None` when stopped meanwhile or failed.
+    async fn connect(&self) -> Option<TlsStream<TcpStream>> {
+        let url = format!(
+            "{}/lgehadm/api/Device/TotalDeviceInfoSvc",
+            self.state.http_server.trim_end_matches('/')
+        );
+        if let Ok(client) = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+        {
+            let _ = client
+                .post(url)
+                .header("Accept", "text/xml")
+                .header("content-type", "text/xml;charset=utf-8")
+                .header("x-lgedm-userid", "lgehadmUser")
+                .header(
+                    "x-lgedm-password",
+                    "bxLoLAZ+rp3oJDbEzRuIfAG4YumeqwWM9l6uUH6TupQ=",
+                )
+                .header("x-lgedm-deviceid", &self.device_id)
+                .header("x-lgedm-devicetype", &self.device_type)
+                .body(format!(
+                    "<lgedmRoot><countryCode>WW</countryCode><modelName>{}</modelName>\
+                     <itemList><item>THINQ_TIME_SYNC_URI</item>\
+                     <elementList><elementCode>pushDetailYn</elementCode>\
+                     <elementValue>Y</elementValue></elementList></itemList></lgedmRoot>",
+                    self.model_name
+                ))
+                .send()
+                .await;
+        }
+        if self.stop.is_stopped() {
+            return None;
+        }
+
+        eprintln!(
+            "[bridge] {} connecting to {}",
+            self.device_id, self.state.rti_server
+        );
+        match self.handshake().await {
+            Ok(tls) if !self.stop.is_stopped() => Some(tls),
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!(
+                    "[bridge] Error communicating with {}: {e}",
+                    self.state.rti_server
+                );
+                None
             }
         }
-    });
+    }
 
-    let is_live_r = is_live.clone();
-    let last_state_r = last_state.clone();
-    let write_tx_r = write_tx.clone();
-    let stopped_r = stopped.clone();
-    let did_r = did.clone();
-    tokio::spawn(async move {
+    async fn handshake(&self) -> anyhow::Result<TlsStream<TcpStream>> {
+        let config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let tcp = TcpStream::connect((self.host.as_str(), self.port)).await?;
+        let server_name = ServerName::try_from(self.host.clone())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .to_owned();
+        Ok(connector.connect(server_name, tcp).await?)
+    }
+
+    /// Until LG closes the link or it fails.
+    async fn serve(
+        &self,
+        mut tls: TlsStream<TcpStream>,
+        outgoing: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    ) -> std::io::Result<()> {
         let mut splitter = Splitter::new(1_000_000);
         let mut buf = [0u8; 8192];
+        // The first tick is immediate: Alive goes out as soon as the link is up.
+        let mut alive = tokio::time::interval(ALIVE_PERIOD);
         loop {
-            if stopped_r.load(Ordering::SeqCst) {
-                break;
-            }
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let Ok(frames) = splitter.feed(&buf[..n]) else {
-                        break;
-                    };
+            tokio::select! {
+                _ = alive.tick() => {
+                    let frame = length_prefixed_frame::make(format_alive(&self.device_id).as_bytes());
+                    tls.write_all(&frame).await?;
+                }
+                Some(frame) = outgoing.recv() => tls.write_all(&frame).await?,
+                n = tls.read(&mut buf) => {
+                    let n = n?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    let frames = splitter.feed(&buf[..n]).map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+                    })?;
                     for payload in frames {
-                        if let Ok(j) = serde_json::from_slice::<serde_json::Value>(&payload) {
-                            handle_lg_json(
-                                &j,
-                                &did_r,
-                                &is_live_r,
-                                &last_state_r,
-                                &write_tx_r,
-                                &from_lg_tx,
-                            );
+                        let Ok(j) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+                            continue;
+                        };
+                        if let Some(reply) = handle_lg_json(
+                            &j,
+                            &self.device_id,
+                            &self.is_live,
+                            &self.last_state,
+                            &self.from_lg,
+                        ) {
+                            tls.write_all(&reply).await?;
                         }
                     }
                 }
             }
         }
-        eprintln!("[bridge] {did_r} disconnected");
-    });
-
-    let handle = Thinq1Handle {
-        write_tx,
-        is_live,
-        device_id: device_id.to_string(),
-        last_state,
-        stopped,
-    };
-    Ok((handle, from_lg_rx))
+    }
 }
 
+/// Act on one LG frame; returns the frame to answer with, if any.
 fn handle_lg_json(
     j: &serde_json::Value,
     device_id: &str,
     is_live: &AtomicBool,
-    last_state: &rethink_util::sync::Mutex<Option<Vec<u8>>>,
-    write_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    last_state: &Mutex<Option<Vec<u8>>>,
     from_lg: &mpsc::UnboundedSender<serde_json::Value>,
-) {
-    let Some(body) = j.get("Body") else {
-        return;
-    };
+) -> Option<Vec<u8>> {
+    let body = j.get("Body")?;
     if body.get("CmdOpt").and_then(|v| v.as_str()) == Some("Start") {
         is_live.store(true, Ordering::SeqCst);
-        if let Some(ref st) = *last_state.lock() {
+        return last_state.lock().as_ref().map(|st| {
             let msg = format_status_body(device_id, st);
-            let _ = write_tx.send(length_prefixed_frame::make(msg.to_string().as_bytes()));
-        }
-        return;
+            length_prefixed_frame::make(msg.to_string().as_bytes())
+        });
     }
     if body.get("CmdOpt").and_then(|v| v.as_str()) == Some("Stop") {
         is_live.store(false, Ordering::SeqCst);
-        return;
+        return None;
     }
     eprintln!("[bridge] {device_id} <- {body}");
     let _ = from_lg.send(body.clone());
-    if body.get("ReturnCode").is_none() {
-        if let Some(cmd_w_id) = body.get("CmdWId") {
-            let ack = serde_json::json!({
-                "Header": { "x-lgedm-deviceId": device_id },
-                "Body": { "CmdWId": cmd_w_id, "ReturnCode": "0000" }
-            });
-            let _ = write_tx.send(length_prefixed_frame::make(ack.to_string().as_bytes()));
-        }
+    if body.get("ReturnCode").is_some() {
+        return None;
     }
+    let cmd_w_id = body.get("CmdWId")?;
+    let ack = serde_json::json!({
+        "Header": { "x-lgedm-deviceId": device_id },
+        "Body": { "CmdWId": cmd_w_id, "ReturnCode": "0000" }
+    });
+    Some(length_prefixed_frame::make(ack.to_string().as_bytes()))
 }
 
 pub fn format_status_body(device_id: &str, data: &[u8]) -> serde_json::Value {
