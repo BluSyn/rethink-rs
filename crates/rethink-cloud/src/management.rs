@@ -174,6 +174,7 @@ pub fn router(state: MgmtState) -> Router {
         let st = state.clone();
         bridge.on_names_changed(move || broadcast(&st, &json!({ "devices": enum_devices(&st) })));
     }
+    broadcast_bridge_changes(&state);
     Router::new()
         .route("/ws", get(ws_status))
         .route("/device", get(ws_device))
@@ -220,6 +221,23 @@ fn enum_devices(state: &MgmtState) -> Value {
         );
     }
     Value::Object(all)
+}
+
+/// Re-send the device list whenever a bridge session starts or stops, or its LG link goes up
+/// or down, so `bridgeState` stays current in the panel.
+fn broadcast_bridge_changes(state: &MgmtState) {
+    let Some(bridge) = &state.bridge else {
+        return;
+    };
+    // The listener lives in the bridge, so it holds the bridge weakly.
+    let weak = Arc::downgrade(bridge);
+    let mut detached = state.clone();
+    detached.bridge = None;
+    bridge.on_event(move |_| {
+        let mut state = detached.clone();
+        state.bridge = weak.upgrade();
+        broadcast(&state, &json!({ "devices": enum_devices(&state) }));
+    });
 }
 
 /// Bridge object on the management websocket. No bridge configured is not an error.
@@ -1496,6 +1514,59 @@ mod tests {
             !panel.contains("status_bridge_text').innerText = 'Not configured'"),
             "the logged-out error wording must not be used for a disabled bridge"
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_session_changes_are_broadcast_to_the_panel() {
+        use crate::bridge_adapter::ConnectedAsLocal;
+
+        let dir = std::env::temp_dir().join(format!("rethink-mgmt-{}", uuid::Uuid::new_v4()));
+        let storage = Arc::new(JsonStorage::new(&dir));
+        storage.set_credentials(Some(Credentials {
+            refresh_token: "token".into(),
+            env: Environment {
+                country_code: "US".into(),
+                language_code: None,
+            },
+        }));
+        storage.set_device_state_json("dev-1", Some(json!({"testMode": true})));
+        let bridge = Bridge::new(storage);
+        let state = test_state(Some(bridge.clone()));
+        let (tx, mut panel) = mpsc::unbounded_channel();
+        state.subscribers.lock().push(tx);
+        let _ = router(state.clone());
+
+        let dev = ConnectedDevice::new(
+            "dev-1".into(),
+            Platform::Thinq2,
+            Metadata::new("M", "M", "1"),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        );
+        state.manager.accept(dev.clone());
+        bridge.on_local_device(Arc::new(ConnectedAsLocal(dev.clone())));
+        let started: Value = serde_json::from_str(&panel.try_recv().unwrap()).unwrap();
+        assert_eq!(started["devices"]["dev-1"]["bridgeState"], "online");
+
+        dev.notify_close();
+        let stopped: Value = serde_json::from_str(&panel.try_recv().unwrap()).unwrap();
+        assert_eq!(stopped["devices"], json!({}));
+        assert!(panel.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn panel_shows_the_lg_link_next_to_the_bridge_switch() {
+        let panel = include_str!("../../../html/panel.js");
+        assert!(panel.contains("cloud_done") && panel.contains("cloud_off"));
+        assert!(panel.contains("this.remoteState.bridgeState = 'offline'"));
+        assert!(panel.contains("this.remoteState.bridgeState = 'disabled'"));
+        assert!(
+            !panel.contains("remoteState.bridged"),
+            "management sends bridgeState; there is no remoteState.bridged"
+        );
+        let index = include_str!("../../../html/index.html");
+        assert!(index.contains(".bridge-cell .bridge-state"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::pair::{
     classify_lg_downlink, format_device_packet, upstream_pre_deploy, LgDownlink, Thinq2DeviceState,
 };
 use crate::stop::StopSignal;
+use crate::OnLink;
 use rumqttc::{
     AsyncClient, Event, EventLoop, Incoming, MqttOptions, Outgoing, QoS, TlsConfiguration,
     Transport,
@@ -52,13 +53,15 @@ pub enum LgToDevice {
 }
 
 /// Open LG MQTT; returns handle + channel of LG→local packets and delivery acks. The event
-/// loop runs until `stop`, then disconnects and drops the connection.
+/// loop runs until `stop`, then disconnects and drops the connection. `on_link` hears when the
+/// MQTT session is up and when it has dropped.
 pub fn connect_thinq2(
     state: &Thinq2DeviceState,
     device_id: &str,
     model_name: &str,
     deploy: Option<serde_json::Value>,
     stop: StopSignal,
+    on_link: OnLink,
 ) -> anyhow::Result<(Thinq2Handle, mpsc::UnboundedReceiver<LgToDevice>)> {
     let mqtt_url = state.mqtt_server.replace("ssl://", "mqtts://");
     let url = url::Url::parse(&mqtt_url)
@@ -104,6 +107,7 @@ pub fn connect_thinq2(
                 Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                     connected = true;
                     eprintln!("[bridge] {did} connected");
+                    on_link(true);
                     let _ = client_c.subscribe(&sub_topic, QoS::AtLeastOnce).await;
                     let m = mid_c.fetch_add(1, Ordering::SeqCst) + 1;
                     let pre = upstream_pre_deploy(m, &did, &model, deploy.as_ref()).to_string();
@@ -160,11 +164,13 @@ pub fn connect_thinq2(
                 }
                 Ok(Event::Incoming(Incoming::Disconnect)) => {
                     eprintln!("[bridge] {did} disconnected");
+                    on_link(false);
                     break;
                 }
                 Err(e) => {
                     connected = false;
                     eprintln!("[bridge] {did} mqtt error: {e}");
+                    on_link(false);
                     tokio::select! {
                         biased;
                         _ = stop_c.stopped() => break,

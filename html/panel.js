@@ -81,6 +81,18 @@ const STATUS_ERROR = `<i class="tiny material-icons" style="color:#f07178">error
 const STATUS_UNKNOWN = `<i class="tiny material-icons" style="color:#8b9bb0">question_mark</i>`
 // Not an error: the bridge was left out of the configuration on purpose.
 const STATUS_DISABLED = `<i class="tiny material-icons" style="color:#8b9bb0">block</i>`
+// A cloud, not a check: this is the state of the link out to LG, not of the appliance or of rethink.
+const BRIDGE_ONLINE = `<i class="tiny material-icons" style="color:#3dd68c">cloud_done</i>`
+const BRIDGE_OFFLINE = `<i class="tiny material-icons" style="color:#f07178">cloud_off</i>`
+
+/**
+ * Bridge mode is on for a device's bridgeState ('disabled' | 'offline' | 'online'). Tested against
+ * the two states that mean "on" rather than against 'disabled', so that an unset value reads as off
+ * instead of as a bridge nobody asked for.
+ */
+function bridgeEnabled(bridgeState) {
+    return bridgeState === 'online' || bridgeState === 'offline'
+}
 
 let ws
 let deviceWs
@@ -173,24 +185,28 @@ class DeviceEntry {
             <td class="col-plat">${escapeHtml(platform)}</td>
             <td class="col-ha">${haChip}</td>
             <td class="col-bridge">
-                <div class="switch" style="display:inline-block">
-                    <label>Off <input type="checkbox"> <span class="lever"></span> On</label>
-                </div>
-                <div class="hide preloader-wrapper verysmall active" style="vertical-align:middle">
-                    <div class="spinner-layer spinner-green-only">
-                        <div class="circle-clipper left"><div class="circle"></div></div>
-                        <div class="gap-patch"><div class="circle"></div></div>
-                        <div class="circle-clipper right"><div class="circle"></div></div>
+                <div class="bridge-cell">
+                    <div class="switch">
+                        <label>Off <input type="checkbox"> <span class="lever"></span> On</label>
                     </div>
+                    <div class="hide preloader-wrapper verysmall active">
+                        <div class="spinner-layer spinner-green-only">
+                            <div class="circle-clipper left"><div class="circle"></div></div>
+                            <div class="gap-patch"><div class="circle"></div></div>
+                            <div class="circle-clipper right"><div class="circle"></div></div>
+                        </div>
+                    </div>
+                    <span class="bridge-state"></span>
+                    <span class="modeljson" title="Download the modelJSON file. Requires bridge mode.">
+                        <a class="btn-flat btn-small waves-effect"><i class="material-icons">description</i></a>
+                    </span>
                 </div>
-                <span class="modeljson" title="Download the modelJSON file. Requires bridge mode.">
-                    <a class="btn-flat btn-small waves-effect"><i class="material-icons">description</i></a>
-                </span>
             </td>`
 
         this.bridgeSwitch = this.row.querySelector('input[type=checkbox]')
         this.bridgeDiv = this.row.querySelector('.switch')
         this.spinner = this.row.querySelector('.preloader-wrapper')
+        this.bridgeState = this.row.querySelector('.bridge-state')
         this.modelJsonButton = this.row.querySelector('.modeljson a')
         this.modelJsonButton.onclick = () => this.downloadModelJson()
 
@@ -211,8 +227,12 @@ class DeviceEntry {
             this.bridgeBusy = true
             this.refreshUI()
             try {
-                await fetchWrapper(`bridge/${this.id}/enable`, { deviceType }, { method: 'POST' })
-                this.remoteState.bridged = true
+                const response = await fetchWrapper(`bridge/${this.id}/enable`, { deviceType }, { method: 'POST' })
+                // Registered, but the cloud connection is only just being made - rethink says so
+                // with a {devices} broadcast of its own once it is up, which may have beaten us here.
+                if (response && response.ok && !bridgeEnabled(this.remoteState.bridgeState)) {
+                    this.remoteState.bridgeState = 'offline'
+                }
             } finally {
                 this.bridgeBusy = false
                 this.refreshUI()
@@ -222,8 +242,8 @@ class DeviceEntry {
             this.bridgeBusy = true
             this.refreshUI()
             try {
-                await fetchWrapper(`bridge/${this.id}/disable`, {}, { method: 'POST' })
-                this.remoteState.bridged = false
+                const response = await fetchWrapper(`bridge/${this.id}/disable`, {}, { method: 'POST' })
+                if (response && response.ok) this.remoteState.bridgeState = 'disabled'
             } finally {
                 this.bridgeBusy = false
                 this.refreshUI()
@@ -259,7 +279,7 @@ class DeviceEntry {
     refreshUI() {
         if (!this.bridgeSwitch) return
         const state = this.remoteState.bridgeState
-        const enabled = state == null ? !!this.remoteState.bridged : state === 'online' || state === 'offline'
+        const enabled = bridgeEnabled(state)
         if (this.bridgeBusy) {
             this.bridgeDiv.classList.add('hide')
             this.spinner.classList.remove('hide')
@@ -268,6 +288,22 @@ class DeviceEntry {
             this.bridgeDiv.classList.remove('hide')
             this.bridgeSwitch.checked = enabled
         }
+
+        // Two different facts, so two different controls: the switch is what bridge mode has been
+        // set to, this is whether the connection to LG behind it is actually up. A device with the
+        // bridge off gets no icon - the switch has already said everything there is to say - and
+        // neither does one mid-enable, where the spinner has taken the switch's place.
+        if (this.bridgeBusy || !enabled) {
+            this.bridgeState.innerHTML = ''
+            this.bridgeState.title = ''
+        } else if (state === 'online') {
+            this.bridgeState.innerHTML = BRIDGE_ONLINE
+            this.bridgeState.title = 'Connected to the LG cloud'
+        } else {
+            this.bridgeState.innerHTML = BRIDGE_OFFLINE
+            this.bridgeState.title = 'Not connected to the LG cloud. Retrying every few seconds.'
+        }
+
         this.bridgeSwitch.disabled = !bridge_status
         // The modelJSON only comes from the ThinQ cloud, and only for a device registered there.
         this.modelJsonButton.classList.toggle('disabled', !(bridge_status && enabled))
@@ -354,7 +390,7 @@ async function selectDevice(id) {
             platform: local && local.remoteState.platform,
             deviceType: local && local.remoteState.deviceType,
             mapped: local && local.remoteState.mapped,
-            bridged: local && local.remoteState.bridged,
+            bridged: local && bridgeEnabled(local.remoteState.bridgeState),
         },
         id,
     )
@@ -762,7 +798,7 @@ function deviceContextLines() {
         platform = s.platform || platform
         deviceType = s.deviceType != null ? s.deviceType : deviceType
         mapped = s.mapped === true ? 'yes' : s.mapped === false ? 'no' : mapped
-        bridged = s.bridged === true ? 'yes' : s.bridged === false ? 'no' : bridged
+        bridged = s.bridgeState ? (bridgeEnabled(s.bridgeState) ? 'yes' : 'no') : bridged
     }
     const bar = get('detail_bar')
     if (bar) {

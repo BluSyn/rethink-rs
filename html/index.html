@@ -176,6 +176,23 @@
             table.devices:not(.no-names) .col-bridge {
                 width: 30%;
             }
+            /* The switch and the cloud-link indicator share one line. */
+            table.devices .bridge-cell {
+                display: flex;
+                align-items: center;
+                gap: 0.25rem;
+            }
+            /* A fixed box rather than an inline icon: it holds its place while empty, so a bridge
+               going up and down doesn't shuffle the switch sideways under the pointer, and the
+               glyph sits centred on the switch instead of riding on the text baseline. */
+            table.devices .bridge-cell .bridge-state {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 1.5em;
+                height: 1.5em;
+                line-height: 1;
+            }
             .chip {
                 display: inline-block;
                 height: auto;

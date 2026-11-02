@@ -43,6 +43,22 @@ pub const RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from_secs
 #[cfg(test)]
 pub const RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Told by an upstream connection whenever its link to LG comes up (`true`) or goes down.
+pub type OnLink = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// What changed, for the management UI (upstream `Bridge` events).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeEvent {
+    /// A session was registered for the device.
+    Started(String),
+    /// The device's session was stopped and removed.
+    Stopped(String),
+    /// The device's link to LG came up (`true`) or went down.
+    StateChanged(String, bool),
+}
+
+type Listener = Arc<dyn Fn(&BridgeEvent) + Send + Sync>;
+
 /// Minimal local device view for bridge enable/disable (avoids cyclic deps on cloud).
 pub trait LocalDevice: Send + Sync {
     fn id(&self) -> &str;
@@ -88,7 +104,7 @@ struct BridgedSession {
     generation: u64,
     /// Fired when detaching: every task of the session exits and the LG socket closes.
     stop: StopSignal,
-    /// Upstream MQTT (or equivalent) is up.
+    /// Upstream MQTT (or equivalent) is up; kept current through the connection's [`OnLink`].
     link_up: Arc<AtomicBool>,
     upstream: UpstreamHandle,
 }
@@ -125,6 +141,7 @@ pub struct Bridge {
     /// Held while a session is registered and while disable/logout change what is wanted, so a
     /// session never outlives a disable or logout that raced with its start.
     registry: Mutex<()>,
+    listeners: Mutex<Vec<Listener>>,
 }
 
 impl Bridge {
@@ -139,7 +156,21 @@ impl Bridge {
             names_changed: Mutex::new(Vec::new()),
             next_generation: AtomicU64::new(0),
             registry: Mutex::new(()),
+            listeners: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Called for every [`BridgeEvent`], on whichever task caused it. Listeners must not call
+    /// back into `enable`/`disable`/`logout`.
+    pub fn on_event(&self, listener: impl Fn(&BridgeEvent) + Send + Sync + 'static) {
+        self.listeners.lock().push(Arc::new(listener));
+    }
+
+    fn emit(&self, event: BridgeEvent) {
+        let listeners = self.listeners.lock().clone();
+        for listener in listeners {
+            listener(&event);
+        }
     }
 
     pub fn is_logged_in(&self) -> bool {
@@ -151,17 +182,13 @@ impl Bridge {
         self.sessions.lock().contains_key(id)
     }
 
-    /// `(bridge mode enabled, upstream link up)` for management `bridgeState`.
+    /// `(bridge mode enabled, upstream link up)` for management `bridgeState`. Like upstream's
+    /// `status()`, bridge mode is on while a session is registered.
     pub fn bridge_flags(&self, id: &str) -> (bool, bool) {
-        let enabled = self.want_enabled.lock().contains(id)
-            || self.storage.get_device_state_json(id).is_some();
-        let up = self
-            .sessions
-            .lock()
-            .get(id)
-            .map(|s| s.link_up.load(Ordering::SeqCst))
-            .unwrap_or(false);
-        (enabled, up)
+        match self.sessions.lock().get(id) {
+            Some(sess) => (true, sess.link_up.load(Ordering::SeqCst)),
+            None => (false, false),
+        }
     }
 
     pub fn storage(&self) -> &Arc<dyn BridgeState> {
@@ -173,6 +200,7 @@ impl Bridge {
         let removed = self.sessions.lock().remove(id);
         if let Some(sess) = removed {
             sess.stop.stop();
+            self.emit(BridgeEvent::Stopped(id.to_string()));
         }
     }
 
@@ -187,6 +215,7 @@ impl Bridge {
         };
         if let Some(sess) = removed {
             sess.stop.stop();
+            self.emit(BridgeEvent::Stopped(id.to_string()));
         }
     }
 
@@ -380,6 +409,19 @@ impl Bridge {
         }
 
         let stop = StopSignal::new();
+        let link_up = Arc::new(AtomicBool::new(test_mode));
+        let on_link: OnLink = {
+            let bridge = Arc::downgrade(self);
+            let (stop, link_up, id) = (stop.clone(), link_up.clone(), id.clone());
+            Arc::new(move |up| {
+                if stop.is_stopped() || link_up.swap(up, Ordering::SeqCst) == up {
+                    return;
+                }
+                if let Some(bridge) = bridge.upgrade() {
+                    bridge.emit(BridgeEvent::StateChanged(id.clone(), up));
+                }
+            })
+        };
         let upstream = if test_mode {
             // Unit-test path: no network; still wire local handlers for lifecycle.
             UpstreamHandle::Mock
@@ -395,6 +437,7 @@ impl Bridge {
                 &model_name,
                 device.deploy_payload(),
                 stop.clone(),
+                on_link,
             )?;
             let dev = device.clone();
             spawn_forward(stop.clone(), from_lg, move |msg| {
@@ -403,8 +446,14 @@ impl Bridge {
             UpstreamHandle::T2(handle)
         } else {
             let t1 = parse_t1_state(&lg_state)?;
-            let (handle, from_lg) =
-                connect_thinq1(&t1, &id, &model_name, device_type.as_deref(), stop.clone())?;
+            let (handle, from_lg) = connect_thinq1(
+                &t1,
+                &id,
+                &model_name,
+                device_type.as_deref(),
+                stop.clone(),
+                on_link,
+            )?;
             let dev = device.clone();
             spawn_forward(stop.clone(), from_lg, move |body| {
                 dev.send_json_to_local(body)
@@ -418,7 +467,7 @@ impl Bridge {
             lg_state,
             generation,
             stop,
-            link_up: Arc::new(AtomicBool::new(test_mode)),
+            link_up,
             upstream,
         });
         let replaced = self.sessions.lock().insert(id.clone(), session.clone());
@@ -432,9 +481,11 @@ impl Bridge {
 
         // Local close → detach this session (a newer one stays). want_enabled stays.
         let bridge = self.clone();
+        let id_close = id.clone();
         device.on_close(Box::new(move || {
-            bridge.detach_generation(&id, generation);
+            bridge.detach_generation(&id_close, generation);
         }));
+        self.emit(BridgeEvent::Started(id));
         Ok(())
     }
 
@@ -1044,6 +1095,97 @@ mod lifecycle_tests {
 
         bridge.disable(id).await.unwrap();
         expect_closed(&mut sock, "the handshake socket").await;
+    }
+
+    fn record_events(bridge: &Bridge) -> Arc<Mutex<Vec<BridgeEvent>>> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        bridge.on_event(move |e| sink.lock().push(e.clone()));
+        events
+    }
+
+    #[tokio::test]
+    async fn sessions_report_start_stop_and_their_link_state() {
+        let bridge = test_bridge();
+        let events = record_events(&bridge);
+        let id = "dev-events";
+        assert_eq!(
+            bridge.bridge_flags(id),
+            (false, false),
+            "no session: disabled"
+        );
+        bridge
+            .storage
+            .set_device_state_json(id, Some(mock_saved_state()));
+        let local = MockLocal::new(id, "thinq2");
+        bridge.on_local_device(local.clone() as Arc<dyn LocalDevice>);
+        assert_eq!(
+            bridge.bridge_flags(id),
+            (true, true),
+            "test mode is always online"
+        );
+        local.simulate_close();
+        assert_eq!(bridge.bridge_flags(id), (false, false));
+        assert_eq!(
+            events.lock().clone(),
+            [
+                BridgeEvent::Started(id.into()),
+                BridgeEvent::Stopped(id.into())
+            ]
+        );
+
+        // Saved state alone is not bridge mode: logged out, nothing runs.
+        bridge.logout().await.unwrap();
+        bridge.on_local_device(MockLocal::new(id, "thinq2") as Arc<dyn LocalDevice>);
+        assert_eq!(bridge.bridge_flags(id), (false, false));
+    }
+
+    #[tokio::test]
+    async fn the_link_state_follows_the_thinq1_connection() {
+        let pki = TestPki::new();
+        let mut rti = TlsStub::start(pki.server_config(&pki.leaf(&["rti.test"]), false)).await;
+        let http = HttpStub::start(false).await;
+        let bridge = test_bridge();
+        let events = record_events(&bridge);
+        let id = "t1-link";
+        bridge
+            .storage
+            .set_device_state_json(id, Some(t1_saved_state(rti.port, &http.url)));
+        let local = MockLocal::new(id, "thinq1");
+        bridge
+            .enable(local.clone() as Arc<dyn LocalDevice>, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            bridge.bridge_flags(id),
+            (true, false),
+            "registered, still connecting"
+        );
+
+        let (lg, _) = rti.next().await;
+        eventually("online", || bridge.bridge_flags(id) == (true, true)).await;
+        drop(lg);
+        eventually("offline", || bridge.bridge_flags(id) == (true, false)).await;
+        let (_again, _) = rti.next().await;
+        eventually("online again", || bridge.bridge_flags(id) == (true, true)).await;
+
+        bridge.disable(id).await.unwrap();
+        assert_eq!(bridge.bridge_flags(id), (false, false));
+        tokio::time::sleep(RECONNECT_PERIOD * 3).await;
+        let started = BridgeEvent::Started(id.into());
+        let up = BridgeEvent::StateChanged(id.into(), true);
+        let down = BridgeEvent::StateChanged(id.into(), false);
+        assert_eq!(
+            events.lock().clone(),
+            [
+                started,
+                up.clone(),
+                down,
+                up,
+                BridgeEvent::Stopped(id.into())
+            ],
+            "nothing is reported for a stopped session"
+        );
     }
 
     #[tokio::test]

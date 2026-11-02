@@ -7,7 +7,7 @@
 
 use crate::pair::Thinq1DeviceState;
 use crate::stop::StopSignal;
-use crate::RECONNECT_PERIOD;
+use crate::{OnLink, RECONNECT_PERIOD};
 use rethink_util::length_prefixed_frame::{self, Splitter};
 use rethink_util::sync::Mutex;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -57,13 +57,15 @@ impl Thinq1Handle {
     }
 }
 
-/// Start the session's connection task; it runs until `stop`.
+/// Start the session's connection task; it runs until `stop`. `on_link` hears when the TLS
+/// link to LG is up and when it has dropped.
 pub fn connect_thinq1(
     state: &Thinq1DeviceState,
     device_id: &str,
     model_name: &str,
     device_type: Option<&str>,
     stop: StopSignal,
+    on_link: OnLink,
 ) -> anyhow::Result<(Thinq1Handle, mpsc::UnboundedReceiver<serde_json::Value>)> {
     let (host, port) = parse_host_port(&state.rti_server)?;
     let (write_tx, write_rx) = mpsc::unbounded_channel();
@@ -86,6 +88,7 @@ pub fn connect_thinq1(
         last_state: handle.last_state.clone(),
         from_lg: from_lg_tx,
         stop: stop.clone(),
+        on_link,
     };
     tokio::spawn(async move {
         tokio::select! {
@@ -108,6 +111,7 @@ struct Link {
     last_state: Arc<Mutex<Option<Vec<u8>>>>,
     from_lg: mpsc::UnboundedSender<serde_json::Value>,
     stop: StopSignal,
+    on_link: OnLink,
 }
 
 impl Link {
@@ -115,6 +119,7 @@ impl Link {
         loop {
             if let Some(tls) = self.connect().await {
                 eprintln!("[bridge] {} connected", self.device_id);
+                (self.on_link)(true);
                 // Status queued for an earlier link is stale; LG asks again with Start.
                 while outgoing.try_recv().is_ok() {}
                 if let Err(e) = self.serve(tls, &mut outgoing).await {
@@ -125,6 +130,7 @@ impl Link {
                 }
                 self.is_live.store(false, Ordering::SeqCst);
                 eprintln!("[bridge] {} disconnected", self.device_id);
+                (self.on_link)(false);
             }
             tokio::time::sleep(RECONNECT_PERIOD).await;
         }
