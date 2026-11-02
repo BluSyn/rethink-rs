@@ -215,9 +215,7 @@ fn add_fields(core: &Arc<TlvDeviceCore>, config: &mut DeviceDiscovery) {
 
     // Minutes, counting down, so the entity shows the live remaining time.
     let mut f = FieldDefinition::new("sleep_timer", "").with_id(TAG_SLEEP_TIMER);
-    f.write_xform = Some(Box::new(|val| {
-        val.parse::<f64>().ok().map(PropertyValue::from)
-    }));
+    f.write_xform = Some(Box::new(|val| crate::js::number(val).map(PropertyValue::from)));
     core.add_field(config, f, true);
 
     for (id, comp, name) in [
@@ -873,5 +871,20 @@ mod tests {
         assert!(thinq.sent().is_empty());
         assert_eq!(state(&ha, "fan"), Some("ON".into()));
         assert_eq!(state(&ha, "pm25"), Some(PropertyValue::Int(8)));
+    }
+
+
+    #[test]
+    fn sleep_timer_payloads_parse_like_javascript_number() {
+        for (payload, minutes) in [(" 30 ", 30), ("0x1e", 30), ("30.0", 30)] {
+            let (_ha, thinq, dev) = with_base();
+            thinq.reset_recorder();
+            dev.set_property("sleep_timer-", payload);
+            assert_eq!(sent_tlvs(&thinq).get(&TAG_SLEEP_TIMER), Some(&minutes), "{payload:?}");
+        }
+        let (_ha, thinq, dev) = with_base();
+        thinq.reset_recorder();
+        dev.set_property("sleep_timer-", "abc");
+        assert!(thinq.outbox().is_empty());
     }
 }
