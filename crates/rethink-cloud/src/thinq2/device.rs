@@ -202,12 +202,17 @@ impl DeviceAcceptor {
             .pointer("/data/appInfo/DeviceType")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let package_id = deploy
+            .pointer("/data/appInfo/packageId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let meta = Metadata {
             model_id,
             model_name,
             device_type,
             sw_version,
+            package_id,
         };
 
         let device_slot: Arc<Mutex<Option<Arc<ConnectedDevice>>>> = Arc::new(Mutex::new(None));
@@ -486,7 +491,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn deploy_payload_is_forwarded_without_rac_placeholders() {
         let (_broker, manager, acc) = clip_acceptor();
         let did = "real-deploy";
@@ -521,6 +525,7 @@ mod tests {
         assert!(!forwarded.to_string().contains("690409"));
     }
 
+    #[test]
     fn pre_deploy_also_registers() {
         let (_broker, manager, acc) = clip_acceptor();
         let did = "pre-deploy-id";
@@ -553,6 +558,7 @@ mod tests {
         assert_eq!(dev.meta.model_name, "M");
         assert_eq!(dev.meta.device_type.as_deref(), Some("101"));
         assert_eq!(dev.meta.sw_version.as_deref(), Some("1.2.3"));
+        assert_eq!(dev.meta.package_id, None);
     }
 
     #[test]
@@ -576,6 +582,45 @@ mod tests {
         acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 1);
         let dev = manager.get(did).expect("registered");
         assert_eq!(dev.meta.sw_version.as_deref(), Some("clip_bkn_v1.9.238"));
+    }
+
+    #[test]
+    fn deploy_records_the_package_id() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "with-package-id";
+        // Captured from a 2REF11EIDG__4 deploy message.
+        let body = serde_json::json!({
+            "did": did,
+            "cmd": "deploy",
+            "kind": "2REF11EIDG__4",
+            "data": {
+                "appInfo": {
+                    "rollbackInfo": { "area_a": "clip_ble_v1.9.192", "active": "area_a", "area_b": "" },
+                    "modelName": "2REF11EIDG__4",
+                    "modelLanguage": "02",
+                    "softVer": "",
+                    "ruleVer": "",
+                    "countryCode": "WW",
+                    "subCountryCode": "DE",
+                    "appVersion": "clip_ble_v1.9.192",
+                    "modemType": "RTK_RTL8720cm",
+                    "regionalCode": "eic",
+                    "timezone": "+0100",
+                    "svcCode": "SVC202",
+                    "DeviceType": "101",
+                    "ruleEngine": "y",
+                    "protocolVer": "2",
+                    "oneshot": "y",
+                    "size": 2097152,
+                    "fwUpgradeInfo": { "upgSched": { "cmd": "none", "upgUtc": "0" } },
+                    "packageId": "4456820143800201|1",
+                    "schedFota": "y"
+                }
+            }
+        });
+        acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 1);
+        let dev = manager.get(did).expect("registered");
+        assert_eq!(dev.meta.package_id.as_deref(), Some("4456820143800201|1"));
     }
 
     #[test]

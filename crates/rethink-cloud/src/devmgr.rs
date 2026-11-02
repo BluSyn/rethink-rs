@@ -242,6 +242,7 @@ mod tests {
                 model_name: "RAC".into(),
                 device_type: Some("401".into()),
                 sw_version: None,
+                package_id: None,
             },
             Arc::new(|_b| {}),
             Arc::new(|_m| {}),

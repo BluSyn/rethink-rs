@@ -201,6 +201,7 @@ fn enum_devices(state: &MgmtState) -> Value {
             json!({
                 "model": dev.meta.model_id,
                 "deviceType": dev.meta.device_type,
+                "packageId": dev.meta.package_id,
                 "platform": match dev.platform {
                     Platform::Thinq1 => "thinq1",
                     Platform::Thinq2 => "thinq2",
@@ -1066,6 +1067,51 @@ async fn api_device_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::devmgr::ConnectedDevice;
+    use rethink_core::metadata::Metadata;
+
+    fn test_state(bridge: Option<Arc<Bridge>>) -> MgmtState {
+        let ha = rethink_core::ha::MockHaConnection::new();
+        MgmtState {
+            ha: ha.clone(),
+            ha_bridge: HaBridge::new(ha),
+            manager: DeviceManager::new(),
+            bridge,
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+            frame_log: FrameLog::new(),
+        }
+    }
+
+    fn connect_device(state: &MgmtState, id: &str, meta: Metadata) {
+        let dev = ConnectedDevice::new(
+            id.into(),
+            Platform::Thinq2,
+            meta,
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        );
+        state.manager.accept(dev);
+    }
+
+    #[test]
+    fn device_list_carries_the_package_id() {
+        let state = test_state(None);
+        let mut meta = Metadata::new("2REF11EIDG__4", "2REF11EIDG__4", "");
+        meta.package_id = Some("4456820143800201|1".into());
+        connect_device(&state, "fridge", meta);
+        let washer = Metadata::new("F3P2CYVAT__", "F3P2CYVAT__", "1");
+        connect_device(&state, "washer", washer);
+
+        let devices = enum_devices(&state);
+        assert_eq!(devices["fridge"]["packageId"], "4456820143800201|1");
+        assert!(devices["washer"]["packageId"].is_null());
+
+        let panel = include_str!("../../../html/panel.js");
+        assert!(
+            panel.contains("packageId: ${escapeHtml(this.remoteState.packageId)}"),
+            "the panel shows the packageId under the model, HTML-escaped"
+        );
+    }
 
     #[test]
     fn bridge_status_distinguishes_disabled_offline_and_online() {

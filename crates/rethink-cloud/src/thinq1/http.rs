@@ -119,6 +119,7 @@ async fn total_device_info(
                 model_name: model,
                 device_type: Some(dt),
                 sw_version: None,
+                package_id: None,
             },
         );
     }

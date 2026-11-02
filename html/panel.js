@@ -151,6 +151,10 @@ class DeviceEntry {
             : `<span class="chip chip-unmapped">raw</span>`
 
         const dtype = formatDeviceType(this.remoteState.deviceType)
+        // Not every device sends one; LG's backend takes it into account when picking the modelJSON.
+        const packageId = this.remoteState.packageId
+            ? `<div class="id-sub packageId">packageId: ${escapeHtml(this.remoteState.packageId)}</div>`
+            : ''
         this.row.innerHTML = `
             <td class="col-model">
                 <div>${escapeHtml(model)}${
@@ -160,7 +164,7 @@ class DeviceEntry {
                 }</div>
                 <div class="id-sub">${escapeHtml(shortId(this.id))}${
                     dtype !== '—' ? ' · ' + escapeHtml(dtype) : ''
-                }</div>
+                }</div>${packageId}
             </td>
             <td class="col-plat">${escapeHtml(platform)}</td>
             <td class="col-ha">${haChip}</td>
