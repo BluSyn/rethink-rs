@@ -1,0 +1,1282 @@
+//! 1WPD6CMIDR__3 — LG PuriCare WD722RH water purifier (device type 103, `wpState`).
+//!
+//! Long (`AA FF`) frames, class byte 0x12, in two families; offsets here are into the payload
+//! after `AA FF`. Config frames are a `0A` envelope holding an `EC` pair of 126-byte records,
+//! previous then current; only the current record is decoded. State frames carry the dispense
+//! amounts and the last outlet poured, behind a variable-length region (length at byte 10,
+//! starting at byte 12) that is cut out first.
+//!
+//! Every setting is written as a sparse 145-byte `F0 17` payload: 0xFF filler with one or two
+//! live bytes at the field's record offset + 2. The current record starts at byte 139 of the
+//! config frame, so the appliance's echo settles at write offset + 137. Only settings whose
+//! ThinQ-app TX frame was captured are writable; the ice maker, dispensing and sterilisation stay
+//! read-only. Nothing is polled or acked.
+//!
+//! Port of upstream PR #169.
+
+use crate::device_trait::DeviceHandler;
+use rethink_core::device_base::{default_config, process_enveloped_status, AabbDeviceCore};
+use rethink_core::{HaConnection, Metadata, PropertyValue, Thinq2Device};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
+use std::sync::Arc;
+
+const CLASS_BYTE: u8 = 0x12;
+const CONFIG_RECORD_LEN: usize = 126;
+const STATE_VAR_LEN_OFF: usize = 10;
+const STATE_VAR_START: usize = 12;
+/// What every state frame normalises to once the variable region is cut out.
+const STATE_LEN: usize = 330;
+const WRITE_HEADER: [u8; 2] = [0xf0, 0x17];
+const WRITE_LEN: usize = 145;
+/// LG's "no reading" sentinel, also the write filler.
+const IGNORE: u8 = 0xff;
+/// An outlet's amount slot reads this while it heats, before anything is poured.
+const PREPARING: u8 = 2;
+
+const ST_LAST_WATER_TYPE: usize = 22;
+const ST_NORMAL_AMOUNT: usize = 43;
+const ST_COLD_AMOUNT: usize = 45;
+const ST_HOT_AMOUNT: usize = 47;
+
+const OFF_COCK_STATE: usize = 1;
+const OFF_HOT_WATER_TEMP: usize = 6;
+const OFF_DEFAULT_WATER_SET: usize = 10;
+const OFF_DEFAULT_WATER_AMOUNT: usize = 11;
+const OFF_BUTTON_SOUND: usize = 12;
+const OFF_VOICE: usize = 13;
+const OFF_VOICE_VOLUME: usize = 14;
+const OFF_STERILIZE_STATE: usize = 23;
+const OFF_HOT_WATER_LOCK: usize = 26;
+const OFF_DND_MODE: usize = 83;
+const OFF_DND_START_HOUR: usize = 84;
+const OFF_DND_END_HOUR: usize = 86;
+const OFF_DEFAULT_HOT_WATER_TEMP: usize = 90;
+const OFF_ICE_MAKER: usize = 110;
+const OFF_ICE_LOCK: usize = 111;
+const OFF_ICE_LEVER: usize = 112;
+const OFF_DISPLAY_BRIGHTNESS: usize = 113;
+const OFF_TIME_FORMAT: usize = 114;
+const OFF_DEVICE_LOCK: usize = 115;
+const OFF_ICE_AMOUNT: usize = 116;
+const OFF_COLD_WATER: usize = 117;
+const OFF_PRODUCT_SOUND: usize = 118;
+const OFF_ICE_FIRST_MODE: usize = 119;
+const OFF_ALWAYS_ON_DISPLAY: usize = 120;
+const OFF_WAITING_SCREEN_CLOCK: usize = 121;
+const OFF_DISPLAY_DIMMING_MIN: usize = 122;
+const OFF_DISPLAY_OFF_MIN: usize = 123;
+const OFF_LEVER_DISPENSING_TYPE: usize = 124;
+const OFF_DND_ICE_MODE: usize = 125;
+
+const WATER_TYPES: &[(u8, &str)] = &[
+    (1, "HOT_WATER"),
+    (2, "NORMAL_WATER"),
+    (3, "COLD_WATER"),
+    (4, "STERILIZATION_WATER"),
+    // Not in the model JSON, but what this unit records after an ice pour.
+    (5, "ICE"),
+];
+const ICE_AMOUNTS: &[(u8, &str)] = &[
+    (0, "WAITING"),
+    (1, "DRYING_ICEDISABLE"),
+    (2, "DRYING_ICEENABLE"),
+    (3, "MAKING"),
+    (4, "FULL"),
+    (5, "ICE_ENOUGH"),
+];
+const STERILIZE_STATES: &[(u8, &str)] = &[
+    (0, "OFF"),
+    (1, "AUTO_DWP_A_TYPE"),
+    (2, "AUTO_DWP_B_TYPE"),
+    (3, "MANUAL_DWP_A_TYPE"),
+    (4, "FLUSH"),
+    (5, "CARE_CANCEL"),
+];
+const COCK_STATES: &[(u8, &str)] = &[(0, "OFF"), (1, "ON"), (2, "COCK_MANUAL_ON")];
+const DISPENSE_STATES: &[&str] = &["IDLE", "PREPARING", "DISPENSING"];
+const DEFAULT_WATER_SETS: &[(u8, &str)] =
+    &[(1, "RECENT_WATER"), (2, "NORMAL_WATER"), (3, "COLD_WATER")];
+const DEFAULT_WATER_AMOUNTS: &[(u8, &str)] = &[
+    (1, "PRESET_120ML"),
+    (2, "PRESET_250ML"),
+    (3, "PRESET_500ML"),
+    (4, "PRESET_1000ML"),
+    (5, "LAST_USED"),
+];
+const LEVER_DISPENSING_TYPES: &[(u8, &str)] = &[(0, "PRESSING"), (1, "CLICK")];
+const DEFAULT_HOT_WATER_TEMPS: &[(u8, &str)] = &[(1, "40"), (2, "70"), (3, "90")];
+/// Display brightness and voice volume presets. The wire carries the literal percent; the
+/// panel does not offer 0 %.
+const PERCENTS: &[(u8, &str)] = &[(20, "20"), (40, "40"), (60, "60"), (80, "80"), (100, "100")];
+const TIME_FORMATS: &[(u8, &str)] = &[(0, "12"), (1, "24")];
+/// The always-on and waiting-screen-clock bytes, written as a pair exactly as captured. The
+/// captured ALWAYS_ON and WAITING_SCREEN_CLOCK writes would decode as each other.
+const DISPLAY_MODES: &[(&str, u8, u8)] = &[
+    ("ALWAYS_ON", 0, 1),
+    ("WAITING_SCREEN_CLOCK", 1, 0),
+    ("OFF", 0, 0),
+];
+/// Writable 0/1 switches. Hot water lock is inverted on the wire: 0 is LOCK.
+const SWITCHES: &[(&str, usize, bool)] = &[
+    ("hot_water_lock", OFF_HOT_WATER_LOCK, true),
+    ("ice_lock", OFF_ICE_LOCK, false),
+    ("ice_lever", OFF_ICE_LEVER, false),
+    ("cold_water_enabled", OFF_COLD_WATER, false),
+    ("dnd_mode", OFF_DND_MODE, false),
+    ("dnd_ice_mode", OFF_DND_ICE_MODE, false),
+    ("ice_first_mode", OFF_ICE_FIRST_MODE, false),
+    ("product_sound", OFF_PRODUCT_SOUND, false),
+    ("button_sound", OFF_BUTTON_SOUND, false),
+    ("voice_guidance", OFF_VOICE, false),
+];
+
+fn label_of(table: &[(u8, &'static str)], code: u8) -> Option<&'static str> {
+    table.iter().find(|(c, _)| *c == code).map(|(_, l)| *l)
+}
+
+fn code_of(table: &[(u8, &str)], label: &str) -> Option<u8> {
+    table.iter().find(|(_, l)| *l == label).map(|(c, _)| *c)
+}
+
+fn labels(table: &[(u8, &'static str)]) -> Vec<&'static str> {
+    table.iter().map(|(_, l)| *l).collect()
+}
+
+/// `Number(value)` if it is a whole number within `range`.
+fn whole_number(value: &str, range: RangeInclusive<f64>) -> Option<u8> {
+    let n = crate::js::number(value)?;
+    (n.fract() == 0.0 && range.contains(&n)).then_some(n as u8)
+}
+
+/// Cuts the variable region out of a state frame. `None` for anything that does not then have
+/// the state layout, including a region that would run past the end.
+fn normalise_state(buf: &[u8]) -> Option<Vec<u8>> {
+    if buf.len() <= STATE_VAR_START {
+        return None;
+    }
+    let var_end = STATE_VAR_START + usize::from(buf[STATE_VAR_LEN_OFF]);
+    if var_end > buf.len() {
+        return None;
+    }
+    let state = [&buf[..STATE_VAR_START], &buf[var_end..]].concat();
+    (state.len() == STATE_LEN).then_some(state)
+}
+
+fn entity(platform: &str, id: &str, name: &str, extra: Value) -> (String, Value) {
+    let mut body = json!({
+        "platform": platform,
+        "unique_id": format!("$deviceid-{id}"),
+        "state_topic": format!("$this/{id}"),
+        "name": name,
+    });
+    if let (Some(body), Value::Object(extra)) = (body.as_object_mut(), extra) {
+        body.extend(extra);
+    }
+    (id.to_string(), body)
+}
+
+fn control(platform: &str, id: &str, name: &str, icon: &str, extra: Value) -> (String, Value) {
+    let (id, mut body) = entity(platform, id, name, extra);
+    body["command_topic"] = json!(format!("$this/{id}/set"));
+    body["icon"] = json!(icon);
+    body["entity_category"] = json!("config");
+    (id, body)
+}
+
+fn switch(id: &str, name: &str, icon: &str) -> (String, Value) {
+    control("switch", id, name, icon, json!({}))
+}
+
+fn select(id: &str, name: &str, options: Vec<&str>, icon: &str) -> (String, Value) {
+    control("select", id, name, icon, json!({ "options": options }))
+}
+
+fn number(
+    id: &str,
+    name: &str,
+    range: RangeInclusive<u8>,
+    icon: &str,
+    extra: Value,
+) -> (String, Value) {
+    let (id, mut body) = control("number", id, name, icon, extra);
+    body["min"] = json!(range.start());
+    body["max"] = json!(range.end());
+    body["step"] = json!(1);
+    (id, body)
+}
+
+fn components() -> HashMap<String, Value> {
+    let millilitres = |icon: &str| json!({ "unit_of_measurement": "mL", "icon": icon });
+    let diagnostic = |icon: &str| json!({ "icon": icon, "entity_category": "diagnostic" });
+    let minutes = json!({ "unit_of_measurement": "min" });
+    let display_modes = DISPLAY_MODES.iter().map(|(mode, ..)| *mode).collect();
+    [
+        entity("sensor", "last_water_type", "Last dispensed water", json!({ "device_class": "enum", "options": labels(WATER_TYPES), "icon": "mdi:water" })),
+        entity("sensor", "dispense_state", "Dispense state", json!({ "icon": "mdi:cup-water", "device_class": "enum", "options": DISPENSE_STATES })),
+        entity("binary_sensor", "dispensing", "Dispensing", json!({ "icon": "mdi:water-pump" })),
+        entity("sensor", "hot_water_amount", "Hot water poured", millilitres("mdi:kettle-steam")),
+        entity("sensor", "cold_water_amount", "Cold water poured", millilitres("mdi:snowflake")),
+        entity("sensor", "normal_water_amount", "Filtered water poured", millilitres("mdi:water")),
+        entity("sensor", "hot_water_temp", "Hot water temperature", json!({ "device_class": "temperature", "unit_of_measurement": "°C", "state_class": "measurement" })),
+        entity("sensor", "ice_status", "Ice status", json!({ "device_class": "enum", "options": labels(ICE_AMOUNTS), "icon": "mdi:snowflake-variant" })),
+        entity("sensor", "cock_state", "Outlet state", json!({ "device_class": "enum", "options": labels(COCK_STATES), "icon": "mdi:water-outline", "entity_category": "diagnostic" })),
+        entity("sensor", "sterilize_state", "Sterilisation mode", json!({ "device_class": "enum", "options": labels(STERILIZE_STATES), "icon": "mdi:shimmer", "entity_category": "diagnostic" })),
+        entity("binary_sensor", "sterilizing", "Sterilising", json!({ "icon": "mdi:shimmer" })),
+        switch("hot_water_lock", "Hot water lock", "mdi:lock"),
+        switch("ice_lock", "Ice lock", "mdi:lock"),
+        switch("ice_lever", "Ice-only lever", "mdi:toggle-switch"),
+        switch("ice_first_mode", "Ice-first mode", "mdi:snowflake-alert"),
+        entity("binary_sensor", "child_lock", "Child lock", diagnostic("mdi:lock")),
+        switch("cold_water_enabled", "Cold water enabled", "mdi:snowflake"),
+        switch("dnd_mode", "Do not disturb", "mdi:volume-off"),
+        switch("dnd_ice_mode", "Ice making during do not disturb", "mdi:snowflake-alert"),
+        number("dnd_start_hour", "Do not disturb start hour (UTC)", 0..=23, "mdi:clock-start", json!({})),
+        number("dnd_end_hour", "Do not disturb end hour (UTC)", 0..=23, "mdi:clock-end", json!({})),
+        entity("binary_sensor", "ice_maker", "Ice maker", diagnostic("mdi:snowflake-variant")),
+        select("display_brightness", "Display brightness", labels(PERCENTS), "mdi:brightness-6"),
+        select("time_format", "Time format", labels(TIME_FORMATS), "mdi:clock-outline"),
+        select("display_mode", "Display mode", display_modes, "mdi:monitor"),
+        number("display_dimming_min", "Display dimming timeout", 1..=30, "mdi:brightness-4", minutes.clone()),
+        number("display_off_min", "Display off timeout", 1..=30, "mdi:monitor-off", minutes),
+        switch("product_sound", "Product sound", "mdi:volume-high"),
+        select("voice_volume", "Voice volume", labels(PERCENTS), "mdi:volume-medium"),
+        switch("button_sound", "Button sound", "mdi:volume-medium"),
+        switch("voice_guidance", "Voice guidance", "mdi:account-voice"),
+        select("default_water_type", "Default water type", labels(DEFAULT_WATER_SETS), "mdi:cup-water"),
+        select("default_water_amount", "Default water amount", labels(DEFAULT_WATER_AMOUNTS), "mdi:cup"),
+        select("lever_dispensing_type", "Lever dispensing type", labels(LEVER_DISPENSING_TYPES), "mdi:gesture-tap-button"),
+        select("default_hot_water_temp", "Default hot water temperature", labels(DEFAULT_HOT_WATER_TEMPS), "mdi:thermometer"),
+    ]
+    .into_iter()
+    .collect()
+}
+
+pub struct Device {
+    core: Arc<AabbDeviceCore>,
+}
+
+impl Device {
+    pub fn new(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+    ) -> Arc<Self> {
+        let core = AabbDeviceCore::new(ha, thinq.clone());
+        let this = Arc::new(Self { core: core.clone() });
+        let mut config = default_config(&meta, Some(json!({"name": "LG Water Purifier"})));
+        config.components = components();
+        core.set_config(config);
+        let dev = this.clone();
+        thinq.on_data(Box::new(move |data| {
+            if let Some(inner) = dev.core.process_data_envelope(data) {
+                dev.process_aabb(inner);
+            }
+        }));
+        this
+    }
+
+    fn process_aabb(&self, buf: &[u8]) {
+        if let Some(rec) = process_enveloped_status(buf, CLASS_BYTE, CONFIG_RECORD_LEN) {
+            self.process_config(rec);
+        } else if let Some(state) = normalise_state(buf) {
+            self.process_state(&state);
+        }
+    }
+
+    fn process_state(&self, state: &[u8]) {
+        self.publish_enum("last_water_type", WATER_TYPES, state[ST_LAST_WATER_TYPE]);
+        let amounts = [
+            state[ST_HOT_AMOUNT],
+            state[ST_COLD_AMOUNT],
+            state[ST_NORMAL_AMOUNT],
+        ];
+        let preparing = amounts.contains(&PREPARING);
+        let [hot, cold, normal] = amounts.map(|a| if a == PREPARING { 0 } else { a });
+        let dispensing = hot > 0 || cold > 0 || normal > 0;
+        let dispense_state = if dispensing {
+            "DISPENSING"
+        } else if preparing {
+            "PREPARING"
+        } else {
+            "IDLE"
+        };
+        self.core
+            .publish_property("dispense_state", dispense_state.into());
+        self.core.publish_on_off("dispensing", dispensing);
+        self.core
+            .publish_property("hot_water_amount", i64::from(hot).into());
+        self.core
+            .publish_property("cold_water_amount", i64::from(cold).into());
+        self.core
+            .publish_property("normal_water_amount", i64::from(normal).into());
+    }
+
+    fn process_config(&self, rec: &[u8]) {
+        self.publish_enum("cock_state", COCK_STATES, rec[OFF_COCK_STATE]);
+        self.publish_enum("ice_status", ICE_AMOUNTS, rec[OFF_ICE_AMOUNT]);
+        let sterilize = rec[OFF_STERILIZE_STATE];
+        if self.publish_enum("sterilize_state", STERILIZE_STATES, sterilize) {
+            self.core.publish_on_off("sterilizing", sterilize != 0);
+        }
+        for &(prop, offset, inverted) in SWITCHES {
+            let on = if inverted {
+                rec[offset] == 0
+            } else {
+                rec[offset] == 1
+            };
+            self.core.publish_on_off(prop, on);
+        }
+        self.core
+            .publish_on_off("child_lock", rec[OFF_DEVICE_LOCK] == 1);
+        self.core
+            .publish_on_off("ice_maker", rec[OFF_ICE_MAKER] == 1);
+        // Raw UTC hours; the panel shows local time.
+        self.core
+            .publish_property("dnd_start_hour", i64::from(rec[OFF_DND_START_HOUR]).into());
+        self.core
+            .publish_property("dnd_end_hour", i64::from(rec[OFF_DND_END_HOUR]).into());
+        for (prop, offset) in [
+            ("display_brightness", OFF_DISPLAY_BRIGHTNESS),
+            ("voice_volume", OFF_VOICE_VOLUME),
+        ] {
+            if rec[offset] != IGNORE {
+                self.core
+                    .publish_property(prop, rec[offset].to_string().into());
+            }
+        }
+        let time_format = if rec[OFF_TIME_FORMAT] == 1 {
+            "24"
+        } else {
+            "12"
+        };
+        self.core
+            .publish_property("time_format", time_format.into());
+        let display_mode = if rec[OFF_ALWAYS_ON_DISPLAY] == 1 {
+            "ALWAYS_ON"
+        } else if rec[OFF_WAITING_SCREEN_CLOCK] == 1 {
+            "WAITING_SCREEN_CLOCK"
+        } else {
+            "OFF"
+        };
+        self.core
+            .publish_property("display_mode", display_mode.into());
+        for (prop, offset) in [
+            ("display_dimming_min", OFF_DISPLAY_DIMMING_MIN),
+            ("display_off_min", OFF_DISPLAY_OFF_MIN),
+        ] {
+            if rec[offset] != IGNORE {
+                self.core
+                    .publish_property(prop, i64::from(rec[offset]).into());
+            }
+        }
+        self.publish_enum(
+            "default_water_type",
+            DEFAULT_WATER_SETS,
+            rec[OFF_DEFAULT_WATER_SET],
+        );
+        self.publish_enum(
+            "default_water_amount",
+            DEFAULT_WATER_AMOUNTS,
+            rec[OFF_DEFAULT_WATER_AMOUNT],
+        );
+        self.publish_enum(
+            "lever_dispensing_type",
+            LEVER_DISPENSING_TYPES,
+            rec[OFF_LEVER_DISPENSING_TYPE],
+        );
+        self.publish_enum(
+            "default_hot_water_temp",
+            DEFAULT_HOT_WATER_TEMPS,
+            rec[OFF_DEFAULT_HOT_WATER_TEMP],
+        );
+        // The water being served, live only during a hot pour (the setpoint never goes on the
+        // wire). Cleared afterwards so a stale reading cannot linger.
+        let temp = rec[OFF_HOT_WATER_TEMP];
+        let temp: PropertyValue = if temp == IGNORE {
+            "None".into()
+        } else {
+            i64::from(temp).into()
+        };
+        self.core.publish_property("hot_water_temp", temp);
+    }
+
+    /// Publishes the label for `code`. An unlisted code leaves the previous value in place and
+    /// returns false.
+    fn publish_enum(&self, prop: &str, table: &[(u8, &'static str)], code: u8) -> bool {
+        let Some(label) = label_of(table, code) else {
+            return false;
+        };
+        self.core.publish_property(prop, label.into());
+        true
+    }
+
+    fn write(&self, fields: &[(usize, u8)]) {
+        let mut payload = [IGNORE; WRITE_LEN];
+        payload[..WRITE_HEADER.len()].copy_from_slice(&WRITE_HEADER);
+        for &(offset, value) in fields {
+            payload[WRITE_HEADER.len() + offset] = value;
+        }
+        self.core.send(&payload);
+    }
+}
+
+impl DeviceHandler for Device {
+    fn id(&self) -> &str {
+        &self.core.id
+    }
+    fn start(&self) {}
+    fn drop_device(&self) {
+        self.core.drop_device();
+    }
+    fn set_property(&self, prop: &str, value: &str) {
+        if let Some(&(_, offset, inverted)) = SWITCHES.iter().find(|(p, ..)| *p == prop) {
+            let on = match value {
+                "ON" => true,
+                "OFF" => false,
+                _ => return,
+            };
+            self.write(&[(offset, u8::from(on != inverted))]);
+            return;
+        }
+        let (offset, code) = match prop {
+            "display_mode" => {
+                if let Some(&(_, always_on, clock)) =
+                    DISPLAY_MODES.iter().find(|(m, ..)| *m == value)
+                {
+                    self.write(&[
+                        (OFF_ALWAYS_ON_DISPLAY, always_on),
+                        (OFF_WAITING_SCREEN_CLOCK, clock),
+                    ]);
+                }
+                return;
+            }
+            "dnd_start_hour" => (OFF_DND_START_HOUR, whole_number(value, 0.0..=23.0)),
+            "dnd_end_hour" => (OFF_DND_END_HOUR, whole_number(value, 0.0..=23.0)),
+            "display_dimming_min" => (OFF_DISPLAY_DIMMING_MIN, whole_number(value, 1.0..=30.0)),
+            "display_off_min" => (OFF_DISPLAY_OFF_MIN, whole_number(value, 1.0..=30.0)),
+            "display_brightness" => (OFF_DISPLAY_BRIGHTNESS, code_of(PERCENTS, value)),
+            "voice_volume" => (OFF_VOICE_VOLUME, code_of(PERCENTS, value)),
+            "time_format" => (OFF_TIME_FORMAT, code_of(TIME_FORMATS, value)),
+            "default_water_type" => (OFF_DEFAULT_WATER_SET, code_of(DEFAULT_WATER_SETS, value)),
+            "default_water_amount" => (
+                OFF_DEFAULT_WATER_AMOUNT,
+                code_of(DEFAULT_WATER_AMOUNTS, value),
+            ),
+            "lever_dispensing_type" => (
+                OFF_LEVER_DISPENSING_TYPE,
+                code_of(LEVER_DISPENSING_TYPES, value),
+            ),
+            "default_hot_water_temp" => (
+                OFF_DEFAULT_HOT_WATER_TEMP,
+                code_of(DEFAULT_HOT_WATER_TEMPS, value),
+            ),
+            _ => return,
+        };
+        if let Some(code) = code {
+            self.write(&[(offset, code)]);
+        }
+    }
+    fn publish_config(&self) {
+        self.core.republish_config();
+    }
+}
+
+pub fn create(
+    ha: Arc<dyn HaConnection>,
+    thinq: Arc<dyn Thinq2Device>,
+    meta: Metadata,
+) -> Arc<dyn DeviceHandler> {
+    Device::new(ha, thinq, meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{make_t2, DEVICE_ID};
+    use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device};
+
+    // State, idle (raw 336).
+    const IDLE: &str = "AAFF120A0150007F920002010200F50B070601033015980167FF0332000100390C0D3C01000000000000000000000000000000000006A3C119230DF901370138014E0158000F0113FFBA021BFFA9FFE00000000000000000000001008400DF0F2C0B3401C900640C1932640103370000000001010C5A0000000000000000000000000000000000000E0015000300FF00FF0057F0000500070000350000000029302961017AA3000000C701000000000000010000000000320005A000000000000100004600390102000451FFDA1E0800000000000144220A0001000000000000000000000000000000000003E803F602F201A5022C0300000000002000303436425700390104004503000082000000004734101F1FD91E06D22F010EFDFDFDEBC50AFCFC01FC0100004801E00000000000000000000000000000000000000000000000007847D90EEB2D1800E01B64BB";
+
+    // State, hot water preparing (amount slot 2), nothing else flowing.
+    const HOT_PREPARE: &str = "AAFF120A0151007FB40002010300F6050B070601033015980167FF01195A0100390C0D3C0A010000000000000000000000000000020006A8F9181C0EF9011B012C02C8022800340111FFB10230FFE0000300000080000001000000010186060A0E250C3401C100640C1932640103370000000001010C5A0000000000000000000000000000000000000E0015000300FF00FF00638E00050007000035010001002D302961017AA3037000C0053A003802AF03730877087A003F3205A000000000000100017F0044000208045100B17E0000000000000144200A0001000000F900000000000E0000000100000003E803F602F201A5024402000000000020003034364257008701040045030000820000000047300F1A1A011F06C02C0330FDFDFDE1F809FCFC01FC0100004901E000000000000000000000000000000000000000000000000078470130E12A1800E069F5BB";
+
+    // State, hot water preparing while a 120 mL cold pour finishes.
+    const HOT_PREPARE_DURING_COLD: &str = "AAFF120A0151007FA70002010300F6010B070601033015980167FF010C5A0100390C0D3C01000000000000000000000000007800020006A4A72B120EF9005C011A01370135000B0112FFC90228FF81FFA1000000000000000000000100847273211B0C3401C900640C1932640103370000000001010C5A0000000000000000000000000000000000000E0015000300FF00FF006110000500070000350101010033302961017AA301B800C4053A003B01640164046104E7003C3205A000000000000100016400440003030451FF341A0800000000000142220A0001000000000000000000000000000000000003E803F602F201A50232030000000000200030343642570092010400450300008200000000472F0E1D1DD91E05BD2A0106FDFDFDE1EE09FCFC01FC0100004801E00000000000000000000000000000000000000000000000007847D906E12A1800E02231BB";
+
+    // State, hot water dispensing 120 mL.
+    const HOT_DISPENSE: &str = "AAFF120A0151007FA80002010300F6030B070601033015980167FF010C5A0100390C0D3C01000101000001000000000000000000780006A5F908130EF903C0012203D203D8001F0111FFC30299FF79FF9F0000000000000100DA0001018902EA3A1B0C3401C900640C1932640103370000000001010C5A0000000000000000000000000000000000000E0015000300FF00FF006142000500070000340001010032302961017AA301AE00C0053A003B018C00F904E004A7003B3205A000000000000100016400450003030451FF33120800000000000142220A0001000000000000000000000000000000000003E803F602F201A50232030000000000200030343642570067010400450300008200000000472F0E1D1DD91E05BD2A0106FDFDFDE1EE09FCFC01FC0100004801E00000000000000000000000000000000000000000000000007847D906E12A1800E0EDE4BB";
+
+    // State, filtered water dispensing 120 mL.
+    const NORMAL120: &str = "AAFF120A0151007FAD0002010300F6030B070601033015980167FF020C000100390C0D3C01000101000100000000000078000000000006A71929140EF900F20123037D02AD001F0113FFB30240FF65FF960000000000000100E00001018902A81F1D0C3401C900640C1932640103370000000001010C5A0000000000000000000000000000000000000E0015000300FF00FF0061FC000500070000340001010033302961017AA3019000C5053A00390146014C0405045700393205A000000000000100016400440003030451FF21120800000000000142220A0001000000000000000000000000000000000003E803F602F201A5023203000000000020003034364257003401040045030000820000000047300F3A3A191E05BE2B0118FDFDFDE1F309FCFC01FC0100004801E000000000000000000000000000000000000000000000000078471918E12A1800E0DA03BB";
+
+    // State, cold water dispensing 250 mL (raw 337).
+    const COLD250: &str = "AAFF120A0151007FAF0002010300F6030B070601033015980167FF0319000100390C0D3C0100010100000000000100000000FA00000006A8F913170EF90070012303300295002F0111FFA00234FF57FF8D0000000000000101D90001018902C209200C3401C900640C1932640103370000000001010C5A0000000000000000000000000000000000000E0015000300FF00FF006338000500070000350101010033302961017AA3018600C3053A0039017F020604B7046500253205A000000000000100016400440003030451FF20120800000000000140200A000100770077007700050007000D010101000303E803F602F201A5023203000000000020003034364257005101040045030000820000000047300F3A3A191E05BE2B0118FDFDFDE1F309FCFC01FC0100004801E000000000000000000000000000000000000000000000000078471918E12A1800E0F845BB";
+
+    // Config, everything unlocked and all features on; hot water temperature slot 0xFF.
+    const CFG_IDLE: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000151CBB";
+
+    // Config, hot water at 90 °C.
+    const HOTTEMP90: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020001FF01015AFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A0000000000000000000000010000640000040101000000010200005EF7BB";
+
+    // Config, hot water lock engaged.
+    const HOTLOCK_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000000FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A00000000000000000000000100006400000401010000000102000029CDBB";
+
+    // Config, ice lock engaged.
+    const ICELOCK_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000000FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000000FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A0000000000000000000000010100640000040101000000010200002E56BB";
+
+    // Config, ice-only lever enabled.
+    const ICELEVER_ON: &str = "AAFF120A010E007FFF000100EC00FC020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A0000000000000000000000010001640000050101000000010200001EB2BB";
+
+    // Config, ice-first mode enabled.
+    const ICE_FIRST_ON: &str = "AAFF120A010E007FFF000100EC00FC020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010101000001020000DDB2BB";
+
+    // Config, child lock engaged.
+    const CHILDLOCK_ON: &str = "AAFF120A010E007FFF000100EC00FC020001FF01015AFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020001FF01015AFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A00000000000000000000000100006400010401010000000102000092C1BB";
+
+    // Config, ice maker switched off.
+    const ICEMAKER_OFF: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000000000064000004010100000001020000088FBB";
+
+    // Config, outlet high-temperature sterilisation running (FLUSH).
+    const STERILIZING: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000000000064000002010100000001020000020003FF0101FFFF0001010201003C090D0C390001000104000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000000000064000002010100000001020000216ABB";
+
+    // Config, do not disturb toggled on.
+    const DND_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000CA5FBB";
+
+    // Config, do not disturb toggled off.
+    const DND_OFF: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000268FBB";
+
+    // Config, ice making enabled while do not disturb is on.
+    const DND_ICE_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A0000000000000000000000010000640000040101000000010200015C24BB";
+
+    // Config, ice making disabled while do not disturb is on.
+    const DND_ICE_OFF: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020001020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A0000000000000000000000010000640000040101000000010200007AC1BB";
+
+    // Config, DND start set to 22:00 KST (13 UTC on the wire).
+    const DND_START_22KST: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010E001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010D001500FFFF0328465A000000005A0000000000000000000000010000640000040101000000010200001751BB";
+
+    // Config, DND end set to 05:00 KST (20 UTC on the wire).
+    const DND_END_05KST: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010D001500FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000020003FF0101FFFF0001010201003C090D0C390001000000000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF010D001400FFFF0328465A000000005A000000000000000000000001000064000004010100000001020000D49ABB";
+
+    // Config echoes of the captured settings writes.
+    const CFG_BRIGHTNESS_60: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A00000000000000000000000100003C0000050101000000010200002266BB";
+    const CFG_TIME_24: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064010005010100000001020000662DBB";
+    const CFG_ALWAYS_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000101020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100010001020000D1BFBB";
+    const CFG_WAITING_CLOCK: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000101020000CF09BB";
+    const CFG_DISPLAY_OFF: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001010064000005010100000001020000CBA4BB";
+    const CFG_DIMMING_5: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000005020000AFA9BB";
+    const CFG_OFFMIN_5: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001050000E0C8BB";
+    const CFG_PRODUCT_SOUND_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001010064000005010100000001020000CBA4BB";
+    const CFG_VOLUME_20: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF00010102010014090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000BAB1BB";
+    const CFG_BUTTON_SOUND_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001010064000005010100000001020000CBA4BB";
+    const CFG_VOICE_ON: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201013C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000261FBB";
+    const CFG_WATER_NORMAL: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001020201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A0000000000000000000000010000640000050101000000010200000493BB";
+    const CFG_AMOUNT_1000: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010401003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A00000000000000000000000100006400000501010000000102000036F1BB";
+    const CFG_LEVER_CLICK: &str = "AAFF120A010E007FFF000100EC00FC020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000020003FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A0000000000000000000000010000640000050101000000010201005669BB";
+
+    // Exact ThinQ-app TX frames captured from this appliance.
+    const ICE_LOCK_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const ICE_LOCK_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const ICE_LEVER_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const ICE_LEVER_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const ICE_FIRST_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const ICE_FIRST_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const HOT_LOCK_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const HOT_UNLOCK_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const COLD_WATER_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const COLD_WATER_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const DND_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const DND_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const DND_ICE_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const DND_ICE_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const DND_START_22KST_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0DFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF90BB";
+    const DND_END_05KST_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF14FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF99BB";
+    const BRIGHTNESS_60_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF3CFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA1BB";
+    const BRIGHTNESS_100_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF64FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF49BB";
+    const BRIGHTNESS_20_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF14FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF99BB";
+    const BRIGHTNESS_40_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF28FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFB5BB";
+    const BRIGHTNESS_80_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF50FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5DBB";
+    const TIME_FORMAT_24_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const TIME_FORMAT_12_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const DISPLAY_ALWAYS_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0001FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFBB";
+    const DISPLAY_WAITING_CLOCK_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0100FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFBB";
+    const DISPLAY_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const DIMMING_5_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF05FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8BB";
+    const DIMMING_1_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const OFF_MIN_5_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF05FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8BB";
+    const OFF_MIN_2_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF02FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFBB";
+    const PRODUCT_SOUND_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const PRODUCT_SOUND_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const VOLUME_20_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFF14FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF99BB";
+    const VOLUME_60_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFF3CFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA1BB";
+    const BUTTON_SOUND_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const BUTTON_SOUND_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const VOICE_ON_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const VOICE_OFF_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const WATER_TYPE_NORMAL_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFF02FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFBB";
+    const WATER_TYPE_COLD_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFF03FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEEBB";
+    const WATER_TYPE_RECENT_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const AMOUNT_1000_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFF04FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE9BB";
+    const AMOUNT_250_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFF02FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFBB";
+    const AMOUNT_LAST_USED_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFF05FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8BB";
+    const AMOUNT_120_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const AMOUNT_500_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFF03FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEEBB";
+    const LEVER_CLICK_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const LEVER_PRESSING_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEDBB";
+    const HOT_TEMP_40_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFECBB";
+    const HOT_TEMP_70_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF02FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFBB";
+    const HOT_TEMP_90_TX: &str = "AA95F017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF03FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEEBB";
+
+    // Config, default hot water temperature set to 90.
+    const CFG_HOT_TEMP_90: &str = "AAFF120A010E007FFF000100EC00FC020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0228465A000000005A000000000000000000000001000064000005010100000001020000020103FF0101FFFF0001010201003C090D0C390001000100000001FF0000000C193264FC03003701015A0C010000000000000000FFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000E001500FFFF0328465A000000005A000000000000000000000001000064000005010100000001020000A56FBB";
+
+    fn make() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        make_t2("1WPD6CMIDR__3", Device::new)
+    }
+
+    fn feed(frame: &str) -> Arc<MockHaConnection> {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(frame));
+        ha
+    }
+
+    fn value(ha: &MockHaConnection, name: &str) -> Option<PropertyValue> {
+        ha.device(DEVICE_ID)?.properties.get(name).cloned()
+    }
+
+    fn int(n: i64) -> Option<PropertyValue> {
+        Some(PropertyValue::Int(n))
+    }
+
+    fn text(s: &str) -> Option<PropertyValue> {
+        Some(PropertyValue::Str(s.into()))
+    }
+
+    fn sent(thinq: &MockThinq2Device) -> Vec<String> {
+        thinq.outbox().iter().map(|p| hex_encode(p)).collect()
+    }
+
+    #[test]
+    fn publishes_its_discovery_config_on_construction() {
+        let (ha, _, _) = make();
+        let components = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        for id in ["ice_lock", "ice_lever", "ice_first_mode"] {
+            assert_eq!(components[id]["platform"], "switch", "{id}");
+            assert_eq!(
+                components[id]["command_topic"],
+                format!("$this/{id}/set"),
+                "{id}"
+            );
+        }
+        const WRITABLE: &[&str] = &[
+            "ice_lock",
+            "ice_lever",
+            "ice_first_mode",
+            "hot_water_lock",
+            "cold_water_enabled",
+            "dnd_mode",
+            "dnd_ice_mode",
+            "dnd_start_hour",
+            "dnd_end_hour",
+            "display_brightness",
+            "time_format",
+            "display_mode",
+            "display_dimming_min",
+            "display_off_min",
+            "product_sound",
+            "voice_volume",
+            "button_sound",
+            "voice_guidance",
+            "default_water_type",
+            "default_water_amount",
+            "lever_dispensing_type",
+            "default_hot_water_temp",
+        ];
+        // Only commands captured from this exact model may be exposed.
+        for (name, component) in &components {
+            if WRITABLE.contains(&name.as_str()) {
+                continue;
+            }
+            assert!(
+                component.get("command_topic").is_none(),
+                "{name} must remain read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_no_dispense_in_progress() {
+        let ha = feed(IDLE);
+        assert_eq!(value(&ha, "dispensing"), text("OFF"));
+        assert_eq!(value(&ha, "hot_water_amount"), int(0));
+        assert_eq!(value(&ha, "cold_water_amount"), int(0));
+        assert_eq!(value(&ha, "normal_water_amount"), int(0));
+    }
+
+    #[test]
+    fn hot_water_preparing_is_not_yet_dispensing() {
+        // The prepare stage is encoded as amount 2, which must not be reported as 2 mL poured.
+        let ha = feed(HOT_PREPARE);
+        assert_eq!(value(&ha, "dispense_state"), text("PREPARING"));
+        assert_eq!(value(&ha, "dispensing"), text("OFF"));
+        assert_eq!(value(&ha, "hot_water_amount"), int(0));
+    }
+
+    #[test]
+    fn a_real_pour_outranks_another_outlet_that_is_still_preparing() {
+        let ha = feed(HOT_PREPARE_DURING_COLD);
+        assert_eq!(value(&ha, "dispense_state"), text("DISPENSING"));
+        assert_eq!(value(&ha, "dispensing"), text("ON"));
+        assert_eq!(value(&ha, "cold_water_amount"), int(120));
+        assert_eq!(value(&ha, "hot_water_amount"), int(0));
+    }
+
+    #[test]
+    fn hot_water_dispensing_120_ml() {
+        let ha = feed(HOT_DISPENSE);
+        assert_eq!(value(&ha, "dispense_state"), text("DISPENSING"));
+        assert_eq!(value(&ha, "dispensing"), text("ON"));
+        assert_eq!(value(&ha, "hot_water_amount"), int(120));
+        assert_eq!(value(&ha, "last_water_type"), text("HOT_WATER"));
+    }
+
+    #[test]
+    fn filtered_water_dispensing_120_ml() {
+        let ha = feed(NORMAL120);
+        assert_eq!(value(&ha, "dispensing"), text("ON"));
+        assert_eq!(value(&ha, "normal_water_amount"), int(120));
+        assert_eq!(value(&ha, "last_water_type"), text("NORMAL_WATER"));
+    }
+
+    #[test]
+    fn cold_water_dispensing_250_ml() {
+        let ha = feed(COLD250);
+        assert_eq!(value(&ha, "dispensing"), text("ON"));
+        assert_eq!(value(&ha, "cold_water_amount"), int(250));
+        assert_eq!(value(&ha, "last_water_type"), text("COLD_WATER"));
+    }
+
+    #[test]
+    fn the_last_dispensed_water_type_persists_once_the_pour_ends() {
+        // The byte only advances when a dispense begins; cycling the panel selection without
+        // pouring leaves the state frame byte-identical.
+        assert_eq!(value(&feed(IDLE), "last_water_type"), text("COLD_WATER"));
+    }
+
+    #[test]
+    fn state_frames_of_337_and_336_bytes_decode_to_the_same_field_offsets() {
+        assert_eq!(value(&feed(COLD250), "cold_water_amount"), int(250));
+        assert_eq!(value(&feed(IDLE), "cold_water_amount"), int(0));
+    }
+
+    #[test]
+    fn all_locks_released_all_features_on() {
+        let ha = feed(CFG_IDLE);
+        assert_eq!(value(&ha, "hot_water_lock"), text("OFF"));
+        assert_eq!(value(&ha, "ice_lock"), text("OFF"));
+        assert_eq!(value(&ha, "child_lock"), text("OFF"));
+        assert_eq!(value(&ha, "cold_water_enabled"), text("ON"));
+        assert_eq!(value(&ha, "ice_maker"), text("ON"));
+        assert_eq!(value(&ha, "sterilizing"), text("OFF"));
+    }
+
+    #[test]
+    fn hot_water_lock_engaged() {
+        assert_eq!(value(&feed(HOTLOCK_ON), "hot_water_lock"), text("ON"));
+    }
+
+    #[test]
+    fn ice_lock_engaged() {
+        assert_eq!(value(&feed(ICELOCK_ON), "ice_lock"), text("ON"));
+    }
+
+    #[test]
+    fn ice_only_lever_enabled() {
+        assert_eq!(value(&feed(ICELEVER_ON), "ice_lever"), text("ON"));
+    }
+
+    #[test]
+    fn ice_first_mode_enabled() {
+        assert_eq!(value(&feed(ICE_FIRST_ON), "ice_first_mode"), text("ON"));
+    }
+
+    #[test]
+    fn child_lock_engaged() {
+        assert_eq!(value(&feed(CHILDLOCK_ON), "child_lock"), text("ON"));
+    }
+
+    #[test]
+    fn ice_maker_switched_off() {
+        assert_eq!(value(&feed(ICEMAKER_OFF), "ice_maker"), text("OFF"));
+    }
+
+    #[test]
+    fn high_temperature_sterilisation_running() {
+        let ha = feed(STERILIZING);
+        assert_eq!(value(&ha, "sterilizing"), text("ON"));
+        assert_eq!(value(&ha, "sterilize_state"), text("FLUSH"));
+    }
+
+    #[test]
+    fn hot_water_tank_temperature() {
+        assert_eq!(value(&feed(HOTTEMP90), "hot_water_temp"), int(90));
+    }
+
+    #[test]
+    fn hot_water_temperature_clears_when_the_pour_ends() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(HOTTEMP90));
+        assert_eq!(value(&ha, "hot_water_temp"), int(90));
+        thinq.emit_data(&hex_decode(CFG_IDLE));
+        assert_eq!(value(&ha, "hot_water_temp"), text("None"));
+    }
+
+    #[test]
+    fn ice_status_is_decoded() {
+        assert_eq!(value(&feed(CFG_IDLE), "ice_status"), text("FULL"));
+        assert_eq!(value(&feed(ICEMAKER_OFF), "ice_status"), text("FULL"));
+    }
+
+    #[test]
+    fn cock_state_is_decoded() {
+        // Captured while the outlet was still running.
+        assert_eq!(value(&feed(CFG_IDLE), "cock_state"), text("ON"));
+    }
+
+    #[test]
+    fn do_not_disturb_is_decoded() {
+        assert_eq!(value(&feed(DND_ON), "dnd_mode"), text("ON"));
+        assert_eq!(value(&feed(DND_OFF), "dnd_mode"), text("OFF"));
+    }
+
+    #[test]
+    fn ice_making_during_do_not_disturb_is_decoded() {
+        assert_eq!(value(&feed(DND_ICE_ON), "dnd_ice_mode"), text("ON"));
+        assert_eq!(value(&feed(DND_ICE_OFF), "dnd_ice_mode"), text("OFF"));
+    }
+
+    #[test]
+    fn do_not_disturb_hours_are_decoded_as_raw_utc() {
+        // The panel showed 22:00 / 06:00 KST; the wire carries (KST hour - 9) mod 24.
+        let ha = feed(DND_START_22KST);
+        assert_eq!(value(&ha, "dnd_start_hour"), int(13));
+        assert_eq!(value(&ha, "dnd_end_hour"), int(21));
+        assert_eq!(value(&feed(DND_END_05KST), "dnd_end_hour"), int(20));
+    }
+
+    #[test]
+    fn display_brightness_is_decoded() {
+        assert_eq!(
+            value(&feed(CFG_BRIGHTNESS_60), "display_brightness"),
+            text("60")
+        );
+    }
+
+    #[test]
+    fn time_format_is_decoded() {
+        assert_eq!(value(&feed(CFG_TIME_24), "time_format"), text("24"));
+    }
+
+    #[test]
+    fn display_mode_is_decoded_for_all_three_captured_states() {
+        assert_eq!(
+            value(&feed(CFG_ALWAYS_ON), "display_mode"),
+            text("ALWAYS_ON")
+        );
+        assert_eq!(
+            value(&feed(CFG_WAITING_CLOCK), "display_mode"),
+            text("WAITING_SCREEN_CLOCK")
+        );
+        assert_eq!(value(&feed(CFG_DISPLAY_OFF), "display_mode"), text("OFF"));
+    }
+
+    #[test]
+    fn display_dimming_and_off_timeouts_are_decoded_in_minutes() {
+        assert_eq!(value(&feed(CFG_DIMMING_5), "display_dimming_min"), int(5));
+        assert_eq!(value(&feed(CFG_OFFMIN_5), "display_off_min"), int(5));
+    }
+
+    #[test]
+    fn product_sound_button_sound_and_voice_guidance_are_decoded() {
+        assert_eq!(
+            value(&feed(CFG_PRODUCT_SOUND_ON), "product_sound"),
+            text("ON")
+        );
+        assert_eq!(
+            value(&feed(CFG_BUTTON_SOUND_ON), "button_sound"),
+            text("ON")
+        );
+        assert_eq!(value(&feed(CFG_VOICE_ON), "voice_guidance"), text("ON"));
+    }
+
+    #[test]
+    fn voice_volume_is_decoded() {
+        assert_eq!(value(&feed(CFG_VOLUME_20), "voice_volume"), text("20"));
+    }
+
+    #[test]
+    fn default_water_type_and_amount_preset_are_decoded() {
+        assert_eq!(
+            value(&feed(CFG_WATER_NORMAL), "default_water_type"),
+            text("NORMAL_WATER")
+        );
+        assert_eq!(
+            value(&feed(CFG_AMOUNT_1000), "default_water_amount"),
+            text("PRESET_1000ML")
+        );
+    }
+
+    #[test]
+    fn lever_dispensing_type_is_decoded() {
+        assert_eq!(
+            value(&feed(CFG_LEVER_CLICK), "lever_dispensing_type"),
+            text("CLICK")
+        );
+    }
+
+    #[test]
+    fn frames_without_the_aabb_envelope_are_ignored() {
+        assert_eq!(value(&feed("001122"), "dispensing"), None);
+    }
+
+    #[test]
+    fn an_aabb_frame_of_unknown_length_is_ignored() {
+        assert_eq!(value(&feed("AA06FFFFFF55BB"), "dispensing"), None);
+    }
+
+    #[test]
+    fn a_truncated_state_frame_does_not_panic_or_publish() {
+        assert_eq!(
+            value(&feed("AAFF120A0151007FA8000201030000BB"), "dispensing"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_state_frame_whose_variable_region_length_overruns_the_buffer_is_ignored() {
+        let mut bad = hex_decode(IDLE);
+        bad[12] = 0xff;
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&bad);
+        assert_eq!(value(&ha, "dispensing"), None);
+    }
+
+    #[test]
+    fn ice_lock_on_and_off_reproduce_the_captured_frames_byte_for_byte() {
+        let (_, thinq, dev) = make();
+        dev.set_property("ice_lock", "ON");
+        dev.set_property("ice_lock", "OFF");
+        assert_eq!(sent(&thinq), [ICE_LOCK_ON_TX, ICE_LOCK_OFF_TX]);
+    }
+
+    #[test]
+    fn ice_only_lever_on_and_off_reproduce_the_captured_frames_byte_for_byte() {
+        let (_, thinq, dev) = make();
+        dev.set_property("ice_lever", "ON");
+        dev.set_property("ice_lever", "OFF");
+        assert_eq!(sent(&thinq), [ICE_LEVER_ON_TX, ICE_LEVER_OFF_TX]);
+    }
+
+    #[test]
+    fn ice_first_mode_on_and_off_reproduce_the_captured_frames_byte_for_byte() {
+        let (_, thinq, dev) = make();
+        dev.set_property("ice_first_mode", "ON");
+        dev.set_property("ice_first_mode", "OFF");
+        assert_eq!(sent(&thinq), [ICE_FIRST_ON_TX, ICE_FIRST_OFF_TX]);
+    }
+
+    #[test]
+    fn invalid_values_and_uncaptured_properties_never_transmit() {
+        let (_, thinq, dev) = make();
+        dev.set_property("ice_lock", "INVALID");
+        dev.set_property("ice_maker", "OFF");
+        dev.set_property("does-not-exist", "ON");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn default_hot_water_temperature_reproduces_every_captured_preset() {
+        let (_, thinq, dev) = make();
+        dev.set_property("default_hot_water_temp", "40");
+        dev.set_property("default_hot_water_temp", "70");
+        dev.set_property("default_hot_water_temp", "90");
+        assert_eq!(
+            sent(&thinq),
+            [HOT_TEMP_40_TX, HOT_TEMP_70_TX, HOT_TEMP_90_TX]
+        );
+    }
+
+    #[test]
+    fn default_hot_water_temperature_is_decoded() {
+        assert_eq!(
+            value(&feed(CFG_HOT_TEMP_90), "default_hot_water_temp"),
+            text("90")
+        );
+    }
+
+    #[test]
+    fn hot_water_lock_on_and_off_reproduce_the_captured_frames_inverted() {
+        let (_, thinq, dev) = make();
+        dev.set_property("hot_water_lock", "ON");
+        dev.set_property("hot_water_lock", "OFF");
+        assert_eq!(sent(&thinq), [HOT_LOCK_TX, HOT_UNLOCK_TX]);
+    }
+
+    #[test]
+    fn cold_water_enable_on_and_off_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("cold_water_enabled", "OFF");
+        dev.set_property("cold_water_enabled", "ON");
+        assert_eq!(sent(&thinq), [COLD_WATER_OFF_TX, COLD_WATER_ON_TX]);
+    }
+
+    #[test]
+    fn do_not_disturb_on_and_off_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("dnd_mode", "ON");
+        dev.set_property("dnd_mode", "OFF");
+        assert_eq!(sent(&thinq), [DND_ON_TX, DND_OFF_TX]);
+    }
+
+    #[test]
+    fn ice_making_during_do_not_disturb_on_and_off_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("dnd_ice_mode", "ON");
+        dev.set_property("dnd_ice_mode", "OFF");
+        assert_eq!(sent(&thinq), [DND_ICE_ON_TX, DND_ICE_OFF_TX]);
+    }
+
+    #[test]
+    fn do_not_disturb_hours_write_the_raw_utc_value() {
+        let (_, thinq, dev) = make();
+        dev.set_property("dnd_start_hour", "13"); // 22:00 KST
+        dev.set_property("dnd_end_hour", "20"); // 05:00 KST
+        assert_eq!(sent(&thinq), [DND_START_22KST_TX, DND_END_05KST_TX]);
+    }
+
+    #[test]
+    fn do_not_disturb_hours_reject_out_of_range_values() {
+        let (_, thinq, dev) = make();
+        dev.set_property("dnd_start_hour", "24");
+        dev.set_property("dnd_start_hour", "-1");
+        dev.set_property("dnd_end_hour", "not-a-number");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn display_brightness_reproduces_every_captured_percent_literally() {
+        let (_, thinq, dev) = make();
+        for percent in ["60", "100", "20", "40", "80"] {
+            dev.set_property("display_brightness", percent);
+        }
+        assert_eq!(
+            sent(&thinq),
+            [
+                BRIGHTNESS_60_TX,
+                BRIGHTNESS_100_TX,
+                BRIGHTNESS_20_TX,
+                BRIGHTNESS_40_TX,
+                BRIGHTNESS_80_TX,
+            ]
+        );
+    }
+
+    #[test]
+    fn display_brightness_rejects_the_uncaptured_0_percent_option() {
+        let (_, thinq, dev) = make();
+        dev.set_property("display_brightness", "0");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn time_format_24_and_12_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("time_format", "24");
+        dev.set_property("time_format", "12");
+        assert_eq!(sent(&thinq), [TIME_FORMAT_24_TX, TIME_FORMAT_12_TX]);
+    }
+
+    #[test]
+    fn display_mode_writes_the_captured_mutually_exclusive_byte_pairs() {
+        let (_, thinq, dev) = make();
+        dev.set_property("display_mode", "ALWAYS_ON");
+        dev.set_property("display_mode", "WAITING_SCREEN_CLOCK");
+        dev.set_property("display_mode", "OFF");
+        assert_eq!(
+            sent(&thinq),
+            [
+                DISPLAY_ALWAYS_ON_TX,
+                DISPLAY_WAITING_CLOCK_TX,
+                DISPLAY_OFF_TX
+            ]
+        );
+    }
+
+    #[test]
+    fn display_dimming_timeout_reproduces_the_captured_minute_values() {
+        let (_, thinq, dev) = make();
+        dev.set_property("display_dimming_min", "5");
+        dev.set_property("display_dimming_min", "1");
+        assert_eq!(sent(&thinq), [DIMMING_5_TX, DIMMING_1_TX]);
+    }
+
+    #[test]
+    fn display_dimming_timeout_rejects_out_of_range_minutes() {
+        let (_, thinq, dev) = make();
+        dev.set_property("display_dimming_min", "0");
+        dev.set_property("display_dimming_min", "31");
+        dev.set_property("display_dimming_min", "not-a-number");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn display_off_timeout_reproduces_the_captured_minute_values() {
+        let (_, thinq, dev) = make();
+        dev.set_property("display_off_min", "5");
+        dev.set_property("display_off_min", "2");
+        assert_eq!(sent(&thinq), [OFF_MIN_5_TX, OFF_MIN_2_TX]);
+    }
+
+    #[test]
+    fn product_sound_on_and_off_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("product_sound", "OFF");
+        dev.set_property("product_sound", "ON");
+        assert_eq!(sent(&thinq), [PRODUCT_SOUND_OFF_TX, PRODUCT_SOUND_ON_TX]);
+    }
+
+    #[test]
+    fn voice_volume_reproduces_the_captured_percent_literals() {
+        let (_, thinq, dev) = make();
+        dev.set_property("voice_volume", "20");
+        dev.set_property("voice_volume", "60");
+        assert_eq!(sent(&thinq), [VOLUME_20_TX, VOLUME_60_TX]);
+    }
+
+    #[test]
+    fn voice_volume_rejects_the_uncaptured_0_percent_option() {
+        let (_, thinq, dev) = make();
+        dev.set_property("voice_volume", "0");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn button_sound_on_and_off_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("button_sound", "OFF");
+        dev.set_property("button_sound", "ON");
+        assert_eq!(sent(&thinq), [BUTTON_SOUND_OFF_TX, BUTTON_SOUND_ON_TX]);
+    }
+
+    #[test]
+    fn voice_guidance_on_and_off_reproduce_the_captured_frames() {
+        let (_, thinq, dev) = make();
+        dev.set_property("voice_guidance", "ON");
+        dev.set_property("voice_guidance", "OFF");
+        assert_eq!(sent(&thinq), [VOICE_ON_TX, VOICE_OFF_TX]);
+    }
+
+    #[test]
+    fn default_water_type_reproduces_every_captured_selection() {
+        let (_, thinq, dev) = make();
+        dev.set_property("default_water_type", "NORMAL_WATER");
+        dev.set_property("default_water_type", "COLD_WATER");
+        dev.set_property("default_water_type", "RECENT_WATER");
+        assert_eq!(
+            sent(&thinq),
+            [
+                WATER_TYPE_NORMAL_TX,
+                WATER_TYPE_COLD_TX,
+                WATER_TYPE_RECENT_TX
+            ]
+        );
+    }
+
+    #[test]
+    fn default_water_amount_reproduces_every_captured_preset() {
+        let (_, thinq, dev) = make();
+        for preset in [
+            "PRESET_1000ML",
+            "PRESET_250ML",
+            "LAST_USED",
+            "PRESET_120ML",
+            "PRESET_500ML",
+        ] {
+            dev.set_property("default_water_amount", preset);
+        }
+        assert_eq!(
+            sent(&thinq),
+            [
+                AMOUNT_1000_TX,
+                AMOUNT_250_TX,
+                AMOUNT_LAST_USED_TX,
+                AMOUNT_120_TX,
+                AMOUNT_500_TX,
+            ]
+        );
+    }
+
+    #[test]
+    fn lever_dispensing_type_reproduces_both_captured_modes() {
+        let (_, thinq, dev) = make();
+        dev.set_property("lever_dispensing_type", "CLICK");
+        dev.set_property("lever_dispensing_type", "PRESSING");
+        assert_eq!(sent(&thinq), [LEVER_CLICK_TX, LEVER_PRESSING_TX]);
+    }
+
+    #[test]
+    fn a_select_property_sent_an_unrecognised_label_never_transmits() {
+        let (_, thinq, dev) = make();
+        dev.set_property("default_water_type", "NOT_A_REAL_OPTION");
+        dev.set_property("lever_dispensing_type", "NOT_A_REAL_OPTION");
+        assert!(thinq.outbox().is_empty());
+    }
+
+    #[test]
+    fn every_published_enum_value_is_declared_in_its_options_list() {
+        // device_class enum rejects any state outside `options`, except the "None" payload.
+        let (ha, thinq, _) = make();
+        for frame in [
+            IDLE,
+            COLD250,
+            HOT_PREPARE,
+            HOT_PREPARE_DURING_COLD,
+            HOT_DISPENSE,
+            NORMAL120,
+            CFG_IDLE,
+            HOTTEMP90,
+            HOTLOCK_ON,
+            ICELOCK_ON,
+            CHILDLOCK_ON,
+            ICEMAKER_OFF,
+            STERILIZING,
+        ] {
+            thinq.emit_data(&hex_decode(frame));
+        }
+        let device = ha.device(DEVICE_ID).unwrap();
+        let components = device.config.unwrap().components;
+        let enums: Vec<_> = components
+            .iter()
+            .filter(|(_, c)| c["device_class"] == "enum")
+            .collect();
+        assert!(!enums.is_empty(), "expected enum-classed entities");
+        for (id, component) in enums {
+            let Some(published) = device.properties.get(id) else {
+                continue;
+            };
+            let published = published.as_string();
+            let options = component["options"].as_array().unwrap();
+            assert!(
+                published == "None" || options.iter().any(|o| *o == published.as_str()),
+                "{id} published {published:?}, absent from options {options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_resolves() {
+        assert!(crate::registry::t2_factory("1WPD6CMIDR__3").is_some());
+    }
+}

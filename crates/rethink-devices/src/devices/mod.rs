@@ -106,6 +106,7 @@ register_devices! {
         studio_hood => { "STUDIO_HOOD" },
         hwwa9k_f2 => { "HWWA9K_F2" },
         dev_1wpu4cigcr__2 => { "1WPU4CIGCR__2" },
+        dev_1wpd6cmidr__3 => { "1WPD6CMIDR__3" },
         pac_910604_ww => { "PAC_910604_WW" },
         air_910604_ww => { "AIR_910604_WW" },
         st_b_e4h01y_apl => { "ST_B_E4H01Y_APL" },
