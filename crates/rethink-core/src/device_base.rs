@@ -264,6 +264,16 @@ pub struct TlvDeviceCore {
 
 impl TlvDeviceCore {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>) -> Arc<Self> {
+        Self::with_caps_query(ha, thinq, true)
+    }
+
+    /// `query_caps` false is for appliances that report state unprompted and do not answer the
+    /// caps query: nothing is queried, and values responses count from the start.
+    pub fn with_caps_query(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        query_caps: bool,
+    ) -> Arc<Self> {
         let core = Arc::new(Self {
             id: thinq.id().to_string(),
             ha,
@@ -273,7 +283,7 @@ impl TlvDeviceCore {
             fields_by_ha: Mutex::new(HashMap::new()),
             raw_clip_state: Mutex::new(tlv_u32_slots()),
             publish_cache: Mutex::new(HashMap::new()),
-            waiting_caps: AtomicBool::new(true),
+            waiting_caps: AtomicBool::new(query_caps),
             waiting_values: AtomicBool::new(false),
             on_caps: Mutex::new(None),
             on_values: Mutex::new(None),
@@ -286,8 +296,9 @@ impl TlvDeviceCore {
         });
         let c = core.clone();
         thinq.on_data(Box::new(move |data| c.process_data(data)));
-        // initial caps query
-        core.query_caps();
+        if query_caps {
+            core.query_caps();
+        }
         core
     }
 
@@ -872,6 +883,25 @@ mod tests {
         core.set_raw(0x400, 1);
         assert_eq!(core.get_raw(0x400), None);
         assert_eq!(core.get_raw(0xffff), None);
+    }
+
+    #[test]
+    fn tlv_without_caps_query_sends_nothing_and_takes_values_at_once() {
+        let ha = Arc::new(CountingHa {
+            pubs: Mutex::new(Vec::new()),
+        });
+        let thinq = crate::MockThinq2Device::new("id", crate::Metadata::new("M", "M", "1"));
+        let core = TlvDeviceCore::with_caps_query(ha, thinq.clone(), false);
+        assert!(thinq.outbox().is_empty());
+
+        let values_seen = Arc::new(AtomicBool::new(false));
+        let seen = values_seen.clone();
+        *core.is_caps_response.lock() = Some(Box::new(|_| true));
+        *core.is_values_response.lock() = Some(Box::new(|_| true));
+        *core.on_values.lock() = Some(Box::new(move || seen.store(true, Ordering::Relaxed)));
+        core.process_tlv(&[Tlv::new(0x1f7, 1)]);
+        assert!(values_seen.load(Ordering::Relaxed));
+        assert!(thinq.outbox().is_empty(), "no values query follows");
     }
 
     /// Drive the same path a handler uses: `on_data` → `process_data_envelope`.
