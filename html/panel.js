@@ -183,15 +183,25 @@ class DeviceEntry {
                         <div class="circle-clipper right"><div class="circle"></div></div>
                     </div>
                 </div>
+                <span class="modeljson" title="Download the modelJSON file. Requires bridge mode.">
+                    <a class="btn-flat btn-small waves-effect"><i class="material-icons">description</i></a>
+                </span>
             </td>`
 
         this.bridgeSwitch = this.row.querySelector('input[type=checkbox]')
         this.bridgeDiv = this.row.querySelector('.switch')
         this.spinner = this.row.querySelector('.preloader-wrapper')
+        this.modelJsonButton = this.row.querySelector('.modeljson a')
+        this.modelJsonButton.onclick = () => this.downloadModelJson()
 
-        // Whole-row select (except bridge switch)
+        // Whole-row select (except the bridge controls)
         this.row.onclick = (ev) => {
-            if (ev.target.closest('.switch') || ev.target.closest('input') || ev.target.closest('.lever')) {
+            if (
+                ev.target.closest('.switch') ||
+                ev.target.closest('input') ||
+                ev.target.closest('.lever') ||
+                ev.target.closest('.modeljson')
+            ) {
                 return
             }
             selectDevice(this.id)
@@ -248,17 +258,44 @@ class DeviceEntry {
 
     refreshUI() {
         if (!this.bridgeSwitch) return
+        const state = this.remoteState.bridgeState
+        const enabled = state == null ? !!this.remoteState.bridged : state === 'online' || state === 'offline'
         if (this.bridgeBusy) {
             this.bridgeDiv.classList.add('hide')
             this.spinner.classList.remove('hide')
         } else {
             this.spinner.classList.add('hide')
             this.bridgeDiv.classList.remove('hide')
-            const state = this.remoteState.bridgeState
-            const enabled = state === 'online' || state === 'offline'
-            this.bridgeSwitch.checked = state == null ? !!this.remoteState.bridged : enabled
+            this.bridgeSwitch.checked = enabled
         }
         this.bridgeSwitch.disabled = !bridge_status
+        // The modelJSON only comes from the ThinQ cloud, and only for a device registered there.
+        this.modelJsonButton.classList.toggle('disabled', !(bridge_status && enabled))
+    }
+
+    // Fetched by rethink and handed over as a blob, so that a failure shows up as a toast
+    // instead of navigating the panel away to an error page.
+    async downloadModelJson() {
+        if (this.modelJsonButton.classList.contains('disabled') || this.modelJsonBusy) return
+        this.modelJsonBusy = true
+        try {
+            const response = await fetch(`${baseUrl}bridge/${encodeURIComponent(this.id)}/modeljson`)
+            if (response.status >= 300) {
+                M.toast({ html: `HTTP error ${response.status}: ${escapeHtml(await response.text())}` })
+                return
+            }
+            const match = /filename="([^"]*)"/.exec(response.headers.get('content-disposition') ?? '')
+            const url = URL.createObjectURL(await response.blob())
+            const link = document.createElement('a')
+            link.href = url
+            link.download = match ? match[1] : `${this.id}.json`
+            link.click()
+            URL.revokeObjectURL(url)
+        } catch (err) {
+            M.toast({ html: `FETCH error: ${escapeHtml(err)}` })
+        } finally {
+            this.modelJsonBusy = false
+        }
     }
 }
 

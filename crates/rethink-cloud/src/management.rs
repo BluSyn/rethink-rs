@@ -181,6 +181,7 @@ pub fn router(state: MgmtState) -> Router {
         .route("/thinq_login_accept", post(thinq_login_accept))
         .route("/thinq_logout", post(thinq_logout))
         .route("/bridge/{device_id}/enable", post(bridge_enable))
+        .route("/bridge/{device_id}/modeljson", get(bridge_model_json))
         .route("/bridge/{device_id}/disable", post(bridge_disable))
         // RE / device-detail APIs (used by modern management UI)
         .route("/api/tlv/catalog", get(api_tlv_catalog))
@@ -621,6 +622,49 @@ async fn bridge_enable(
         Ok(false) => StatusCode::BAD_REQUEST,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+async fn bridge_model_json(
+    State(state): State<MgmtState>,
+    Path(device_id): Path<String>,
+) -> Response {
+    let Some(bridge) = &state.bridge else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let device = state.manager.get(&device_id);
+    let model = device.map(|d| d.meta.model_name.clone());
+    match bridge.get_model_json(&device_id, model.as_deref()).await {
+        Ok(model_json) => model_json_download(&model.unwrap_or_default(), model_json),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+/// The download is named after the model, which comes from the device: keep it from breaking
+/// out of the header.
+fn model_json_file_name(model_name: &str) -> String {
+    let name: String = model_name
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect();
+    format!("{}.json", if name.is_empty() { "model" } else { &name })
+}
+
+fn model_json_download(model_name: &str, model_json: String) -> Response {
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        model_json_file_name(model_name)
+    );
+    (
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        model_json,
+    )
+        .into_response()
 }
 
 async fn bridge_disable(
@@ -1356,6 +1400,55 @@ mod tests {
         let without_bridge = NamesRefresher::for_bridge(None);
         let _panel = without_bridge.subscribe();
         assert!(without_bridge.inner.lock().timer.is_none());
+    }
+
+    #[test]
+    fn model_json_file_name_keeps_to_safe_characters() {
+        assert_eq!(model_json_file_name("F3P2CYVAT__"), "F3P2CYVAT__.json");
+        assert_eq!(
+            model_json_file_name("F_V8_Y___W.B_2QEUK"),
+            "F_V8_Y___W.B_2QEUK.json"
+        );
+        assert_eq!(model_json_file_name("a\"b\r\nc/d;e"), "a_b__c_d_e.json");
+        assert_eq!(model_json_file_name("세탁기 1"), "____1.json");
+        assert_eq!(model_json_file_name(""), "model.json");
+    }
+
+    #[tokio::test]
+    async fn model_json_is_handed_over_as_a_download() {
+        let model_json = "{\n  \"Info\": {\"modelName\": \"F3P2CYVAT__\"}\n}\n";
+        let resp = model_json_download("F3P2CYVAT__", model_json.into());
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            resp.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"F3P2CYVAT__.json\""
+        );
+        assert_eq!(body_bytes(resp).await, model_json, "unchanged");
+    }
+
+    #[tokio::test]
+    async fn model_json_route_says_why_it_cannot_fetch() {
+        let fetch = |state: MgmtState| bridge_model_json(State(state), Path("dev".into()));
+        let resp = fetch(test_state(None)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "no bridge configured");
+
+        let not_bridged = "Bridge mode is not enabled for this device";
+        let cases = [
+            (None, false, "Not logged in"),
+            (Some("token"), false, "Unknown device"),
+            (Some("token"), true, not_bridged),
+        ];
+        for (refresh_token, connected, error) in cases {
+            let state = test_state(Some(test_bridge(refresh_token)));
+            if connected {
+                let meta = Metadata::new("F3P2CYVAT__", "F3P2CYVAT__", "1");
+                connect_device(&state, "dev", meta);
+            }
+            let resp = fetch(state).await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+            assert_eq!(body_bytes(resp).await, error);
+        }
     }
 
     #[test]

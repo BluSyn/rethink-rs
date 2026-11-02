@@ -3,6 +3,7 @@
 //! rethink knows a device by its id and model, which is useless for telling four identical
 //! ceiling cassettes apart. The account holds the names the owner gave them in the app; they are
 //! best-effort, so a cloud that does not answer costs a log line and leaves the names alone.
+//! For an appliance registered with the account, LG also hands out its modelJSON.
 
 use crate::{thinq_api, Bridge};
 use serde_json::Value;
@@ -67,6 +68,26 @@ impl Bridge {
             return;
         }
         self.set_names(device_aliases(devices));
+    }
+
+    /// The modelJSON of an appliance registered with the ThinQ cloud, i.e. one with a live bridge
+    /// session. `model_name` is `None` when the appliance is not connected.
+    pub async fn get_model_json(
+        &self,
+        device_id: &str,
+        model_name: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let creds = self
+            .storage
+            .get_credentials()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let model_name = model_name.ok_or_else(|| anyhow::anyhow!("Unknown device"))?;
+        if !self.status_for(device_id) {
+            anyhow::bail!("Bridge mode is not enabled for this device");
+        }
+        let mut client = thinq_api::Client::new(creds.env);
+        client.auth(&creds.refresh_token).await?;
+        client.get_model_json(device_id, model_name).await
     }
 }
 
@@ -206,5 +227,21 @@ mod tests {
 
         bridge.clear_names();
         assert_eq!(announced.load(Ordering::SeqCst), 2, "already empty");
+    }
+
+    #[tokio::test]
+    async fn model_json_needs_a_login_a_connected_device_and_bridge_mode() {
+        let logged_out = bridge(None);
+        let err = logged_out.get_model_json("dev", None).await.unwrap_err();
+        assert_eq!(err.to_string(), "Not logged in");
+
+        let bridge = bridge(Some(credentials("token")));
+        let err = bridge.get_model_json("dev", None).await.unwrap_err();
+        assert_eq!(err.to_string(), "Unknown device");
+        let err = bridge.get_model_json("dev", Some("M")).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Bridge mode is not enabled for this device"
+        );
     }
 }

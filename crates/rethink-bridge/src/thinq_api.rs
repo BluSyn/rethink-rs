@@ -381,6 +381,48 @@ impl Client {
         }
     }
 
+    pub fn model_json_url(
+        thinq2_uri: &str,
+        device_id: &str,
+        model_name: &str,
+    ) -> anyhow::Result<String> {
+        let mut url = url::Url::parse(&format!("{thinq2_uri}/service/application/modeljson"))?;
+        url.query_pairs_mut()
+            .append_pair("deviceId", device_id)
+            .append_pair("modelName", model_name);
+        Ok(url.to_string())
+    }
+
+    /// The modelJSON describes a device model's capabilities (field layouts, enum values, course
+    /// tables). The descriptor call needs a device registered in the current account, but the URI
+    /// it returns is a plain, time-limited link that takes no authentication.
+    pub async fn get_model_json(
+        &self,
+        device_id: &str,
+        model_name: &str,
+    ) -> anyhow::Result<String> {
+        let g = self
+            .gateway
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("gateway not loaded"))?;
+        let thinq2 = g
+            .get("thinq2Uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing thinq2Uri"))?;
+        let url = Self::model_json_url(thinq2, device_id, model_name)?;
+        let descriptor = self.api_fetch(&url, "GET", None).await?;
+        let uri = descriptor
+            .get("modelJsonUri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing modelJsonUri"))?;
+        let resp = reqwest::Client::new().get(uri).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!("Can't download the modelJSON: HTTP {}", status.as_u16());
+        }
+        Ok(resp.text().await?)
+    }
+
     pub fn thinq1_state(&self) -> anyhow::Result<Value> {
         let g = self
             .gateway
@@ -439,5 +481,136 @@ mod tests {
             &Client::parse_home_devices(&json!({})),
             "aaaabbbb-cccc-dddd-eeee-ffff00001111"
         ));
+    }
+
+    // ── modelJSON ────────────────────────────────────────────────────────────
+
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const MODEL_JSON: &str = "{\n  \"Info\": {\"modelName\": \"F3P2CYVAT__\"}\n}\n";
+
+    #[derive(Debug, Clone)]
+    struct Request {
+        target: String,
+        headers: Vec<(String, String)>,
+    }
+
+    impl Request {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    /// Plays the ThinQ2 API server and the file server its modelJSON links point at. The link
+    /// for a model is `/files/{modelName}.json`; only F3P2CYVAT__ has a file.
+    async fn fake_lg() -> (String, Arc<Mutex<Vec<Request>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (log, files) = (requests.clone(), base.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut chunk).await {
+                        Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]),
+                        _ => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let mut lines = head.lines();
+                let target = lines.next().unwrap_or("").split(' ').nth(1).unwrap_or("");
+                let headers = lines
+                    .filter_map(|l| l.split_once(':'))
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                    .collect();
+                log.lock().unwrap().push(Request {
+                    target: target.to_string(),
+                    headers,
+                });
+
+                let url = url::Url::parse(&format!("http://lg{target}")).unwrap();
+                let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+                let (status, body) = match url.path() {
+                    "/service/application/modeljson" if query["deviceId"] == "unregistered" => {
+                        let body = json!({"resultCode": "0101", "result": null});
+                        ("200 OK", body.to_string())
+                    }
+                    "/service/application/modeljson" => {
+                        let uri = format!("{files}/files/{}.json", query["modelName"]);
+                        let result = json!({"modelJsonUri": uri, "modelJsonVer": "1.0"});
+                        let body = json!({"resultCode": "0000", "result": result});
+                        ("200 OK", body.to_string())
+                    }
+                    "/files/F3P2CYVAT__.json" => ("200 OK", MODEL_JSON.to_string()),
+                    _ => ("404 Not Found", String::new()),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        (base, requests)
+    }
+
+    /// A client as `auth` leaves it, talking to `base`.
+    fn client_for(base: &str) -> Client {
+        let mut client = Client::new(Environment {
+            country_code: "US".into(),
+            language_code: None,
+        });
+        client.gateway = Some(json!({ "thinq2Uri": base }));
+        client.headers.insert("x-emp-token".into(), "token".into());
+        client
+    }
+
+    #[test]
+    fn model_json_descriptor_names_the_device_and_model() {
+        assert_eq!(
+            Client::model_json_url("https://thinq2.example/v1", "dev 1", "F3P2CYVAT__").unwrap(),
+            "https://thinq2.example/v1/service/application/modeljson?deviceId=dev+1&modelName=F3P2CYVAT__"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_json_is_downloaded_from_the_descriptor_link_without_credentials() {
+        let (base, requests) = fake_lg().await;
+        let client = client_for(&base);
+        let model_json = client.get_model_json("dev-1", "F3P2CYVAT__").await.unwrap();
+        assert_eq!(model_json, MODEL_JSON, "handed over as served");
+
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].target,
+            "/service/application/modeljson?deviceId=dev-1&modelName=F3P2CYVAT__"
+        );
+        assert_eq!(requests[0].header("x-emp-token"), Some("token"));
+        assert_eq!(requests[1].target, "/files/F3P2CYVAT__.json");
+        for name in ["x-emp-token", "x-api-key", "x-client-id"] {
+            assert_eq!(requests[1].header(name), None, "no {name} for the file");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_json_failures_say_why() {
+        let (base, _) = fake_lg().await;
+        let client = client_for(&base);
+        let missing = client.get_model_json("dev-1", "NO_FILE").await;
+        let missing = missing.unwrap_err().to_string();
+        assert_eq!(missing, "Can't download the modelJSON: HTTP 404");
+        let refused = client.get_model_json("unregistered", "F3P2CYVAT__").await;
+        let refused = refused.unwrap_err().to_string();
+        assert!(refused.contains("0101"), "{refused}");
     }
 }

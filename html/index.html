@@ -543,6 +543,20 @@
                 color: var(--muted);
                 font-size: 0.75rem;
             }
+            /* The title sits on a wrapper: Materialize gives a disabled button pointer-events: none,
+               which would swallow the hover. */
+            .modeljson {
+                display: inline-block;
+                vertical-align: middle;
+            }
+            .modeljson .btn-flat {
+                color: var(--accent);
+                padding: 0 0.4rem;
+            }
+            .modeljson .btn-flat.disabled {
+                color: var(--muted) !important;
+                opacity: 0.4;
+            }
             .switch label input[type='checkbox']:checked + .lever {
                 background-color: rgba(61, 156, 240, 0.45);
             }
