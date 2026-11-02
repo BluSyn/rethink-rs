@@ -398,6 +398,38 @@ mod tests {
         }
     }
 
+    /// Records every property payload as `property=value`, in order.
+    #[derive(Default)]
+    struct PropertyLog(Mutex<Vec<String>>);
+
+    impl PropertyLog {
+        fn entries(&self) -> Vec<String> {
+            self.0.lock().clone()
+        }
+
+        fn last(&self, property: &str) -> Option<String> {
+            let prefix = format!("{property}=");
+            self.0
+                .lock()
+                .iter()
+                .rev()
+                .find_map(|entry| entry.strip_prefix(&prefix).map(str::to_string))
+        }
+    }
+
+    impl HaConnection for PropertyLog {
+        fn publish_config(&self, _id: &str, _config: &DeviceDiscovery) {}
+        fn publish_property(&self, _id: &str, property: &str, value: PropertyValue) {
+            self.0
+                .lock()
+                .push(format!("{property}={}", value.as_string()));
+        }
+        fn publish_event(&self, _id: &str, _topic_suffix: &str, _payload: &str) {}
+        fn is_connected(&self) -> bool {
+            true
+        }
+    }
+
     const GRACE: Duration = Duration::from_millis(50);
     const PAST_GRACE: Duration = Duration::from_millis(250);
 
@@ -413,6 +445,16 @@ mod tests {
 
     fn washer(id: &str) -> Arc<ConnectedDevice> {
         session(id, "F3L2CYU__")
+    }
+
+    fn thinq1_dryer(id: &str) -> Arc<ConnectedDevice> {
+        ConnectedDevice::new(
+            id.into(),
+            Platform::Thinq1,
+            Metadata::new("RC90U2_WW", "RC90U2_WW", "QC_Modem_1.2.80"),
+            Arc::new(|_: Vec<u8>| {}),
+            Arc::new(|_: SendToDevice| {}),
+        )
     }
 
     fn bridge() -> (Arc<AvailabilityLog>, Arc<HaBridge>) {
@@ -622,5 +664,36 @@ mod tests {
         adapter.send("setMaskingInfo", 1, serde_json::Value::Null);
         assert_eq!(*seen.lock(), ["packet", "ack", "clip"]);
         *slot.lock() = None;
+    }
+
+    #[test]
+    fn choices_made_in_ha_survive_a_reconnect() {
+        // A ThinQ1 status push from a real RC90U2: Cotton, Extra, Time, running, Anti crease off.
+        let running = rethink_core::hex_decode(
+            "02 0228 0228 07 00 04 03 02 00000000 00 04 00 0000 01 000000 6b",
+        );
+        let log = Arc::new(PropertyLog::default());
+        let bridge = HaBridge::with_availability_grace(log.clone(), GRACE);
+        let first = thinq1_dryer("d");
+        bridge.new_device(first.clone());
+        bridge.republish_all();
+        first.notify_data(&running);
+        bridge.set_property("d", "anti_crease", "Yes");
+        bridge.set_property("d", "start_delay_end", "4");
+
+        let before = log.entries().len();
+        let second = thinq1_dryer("d");
+        bridge.new_device(second.clone());
+        first.notify_close();
+        // The panel has not changed since the first connection saw it.
+        second.notify_data(&running);
+
+        assert_eq!(log.last("anti_crease").as_deref(), Some("Yes"));
+        assert_eq!(log.last("start_delay_end").as_deref(), Some("4"));
+        let published = &log.entries()[before..];
+        assert!(
+            !published.iter().any(|entry| entry == "anti_crease=No"),
+            "{published:?}"
+        );
     }
 }

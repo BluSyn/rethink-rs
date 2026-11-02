@@ -1,9 +1,10 @@
 //! RC90U2_WW — EU heat-pump dryer (RC9DN9029).
 //!
 //! 25-byte class `0x30` records, same AABB dialect as the US dryers. Also
-//! serves RC90V9_WW and RC90V9_AUS. `auto_ack` stays off, matching the
-//! upstream handler. Bytes 17-18 (not in the spec) are the Wh used by the
-//! current cycle, retained after it.
+//! serves RC90V9_WW and RC90V9_AUS, and the ThinQ1 module through
+//! `rc90u2_ww_t1`. `auto_ack` stays off, matching the upstream handler.
+//! Bytes 17-18 (not in the spec) are the Wh used by the current cycle,
+//! retained after it.
 //!
 //! Writes, mapped live on two more units: power on (`F0 2A`) and off (`F0 24 01`), Pause/Resume
 //! (`F0 24 04`, the panel's Start/Pause toggle; `F0 24 05` is acked with a beep and ignored) and
@@ -28,13 +29,13 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
-const CLASS_BYTE: u8 = 0x30;
-const STATUS_LENGTH: usize = 27;
-const RECORD_MARKER: u8 = 0x19;
+pub(crate) const CLASS_BYTE: u8 = 0x30;
+pub(crate) const STATUS_LENGTH: usize = 27;
+pub(crate) const RECORD_MARKER: u8 = 0x19;
 
-const POWER_ON: &[u8] = &[0xf0, 0x2a, 0x01, 0x00];
-const POWER_OFF: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x00];
-const START_PAUSE: &[u8] = &[0xf0, 0x24, 0x04, 0x01, 0x00];
+pub(crate) const POWER_ON: &[u8] = &[0xf0, 0x2a, 0x01, 0x00];
+pub(crate) const POWER_OFF: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x00];
+pub(crate) const START_PAUSE: &[u8] = &[0xf0, 0x24, 0x04, 0x01, 0x00];
 
 const STATE_OFF: u8 = 0x00;
 const STATE_RUNNING: u8 = 2;

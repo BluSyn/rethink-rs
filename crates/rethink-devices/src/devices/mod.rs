@@ -138,5 +138,6 @@ register_devices! {
         f3l2cnv4w_wifi => { "F3L2CNV4W_WIFI" },
         rac_056905_ww_t1 => { "RAC_056905_WW" },
         f3l2cyv5w_wifi => { "F3L2CYV5W_WIFI" },
+        rc90u2_ww_t1 => { "RC90U2_WW" },
     }
 }
