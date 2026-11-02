@@ -7,6 +7,7 @@
 //! washer repeats frames and never streams `0xEC`.
 
 use crate::device_trait::DeviceHandler;
+use crate::tl_us_washer_courses::{COURSES as COURSE, SMART_COURSES as SMART_COURSE};
 use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, PropertyValue, Thinq2Device};
 use rethink_util::sync::Mutex;
@@ -45,45 +46,6 @@ const STATUS: &[(u8, &str)] = &[
     (0x09, "Delayed"),
     (0x0a, "Updating firmware"),
     (0x0b, "Smart Diagnosis"),
-];
-const COURSE: &[(u8, &str)] = &[
-    (0x00, "Not selected"),
-    (0x01, "Normal"),
-    (0x02, "Heavy Duty"),
-    (0x04, "Delicates"),
-    (0x05, "Waterproof"),
-    (0x07, "Speed Wash"),
-    (0x08, "Bedding"),
-    (0x0c, "Tub Clean"),
-    (0x11, "Rinse+Spin"),
-    (0x12, "Spin Only"),
-    (0x19, "Deep Wash"),
-    (0x29, "Pre Wash+Normal"),
-];
-const SMART_COURSE: &[(u8, &str)] = &[
-    (0x00, "Not selected"),
-    (0x64, "Small Load"),
-    (0x65, "Single Item"),
-    (0x67, "Wrinkle Stop/Gentle Wave"),
-    (0x68, "Rapid Clean"),
-    (0x69, "Sweat Stains"),
-    (0x6a, "Swimwear"),
-    (0x6b, "Curtains"),
-    (0x6d, "Dress Shirts"),
-    (0x6e, "Collar Stains"),
-    (0x6f, "Pillow Covers"),
-    (0x70, "Lingerie"),
-    (0x71, "Baby Wear"),
-    (0x73, "Children's Wear"),
-    (0x74, "Juice & Food Stains"),
-    (0x75, "Baby Bibs"),
-    (0x76, "Pet Hair and Odor"),
-    (0x77, "EconoWash"),
-    (0x78, "Collars and Cuffs"),
-    (0x79, "Delicate Dresses"),
-    (0x7a, "Half Load Wash"),
-    (0x7b, "Full Load Wash"),
-    (0x83, "Whites"),
 ];
 const SOIL: &[(u8, &str)] = &[
     (0, "Not selected"),
