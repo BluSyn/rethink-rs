@@ -630,12 +630,6 @@ mod tests {
         ha.device(DEVICE_ID)?.properties.get(n).map(|p| p.as_string())
     }
 
-    fn feed(hex: &str) -> Arc<MockHaConnection> {
-        let (ha, thinq, _dev) = make();
-        thinq.emit_data(&hex_decode(hex));
-        ha
-    }
-
     fn expect(ha: &MockHaConnection, name: &str, value: &str) {
         assert_eq!(prop(ha, name).as_deref(), Some(value), "{name}");
     }
