@@ -83,25 +83,25 @@ impl Device {
         let mut comps: Vec<(String, serde_json::Value)> = vec![
             ("oven_status".into(), json!({"platform":"sensor","unique_id":"$deviceid-oven_status","state_topic":"$this/oven_status","name":"Oven status","icon":"mdi:stove","device_class":"enum","options":["Idle","Preheating","Cooking","Done","Cooling","Cleaning"]})),
             ("oven_mode".into(), json!({"platform":"sensor","unique_id":"$deviceid-oven_mode","state_topic":"$this/oven_mode","name":"Oven mode","icon":"mdi:chef-hat","device_class":"enum","options":["Off","Bake","Convection Bake","Convection Roast","Broil","Warm","Proof","Frozen Meal","Self Clean","Air Fry","Air Sous Vide"]})),
-            ("broil_level".into(), json!({"platform":"sensor","unique_id":"$deviceid-broil_level","state_topic":"$this/broil_level","name":"Broil level","device_class":"enum","options":["Off","Low","High"]})),
+            ("broil_level".into(), json!({"platform":"sensor","unique_id":"$deviceid-broil_level","state_topic":"$this/broil_level","name":"Broil level","icon":"mdi:fire","device_class":"enum","options":["Off","Low","High"]})),
             ("oven_target_temperature".into(), json!({"platform":"sensor","unique_id":"$deviceid-oven_target_temperature","state_topic":"$this/oven_target_temperature","name":"Oven target temperature","device_class":"temperature","unit_of_measurement":"°F"})),
             ("oven_temperature".into(), json!({"platform":"sensor","unique_id":"$deviceid-oven_temperature","state_topic":"$this/oven_temperature","name":"Oven temperature","device_class":"temperature","unit_of_measurement":"°F"})),
-            ("remote_start".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-remote_start","state_topic":"$this/remote_start","name":"Remote start","entity_category":"diagnostic"})),
-            ("remote_started".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-remote_started","state_topic":"$this/remote_started","name":"Started remotely","entity_category":"diagnostic"})),
+            ("remote_start".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-remote_start","state_topic":"$this/remote_start","name":"Remote start","icon":"mdi:cellphone-wireless","entity_category":"diagnostic"})),
+            ("remote_started".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-remote_started","state_topic":"$this/remote_started","name":"Started remotely","icon":"mdi:cellphone-check","entity_category":"diagnostic"})),
             ("oven_door".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-oven_door","state_topic":"$this/oven_door","name":"Oven door","device_class":"door"})),
             ("oven_door_lock".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-oven_door_lock","state_topic":"$this/oven_door_lock","name":"Oven door lock","icon":"mdi:lock"})),
-            ("clock_format".into(), json!({"platform":"sensor","unique_id":"$deviceid-clock_format","state_topic":"$this/clock_format","name":"Clock format","device_class":"enum","options":["24-hour","12-hour"],"entity_category":"diagnostic"})),
-            ("auto_remote".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-auto_remote","state_topic":"$this/auto_remote","name":"Auto remote","entity_category":"diagnostic"})),
-            ("temperature_adjustment".into(), json!({"platform":"sensor","unique_id":"$deviceid-temperature_adjustment","state_topic":"$this/temperature_adjustment","name":"Temperature adjustment","unit_of_measurement":"°F","entity_category":"diagnostic"})),
-            ("temperature_unit".into(), json!({"platform":"sensor","unique_id":"$deviceid-temperature_unit","state_topic":"$this/temperature_unit","name":"Temperature unit","device_class":"enum","options":["°F","°C"],"entity_category":"diagnostic"})),
-            ("auto_conversion".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-auto_conversion","state_topic":"$this/auto_conversion","name":"Auto conversion","entity_category":"diagnostic"})),
-            ("preheating_alarm_light".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-preheating_alarm_light","state_topic":"$this/preheating_alarm_light","name":"Preheating alarm light","entity_category":"diagnostic"})),
-            ("oven_beeper_volume".into(), json!({"platform":"sensor","unique_id":"$deviceid-oven_beeper_volume","state_topic":"$this/oven_beeper_volume","name":"Oven beeper volume","device_class":"enum","options":["Mute","Low","High"],"entity_category":"diagnostic"})),
-            ("cooktop_beeper_volume".into(), json!({"platform":"sensor","unique_id":"$deviceid-cooktop_beeper_volume","state_topic":"$this/cooktop_beeper_volume","name":"Cooktop beeper volume","device_class":"enum","options":["Mute","Low","High"],"entity_category":"diagnostic"})),
+            ("clock_format".into(), json!({"platform":"sensor","unique_id":"$deviceid-clock_format","state_topic":"$this/clock_format","name":"Clock format","icon":"mdi:clock-outline","device_class":"enum","options":["24-hour","12-hour"],"entity_category":"diagnostic"})),
+            ("auto_remote".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-auto_remote","state_topic":"$this/auto_remote","name":"Auto remote","icon":"mdi:cellphone-cog","entity_category":"diagnostic"})),
+            ("temperature_adjustment".into(), json!({"platform":"sensor","unique_id":"$deviceid-temperature_adjustment","state_topic":"$this/temperature_adjustment","name":"Temperature adjustment","icon":"mdi:thermometer-plus","unit_of_measurement":"°F","entity_category":"diagnostic"})),
+            ("temperature_unit".into(), json!({"platform":"sensor","unique_id":"$deviceid-temperature_unit","state_topic":"$this/temperature_unit","name":"Temperature unit","icon":"mdi:temperature-fahrenheit","device_class":"enum","options":["°F","°C"],"entity_category":"diagnostic"})),
+            ("auto_conversion".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-auto_conversion","state_topic":"$this/auto_conversion","name":"Auto conversion","icon":"mdi:thermometer-auto","entity_category":"diagnostic"})),
+            ("preheating_alarm_light".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-preheating_alarm_light","state_topic":"$this/preheating_alarm_light","name":"Preheating alarm light","icon":"mdi:bell-ring-outline","entity_category":"diagnostic"})),
+            ("oven_beeper_volume".into(), json!({"platform":"sensor","unique_id":"$deviceid-oven_beeper_volume","state_topic":"$this/oven_beeper_volume","name":"Oven beeper volume","icon":"mdi:volume-high","device_class":"enum","options":["Mute","Low","High"],"entity_category":"diagnostic"})),
+            ("cooktop_beeper_volume".into(), json!({"platform":"sensor","unique_id":"$deviceid-cooktop_beeper_volume","state_topic":"$this/cooktop_beeper_volume","name":"Cooktop beeper volume","icon":"mdi:volume-high","device_class":"enum","options":["Mute","Low","High"],"entity_category":"diagnostic"})),
             ("control_lock".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-control_lock","state_topic":"$this/control_lock","name":"Control lock","icon":"mdi:lock"})),
-            ("cook_time".into(), json!({"platform":"sensor","unique_id":"$deviceid-cook_time","state_topic":"$this/cook_time","name":"Cook time","device_class":"duration","unit_of_measurement":"s"})),
-            ("remaining_time".into(), json!({"platform":"sensor","unique_id":"$deviceid-remaining_time","state_topic":"$this/remaining_time","name":"Remaining time","device_class":"duration","unit_of_measurement":"s"})),
-            ("timer".into(), json!({"platform":"sensor","unique_id":"$deviceid-timer","state_topic":"$this/timer","name":"Kitchen timer","device_class":"duration","unit_of_measurement":"s"})),
+            ("cook_time".into(), json!({"platform":"sensor","unique_id":"$deviceid-cook_time","state_topic":"$this/cook_time","name":"Cook time","icon":"mdi:timelapse","device_class":"duration","unit_of_measurement":"s"})),
+            ("remaining_time".into(), json!({"platform":"sensor","unique_id":"$deviceid-remaining_time","state_topic":"$this/remaining_time","name":"Remaining time","icon":"mdi:timer-outline","device_class":"duration","unit_of_measurement":"s"})),
+            ("timer".into(), json!({"platform":"sensor","unique_id":"$deviceid-timer","state_topic":"$this/timer","name":"Kitchen timer","icon":"mdi:timer-outline","device_class":"duration","unit_of_measurement":"s"})),
         ];
         for (key, name) in [
             ("cooktop_front_left","Front left element"),
@@ -184,31 +184,46 @@ pub fn create(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Met
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::device_trait::DeviceHandler;
     use crate::registry::t2_factory;
-    use crate::test_support::{make_t2, outbox_has_inner, prop, DEVICE_ID};
+    use crate::test_support::{make_t2, prop, DEVICE_ID};
     use rethink_core::{hex_decode, hex_encode, Thinq2Device};
-    fn make() -> (Arc<rethink_core::MockHaConnection>, Arc<rethink_core::MockThinq2Device>, Arc<Device>) {
+
+    fn make() -> (
+        Arc<rethink_core::MockHaConnection>,
+        Arc<rethink_core::MockThinq2Device>,
+        Arc<Device>,
+    ) {
         make_t2("WLSI_633_", Device::new)
     }
 
+    fn feed(thinq: &rethink_core::MockThinq2Device, frame: &str) {
+        thinq.emit_data(&hex_decode(frame));
+    }
+
+    // Real LSIS6338FE frames, captured while driving the range by hand at the panel with
+    // rethink bridged to the LG cloud. AA EC 40 EC <115B previous> <115B current> <cksum> BB.
     const SAMPLE_IDLE: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004FBB";
+    // Bake at 200F, just started (cloud upperState=PREHEATING), then at temperature.
     const SAMPLE_BAKE_PREHEATING: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000101000000000000C800640000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006BBB";
     const SAMPLE_BAKE_AT_TEMPERATURE: &str = "AAEC40EC0101000000010200FF02000000000101000000000000C800640000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000201000000000000C800C8000020000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000A6BB";
+    // Setpoint raised to 350F mid-cycle: back to preheating, cavity at 225F.
     const SAMPLE_SETPOINT_RAISED_TO_350: &str = "AAEC40EC0101000000010200FF02000000000201000000000000C800C80000200000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000001010000000000015E00E100002000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000050BB";
     const SAMPLE_DOOR_OPEN: &str = "AAEC40EC0101000000010200FF020000000001010000000000015E00E10000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000001010000000000015E00E1000024000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000EFBB";
     const SAMPLE_AIR_FRY_400: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000210000000000001900000000020000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000E6BB";
     const SAMPLE_TIMER_ONE_HOUR: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000000000000000000000000000000000001160000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ACBB";
     const SAMPLE_TIMER_59M59S: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000011600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000000000000000000000000000000003B3B0016000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024BB";
+    // One frame per cooktop element, each with only that element lit.
     const SAMPLE_COOKTOP_FRONT_LEFT: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005EBB";
     const SAMPLE_COOKTOP_FRONT_RIGHT: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF0200000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000056BB";
     const SAMPLE_COOKTOP_REAR_LEFT: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005EBB";
     const SAMPLE_COOKTOP_REAR_RIGHT: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005EBB";
     const SAMPLE_COOKTOP_CENTER: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000005EBB";
+    // Panel locked: rec[11] bit 0x01, and all five elements in state 3.
     const SAMPLE_CONTROL_LOCKED: &str = "AAEC40EC0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020009000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000030000030000030000030000030000000000000000000000000000000000000000000000000000000000000000000000000000000000007FBB";
+    // One frame per knob position.
     const SAMPLE_CONVECTION_BAKE_325: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000001030000000000014500000000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000FBB";
     const SAMPLE_CONVECTION_ROAST_325: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000001040000000000014500000000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000EBB";
     const SAMPLE_BROIL_HIGH: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000207000000000000000000000000000000120300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000A9BB";
@@ -217,18 +232,24 @@ mod tests {
     const SAMPLE_PROOF: &str = "aaec40ec0101000000010200ff020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000010000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200ff02000000000209000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000001000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000aabb";
     const SAMPLE_FROZEN_MEAL_400: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF0200000000020A000000000001900000000020000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000F8BB";
     const SAMPLE_AIR_SOUS_VIDE_130: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000212000000000000820000000020000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000F3BB";
+    // Self Clean just started, 15 seconds in, then cancelled (cloud upperState=COOLING).
     const SAMPLE_SELF_CLEAN_STARTED: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF0200000000090F0000040004000000000000000000001200000000000000000000000000000000000000000000000000000000030000030000030000030000030000000000000000000000000000000000000000000000000000000000000000000000000000000000004ABB";
     const SAMPLE_SELF_CLEAN_COUNTING_DOWN: &str = "AAEC40EC0101000000010200FF0200000000090F3A3B030004000000000000000000001200000000000000000000000000000000000000000000000000000000030000030000030000030000030000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF0200000000090F2D3B0300040000000000000100000012000000000000000000000000000000000000000000000000000000000300000300000300000300000300000000000000000000000000000000000000000000000000000000000000000000000000000000000079BB";
     const SAMPLE_SELF_CLEAN_CANCELLED: &str = "AAEC40EC0101000000010200FF0200000000090F2D3B030004000000000000010000001200000000000000000000000000000000000000000000000000000000030000030000030000030000030000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000400000000000000000000000001000000120000000000000000000000000000000000000000000000000000000003000003000003000003000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000C8BB";
+    // A 20-minute Bake at 350F as it started and one second later, then running out (DONE).
     const SAMPLE_TIMED_BAKE_20M: &str = "AAEC40EC0101000000010200FF020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000001010014001400015E0064000020000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000A8BB";
     const SAMPLE_TIMED_BAKE_19M59S: &str = "AAEC40EC0101000000010200FF020000000001010014001400015E00640000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF020000000001013B13001400015E006400002000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013BB";
     const SAMPLE_BAKE_DONE: &str = "AAEC40EC0101000000010200FF020000000002013B0000020000AA00AA0000200000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200FF02000000000300000000000000000000000000000000180000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000FABB";
+    // The 40 EB single-record reply to the start() query.
     const SAMPLE_INITIAL_STATUS: &str = "AA7940EB0101000000010200FF020008000000000000000000000000000000000000001E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002FBB";
+    // Remote Start armed at the knob, then the app starting a 425F Bake (mode byte 0x81).
     const SAMPLE_REMOTE_START_ARMED: &str = "aaec40ec0101000000010200ff020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200ff02000000000000000000000000000000000000000000110000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000babb";
     const SAMPLE_REMOTE_STARTED_BAKE: &str = "aaec40ec0101000000010200ff020000000000000000000000000000000000000000001100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200ff02000000000181000000000001a90069000020000000130000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f2bb";
     const SAMPLE_COOKTOP_BEEP_MUTE: &str = "aaec40ec0101000000010200ff020008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200ff000008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004dbb";
     const SAMPLE_COOKTOP_BEEP_HIGH: &str = "aaec40ec0101000000010200ff000008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010200ff020008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004dbb";
+    // A 175C Bake on a Celsius appliance: the target reads 0x80af.
     const SAMPLE_BAKE_175_CELSIUS: &str = "aaec40ec0101010000010000ff020000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101010000010000ff02000000000101000000000080af005f000020000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cbbb";
+    // Temperature Adjustment +4C, then 2, on an idle Celsius appliance.
     const SAMPLE_ADJUSTMENT_CELSIUS_4: &str = "aaec40ec0101010000010000ff020008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101010400010000ff020008000000000000000000000000000000000000001e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000049bb";
     const SAMPLE_ADJUSTMENT_CELSIUS_2: &str = "aaec40ec0101010400010000ff020008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101010200010000ff020008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004bbb";
     const SAMPLE_PREHEAT_ALARM_OFF: &str = "aaec40ec0101000000010000ff020008000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000000000ff020008000000000000000000000000000000000000001e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040bb";
@@ -237,76 +258,442 @@ mod tests {
     const SAMPLE_BEEP_LOW: &str = "aaec40ec0101000000010200ff020000000000000000000000000000000000000000001200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101000000010100ff02000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a4bb";
 
     #[test]
-    fn config_and_idle_unknown_temps() {
-        let (ha, thinq, _) = make();
+    fn config_published_on_device_creation() {
+        let (ha, _, _) = make();
         let device = ha.device(DEVICE_ID).unwrap();
         let comps = &device.config.as_ref().unwrap().components;
+        let mut keys: Vec<&str> = comps.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "oven_status",
+            "oven_mode",
+            "broil_level",
+            "oven_target_temperature",
+            "oven_temperature",
+            "remote_start",
+            "remote_started",
+            "oven_door",
+            "oven_door_lock",
+            "clock_format",
+            "auto_remote",
+            "temperature_adjustment",
+            "temperature_unit",
+            "auto_conversion",
+            "preheating_alarm_light",
+            "oven_beeper_volume",
+            "cooktop_beeper_volume",
+            "control_lock",
+            "cook_time",
+            "remaining_time",
+            "timer",
+            "cooktop_front_left",
+            "cooktop_front_right",
+            "cooktop_rear_left",
+            "cooktop_rear_right",
+            "cooktop_rear_center",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        assert_eq!(comps["oven_status"]["device_class"], "enum");
+        assert_eq!(
+            comps["oven_status"]["options"],
+            json!([
+                "Idle",
+                "Preheating",
+                "Cooking",
+                "Done",
+                "Cooling",
+                "Cleaning"
+            ])
+        );
+        assert_eq!(
+            comps["oven_mode"]["options"],
+            json!([
+                "Off",
+                "Bake",
+                "Convection Bake",
+                "Convection Roast",
+                "Broil",
+                "Warm",
+                "Proof",
+                "Frozen Meal",
+                "Self Clean",
+                "Air Fry",
+                "Air Sous Vide",
+            ])
+        );
+        assert_eq!(
+            comps["oven_target_temperature"]["device_class"],
+            "temperature"
+        );
+        assert_eq!(
+            comps["oven_target_temperature"]["unit_of_measurement"],
+            "°F"
+        );
         assert_eq!(comps["oven_door"]["device_class"], "door");
-        assert_eq!(comps["oven_target_temperature"]["unit_of_measurement"], "°F");
-        thinq.emit_data(&hex_decode(SAMPLE_IDLE));
-        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Idle"));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Off"));
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("None"));
-        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("None"));
-        assert_eq!(prop(&ha, "oven_door").as_deref(), Some("OFF"));
+        assert_eq!(comps["cooktop_rear_center"]["platform"], "binary_sensor");
     }
+
     #[test]
-    fn bake_door_airfry_and_query() {
-        let (ha, thinq, dev) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_BAKE_PREHEATING));
-        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Preheating"));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Bake"));
-        thinq.emit_data(&hex_decode(SAMPLE_BAKE_AT_TEMPERATURE));
-        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Cooking"));
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("200"));
-        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("200"));
-        thinq.emit_data(&hex_decode(SAMPLE_DOOR_OPEN));
-        assert_eq!(prop(&ha, "oven_door").as_deref(), Some("ON"));
-        thinq.emit_data(&hex_decode(SAMPLE_AIR_FRY_400));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Air Fry"));
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("400"));
-        thinq.emit_data(&hex_decode(SAMPLE_BROIL_HIGH));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Broil"));
-        assert_eq!(prop(&ha, "broil_level").as_deref(), Some("High"));
-        thinq.emit_data(&hex_decode(SAMPLE_SELF_CLEAN_STARTED));
-        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Cleaning"));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Self Clean"));
-        thinq.emit_data(&hex_decode(SAMPLE_COOKTOP_FRONT_LEFT));
-        assert_eq!(prop(&ha, "cooktop_front_left").as_deref(), Some("ON"));
-        thinq.emit_data(&hex_decode(SAMPLE_CONTROL_LOCKED));
-        assert_eq!(prop(&ha, "control_lock").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "cooktop_front_left").as_deref(), Some("OFF"));
-        thinq.emit_data(&hex_decode(SAMPLE_TIMER_ONE_HOUR));
-        assert_eq!(prop(&ha, "timer").as_deref(), Some("3600"));
+    fn config_icons_match_upstream() {
+        let (ha, _, _) = make();
+        let device = ha.device(DEVICE_ID).unwrap();
+        let comps = &device.config.as_ref().unwrap().components;
+        for (key, icon) in [
+            ("oven_status", Some("mdi:stove")),
+            ("oven_mode", Some("mdi:chef-hat")),
+            ("broil_level", Some("mdi:fire")),
+            ("oven_target_temperature", None),
+            ("oven_temperature", None),
+            ("remote_start", Some("mdi:cellphone-wireless")),
+            ("remote_started", Some("mdi:cellphone-check")),
+            ("oven_door", None),
+            ("oven_door_lock", Some("mdi:lock")),
+            ("clock_format", Some("mdi:clock-outline")),
+            ("auto_remote", Some("mdi:cellphone-cog")),
+            ("temperature_adjustment", Some("mdi:thermometer-plus")),
+            ("temperature_unit", Some("mdi:temperature-fahrenheit")),
+            ("auto_conversion", Some("mdi:thermometer-auto")),
+            ("preheating_alarm_light", Some("mdi:bell-ring-outline")),
+            ("oven_beeper_volume", Some("mdi:volume-high")),
+            ("cooktop_beeper_volume", Some("mdi:volume-high")),
+            ("control_lock", Some("mdi:lock")),
+            ("cook_time", Some("mdi:timelapse")),
+            ("remaining_time", Some("mdi:timer-outline")),
+            ("timer", Some("mdi:timer-outline")),
+            ("cooktop_front_left", Some("mdi:circle-outline")),
+            ("cooktop_rear_center", Some("mdi:circle-outline")),
+        ] {
+            assert_eq!(
+                comps[key].get("icon").and_then(|v| v.as_str()),
+                icon,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn start_sends_the_status_query_the_lg_cloud_uses() {
+        let (_, thinq, dev) = make();
         DeviceHandler::start(dev.as_ref());
-        assert!(outbox_has_inner(&thinq, &hex_decode(STATUS_QUERY)));
         assert_eq!(
             hex_encode(&thinq.outbox()[0]),
             "AA28F0ED114101000000181A1017181C272E2F33505356595C00000000000000000000000000A1BB"
         );
     }
+
     #[test]
-    fn knob_modes_and_remote_start_mask() {
+    fn an_idle_oven_reports_unknown_temperatures_rather_than_zero_degrees() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_CONVECTION_BAKE_325));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Convection Bake"));
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("325"));
-        thinq.emit_data(&hex_decode(SAMPLE_WARM));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Warm"));
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("None"));
-        thinq.emit_data(&hex_decode(SAMPLE_AIR_SOUS_VIDE_130));
-        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Air Sous Vide"));
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("130"));
-        thinq.emit_data(&hex_decode(SAMPLE_REMOTE_START_ARMED));
+        feed(&thinq, SAMPLE_IDLE);
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Idle"));
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Off"));
+        assert_eq!(
+            prop(&ha, "oven_target_temperature").as_deref(),
+            Some("None")
+        );
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "oven_door").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "timer").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn a_bake_cycle_reports_mode_state_and_both_temperatures() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_BAKE_PREHEATING);
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Preheating"));
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Bake"));
+        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("200"));
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("100"));
+
+        feed(&thinq, SAMPLE_BAKE_AT_TEMPERATURE);
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Cooking"));
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("200"));
+
+        // raising the setpoint puts the oven back into preheat
+        feed(&thinq, SAMPLE_SETPOINT_RAISED_TO_350);
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Preheating"));
+        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("350"));
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("225"));
+    }
+
+    #[test]
+    fn the_oven_door_is_reported() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_SETPOINT_RAISED_TO_350);
+        assert_eq!(prop(&ha, "oven_door").as_deref(), Some("OFF"));
+        feed(&thinq, SAMPLE_DOOR_OPEN);
+        assert_eq!(prop(&ha, "oven_door").as_deref(), Some("ON"));
+    }
+
+    #[test]
+    fn air_fry_is_a_distinct_mode_and_reaches_a_3_digit_setpoint() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_AIR_FRY_400);
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Air Fry"));
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Cooking"));
+        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("400"));
+        // the cavity temperature is not reported at the start of an air fry run
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn every_knob_position_reports_its_own_mode_and_setpoint() {
+        let (ha, thinq, _) = make();
+        for (frame, mode, target) in [
+            (SAMPLE_CONVECTION_BAKE_325, "Convection Bake", "325"),
+            (SAMPLE_CONVECTION_ROAST_325, "Convection Roast", "325"),
+            (SAMPLE_BROIL_HIGH, "Broil", "None"),
+            (SAMPLE_WARM, "Warm", "None"),
+            // Proof carries no setpoint either, the target staying 0 the whole time it runs
+            (SAMPLE_PROOF, "Proof", "None"),
+            (SAMPLE_FROZEN_MEAL_400, "Frozen Meal", "400"),
+            (SAMPLE_AIR_SOUS_VIDE_130, "Air Sous Vide", "130"),
+        ] {
+            feed(&thinq, frame);
+            assert_eq!(prop(&ha, "oven_mode").as_deref(), Some(mode));
+            assert_eq!(
+                prop(&ha, "oven_target_temperature").as_deref(),
+                Some(target),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_start_is_armed_at_the_knob_and_marked_in_the_mode_byte_when_used() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_REMOTE_START_ARMED);
         assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "remote_started").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Idle"));
         assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Off"));
-        thinq.emit_data(&hex_decode(SAMPLE_REMOTE_STARTED_BAKE));
+
+        feed(&thinq, SAMPLE_REMOTE_STARTED_BAKE);
+        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "remote_started").as_deref(), Some("ON"));
+        // the 0x80 must not leak into the mode: this is a plain Bake
         assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Bake"));
         assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Preheating"));
         assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("425"));
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("105"));
+
+        // a hand-started run leaves both clear
+        feed(&thinq, SAMPLE_FROZEN_MEAL_400);
+        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "remote_started").as_deref(), Some("OFF"));
     }
+
+    #[test]
+    fn the_oven_and_cooktop_beeper_volumes_are_separate_settings() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_COOKTOP_BEEP_MUTE);
+        assert_eq!(prop(&ha, "cooktop_beeper_volume").as_deref(), Some("Mute"));
+        assert_eq!(prop(&ha, "oven_beeper_volume").as_deref(), Some("High"));
+
+        feed(&thinq, SAMPLE_COOKTOP_BEEP_HIGH);
+        assert_eq!(prop(&ha, "cooktop_beeper_volume").as_deref(), Some("High"));
+        assert_eq!(prop(&ha, "oven_beeper_volume").as_deref(), Some("High"));
+
+        feed(&thinq, SAMPLE_BEEP_LOW);
+        assert_eq!(prop(&ha, "oven_beeper_volume").as_deref(), Some("Low"));
+        assert_eq!(prop(&ha, "cooktop_beeper_volume").as_deref(), Some("High"));
+
+        feed(&thinq, SAMPLE_BEEP_MUTE);
+        assert_eq!(prop(&ha, "oven_beeper_volume").as_deref(), Some("Mute"));
+        assert_eq!(prop(&ha, "cooktop_beeper_volume").as_deref(), Some("High"));
+    }
+
+    #[test]
+    fn a_celsius_appliance_is_converted_rather_than_reported_as_fahrenheit() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_BAKE_175_CELSIUS);
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Bake"));
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Preheating"));
+        // 175C, carried as 0x80af: the top bit is the Celsius flag
+        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("347"));
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("203"));
+        assert_eq!(prop(&ha, "temperature_unit").as_deref(), Some("°C"));
+
+        // and a Fahrenheit appliance is passed through untouched
+        feed(&thinq, SAMPLE_BAKE_PREHEATING);
+        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("200"));
+        assert_eq!(prop(&ha, "temperature_unit").as_deref(), Some("°F"));
+    }
+
+    #[test]
+    fn the_temperature_adjustment_converts_as_a_difference_not_an_absolute() {
+        let (ha, thinq, _) = make();
+        // +4C of trim is 7.2F, so 7 rather than the 39 an absolute conversion would give
+        feed(&thinq, SAMPLE_ADJUSTMENT_CELSIUS_4);
+        assert_eq!(prop(&ha, "temperature_adjustment").as_deref(), Some("7"));
+        assert_eq!(prop(&ha, "temperature_unit").as_deref(), Some("°C"));
+
+        // 2C of trim is 3.6F, rounded to 4
+        feed(&thinq, SAMPLE_ADJUSTMENT_CELSIUS_2);
+        assert_eq!(prop(&ha, "temperature_adjustment").as_deref(), Some("4"));
+
+        feed(&thinq, SAMPLE_BAKE_PREHEATING);
+        assert_eq!(prop(&ha, "temperature_adjustment").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "temperature_unit").as_deref(), Some("°F"));
+    }
+
+    #[test]
+    fn the_preheating_alarm_light_is_reported_both_ways() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_PREHEAT_ALARM_OFF);
+        assert_eq!(prop(&ha, "preheating_alarm_light").as_deref(), Some("OFF"));
+        feed(&thinq, SAMPLE_PREHEAT_ALARM_ON);
+        assert_eq!(prop(&ha, "preheating_alarm_light").as_deref(), Some("ON"));
+    }
+
+    #[test]
+    fn the_broil_level_is_reported_only_while_broiling() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_BROIL_HIGH);
+        assert_eq!(prop(&ha, "broil_level").as_deref(), Some("High"));
+
+        feed(&thinq, SAMPLE_BROIL_LOW);
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Broil"));
+        assert_eq!(prop(&ha, "broil_level").as_deref(), Some("Low"));
+
+        // every other mode leaves the byte at zero, which means off rather than unreported
+        feed(&thinq, SAMPLE_WARM);
+        assert_eq!(prop(&ha, "broil_level").as_deref(), Some("Off"));
+    }
+
+    #[test]
+    fn a_self_clean_reports_its_own_state_counts_down_and_disables_the_cooktop() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_SELF_CLEAN_STARTED);
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Self Clean"));
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Cleaning"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("14400"));
+        // the panel is not locked, but no element may read as heating
+        assert_eq!(prop(&ha, "control_lock").as_deref(), Some("OFF"));
+        for key in [
+            "cooktop_front_left",
+            "cooktop_rear_right",
+            "cooktop_rear_center",
+        ] {
+            assert_eq!(prop(&ha, key).as_deref(), Some("OFF"), "{key}");
+        }
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("14400"));
+        // only a self clean engages the motorised door lock
+        assert_eq!(prop(&ha, "oven_door_lock").as_deref(), Some("OFF"));
+
+        feed(&thinq, SAMPLE_SELF_CLEAN_COUNTING_DOWN);
+        assert_eq!(
+            prop(&ha, "remaining_time").as_deref(),
+            Some((3 * 3600 + 59 * 60 + 45).to_string().as_str())
+        );
+        assert_eq!(prop(&ha, "oven_door_lock").as_deref(), Some("ON"));
+
+        // cancelling clears the mode and the countdown and leaves the oven cooling
+        feed(&thinq, SAMPLE_SELF_CLEAN_CANCELLED);
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Off"));
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Cooling"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn a_timed_bake_reports_its_length_apart_from_what_is_left_of_it() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_TIMED_BAKE_20M);
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Bake"));
+        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("350"));
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("1200"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("1200"));
+        // the kitchen timer is a separate field and is not running
+        assert_eq!(prop(&ha, "timer").as_deref(), Some("0"));
+
+        feed(&thinq, SAMPLE_TIMED_BAKE_19M59S);
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("1200"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("1199"));
+    }
+
+    #[test]
+    fn a_cycle_running_out_reports_done_with_everything_it_was_running_on_cleared() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_TIMED_BAKE_20M);
+        feed(&thinq, SAMPLE_BAKE_DONE);
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Done"));
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Off"));
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("0"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
+        assert_eq!(
+            prop(&ha, "oven_target_temperature").as_deref(),
+            Some("None")
+        );
+        assert_eq!(prop(&ha, "oven_temperature").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn the_kitchen_timer_is_reported_as_a_duration() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_TIMER_ONE_HOUR);
+        assert_eq!(prop(&ha, "timer").as_deref(), Some("3600"));
+        feed(&thinq, SAMPLE_TIMER_59M59S);
+        assert_eq!(prop(&ha, "timer").as_deref(), Some("3599"));
+    }
+
+    #[test]
+    fn each_cooktop_element_is_reported_separately() {
+        let (ha, thinq, _) = make();
+        let cases = [
+            (SAMPLE_COOKTOP_FRONT_LEFT, "cooktop_front_left"),
+            (SAMPLE_COOKTOP_FRONT_RIGHT, "cooktop_front_right"),
+            (SAMPLE_COOKTOP_REAR_LEFT, "cooktop_rear_left"),
+            (SAMPLE_COOKTOP_REAR_RIGHT, "cooktop_rear_right"),
+            (SAMPLE_COOKTOP_CENTER, "cooktop_rear_center"),
+        ];
+        for (frame, on) in cases {
+            feed(&thinq, frame);
+            for (_, key) in cases {
+                let expected = if key == on { "ON" } else { "OFF" };
+                assert_eq!(prop(&ha, key).as_deref(), Some(expected), "{on}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_locked_panel_is_reported_without_lighting_up_every_cooktop_element() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_COOKTOP_FRONT_LEFT);
+        assert_eq!(prop(&ha, "control_lock").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "cooktop_front_left").as_deref(), Some("ON"));
+
+        feed(&thinq, SAMPLE_CONTROL_LOCKED);
+        assert_eq!(prop(&ha, "control_lock").as_deref(), Some("ON"));
+        for key in [
+            "cooktop_front_left",
+            "cooktop_front_right",
+            "cooktop_rear_center",
+        ] {
+            assert_eq!(prop(&ha, key).as_deref(), Some("OFF"), "{key}");
+        }
+    }
+
+    #[test]
+    fn the_single_record_40_eb_reply_to_start_repopulates_state() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_INITIAL_STATUS);
+        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Idle"));
+        assert_eq!(prop(&ha, "oven_mode").as_deref(), Some("Off"));
+        assert_eq!(prop(&ha, "oven_door").as_deref(), Some("OFF"));
+        assert_eq!(prop(&ha, "cooktop_front_left").as_deref(), Some("OFF"));
+    }
+
+    #[test]
+    fn frames_of_the_wrong_length_or_class_publish_nothing() {
+        let (ha, thinq, _) = make();
+        // a 40/b1 burner-event frame, which this handler does not decode
+        feed(&thinq, "AA0840B10101F0BB");
+        // an EC frame truncated by one byte
+        feed(&thinq, "AAEB40EC0101000000010200FFBB");
+        assert!(ha.device(DEVICE_ID).unwrap().properties.is_empty());
+    }
+
     #[test]
     fn registry_is_not_an_alias_of_other_ranges() {
         let a = t2_factory("WLSI_633_").expect("WLSI_633_");
@@ -314,20 +701,5 @@ mod tests {
         let c = t2_factory("WFV474PGV").expect("WFV474PGV");
         assert!(!std::ptr::fn_addr_eq(a, b));
         assert!(!std::ptr::fn_addr_eq(a, c));
-    }
-    #[test]
-    fn celsius_conversion_and_eb_reply() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_BAKE_175_CELSIUS));
-        // 175C -> 347F
-        assert_eq!(prop(&ha, "oven_target_temperature").as_deref(), Some("347"));
-        assert_eq!(prop(&ha, "temperature_unit").as_deref(), Some("°C"));
-        thinq.emit_data(&hex_decode(SAMPLE_ADJUSTMENT_CELSIUS_4));
-        assert_eq!(prop(&ha, "temperature_adjustment").as_deref(), Some("7"));
-        thinq.emit_data(&hex_decode(SAMPLE_INITIAL_STATUS));
-        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Idle"));
-        thinq.emit_data(&hex_decode("AA084100430063BB"));
-        // wrong class ignored; last status remains
-        assert_eq!(prop(&ha, "oven_status").as_deref(), Some("Idle"));
     }
 }
