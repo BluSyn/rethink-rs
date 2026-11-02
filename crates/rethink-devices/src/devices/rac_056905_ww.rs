@@ -33,6 +33,8 @@ fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
     (cap_2d6 & 0x8002) != 0 && display_light_on_value(eeprom_checksum).is_some()
 }
 
+/// HA climate mode per 0x1f9 code, in HA's list order.
+const MODES: [(&str, u32); 5] = [("cool", 0), ("dry", 1), ("fan_only", 2), ("heat", 4), ("auto", 6)];
 const MODE_PURIFY_ONLY: u32 = 46;
 /// 0x2d3 (support.reserve): the remote's sleep timer goes up to 12 h instead of 7 h.
 const SLEEP_TIMER_12H: u32 = 0x4000;
@@ -443,6 +445,23 @@ impl Device {
             }),
         );
 
+        // 0x2c1 (support.airState.opMode): bit n set = the unit supports mode n. Without it, HA's
+        // default mode list stays.
+        let op_modes = self.core.get_raw(0x2c1).unwrap_or(0);
+        if op_modes != 0 {
+            let modes: Vec<&str> = std::iter::once("off")
+                .chain(
+                    MODES
+                        .iter()
+                        .filter(|(_, code)| op_modes & (1 << code) != 0)
+                        .map(|(name, _)| *name),
+                )
+                .collect();
+            if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
+                climate.insert("modes".into(), json!(modes));
+            }
+        }
+
         // current temperature
         {
             let mut f = FieldDefinition::new("climate", "current_temperature")
@@ -568,19 +587,10 @@ impl Device {
                 if raw == MODE_PURIFY_ONLY {
                     return Some("fan_only".into());
                 }
-                let modes2ha: [Option<&str>; 7] = [
-                    Some("cool"),
-                    Some("dry"),
-                    Some("fan_only"),
-                    None,
-                    Some("heat"),
-                    None,
-                    Some("auto"),
-                ];
-                modes2ha
-                    .get(raw as usize)
-                    .and_then(|m| *m)
-                    .map(|s| s.into())
+                MODES
+                    .iter()
+                    .find(|(_, code)| *code == raw)
+                    .map(|(name, _)| (*name).into())
             }));
             mode.read_callback = Some(Box::new(move |val| {
                 if let PropertyValue::Str(s) = val {
@@ -608,14 +618,10 @@ impl Device {
                     return None;
                 }
                 this_w.core.set_raw(0x1f7, 1);
-                match val {
-                    "cool" => Some(0i64.into()),
-                    "dry" => Some(1i64.into()),
-                    "fan_only" => Some(2i64.into()),
-                    "heat" => Some(4i64.into()),
-                    "auto" => Some(6i64.into()),
-                    _ => None,
-                }
+                MODES
+                    .iter()
+                    .find(|(name, _)| *name == val)
+                    .map(|(_, code)| i64::from(*code).into())
             }));
             mode.write_attach_static = Some(vec![0x1f7, 0x1fa, 0x1fe]);
             self.core.add_field(&mut config, mode, true);
@@ -2065,6 +2071,11 @@ mod tests {
 
         let device = ha.device(DEVICE_ID).expect("HA configuration published");
         let c = device.config.as_ref().unwrap();
+        // 0x2c1 = 0x57
+        assert_eq!(
+            c.components["climate"]["modes"],
+            json!(["off", "cool", "dry", "fan_only", "heat", "auto"])
+        );
         let component = &c.components["displaylight"];
         assert_eq!(component["platform"], "switch");
         assert_eq!(component["name"], "Display light");
@@ -2490,6 +2501,11 @@ mod tests {
         let c = &info.config.as_ref().unwrap().components;
         assert_eq!(c["climate"]["min_temp"].as_f64(), Some(16.0));
         assert_eq!(c["climate"]["max_temp"].as_f64(), Some(30.0));
+        // 0x2c1 = 0x77; bit 5 (purify) is not an HA mode, see the airclean switch
+        assert_eq!(
+            c["climate"]["modes"],
+            json!(["off", "cool", "dry", "fan_only", "heat", "auto"])
+        );
         assert_eq!(
             c["climate"]["current_humidity_topic"],
             "$this/climate-current_humidity"
@@ -2792,5 +2808,40 @@ mod tests {
         thinq.emit_data(&notify(&[(0x323, 0)]));
         assert_eq!(get("viraat"), Some("OFF".into()));
         assert_eq!(get("jet"), Some("OFF".into()));
+    }
+
+    /// The captured caps response with one tag left out (the CRC is not checked).
+    fn without_tag(caps_hex: &str, tag: u16) -> Vec<u8> {
+        use rethink_util::tlv;
+        let frame = hex_decode(caps_hex);
+        let kept: Vec<_> = tlv::parse(&frame[11..frame.len() - 2])
+            .into_iter()
+            .filter(|e| e.t != tag)
+            .collect();
+        let body = tlv::build(&kept);
+        let mut out = frame[..11].to_vec();
+        out[10] = body.len() as u8;
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    fn us_q19mwze_offers_only_the_modes_0x2c1_advertises() {
+        // 0x2c1 = 0x7: cool, dry, fan
+        let (ha, _thinq, _dev) = us_q19mwze_ready();
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(c["climate"]["modes"], json!(["off", "cool", "dry", "fan_only"]));
+    }
+
+    #[test]
+    fn us_q19mwze_keeps_the_default_modes_without_0x2c1() {
+        let (ha, thinq, _dev) = make_device();
+        thinq.emit_data(&without_tag(US_Q19MWZE_CAPS_HEX, 0x2c1));
+        thinq.emit_data(&hex_decode(US_Q19MWZE_QUERY_HEX));
+        thinq.emit_data(&hex_decode(US_Q19MWZE_QUERY_HEX));
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert!(c.contains_key("climate"));
+        assert!(c["climate"].get("modes").is_none());
     }
 }
