@@ -73,6 +73,7 @@ register_devices! {
         vcdwl2qeuk => { "VCDWL2QEUK" },
         f_v__f___w_b_1qeuk => { "F_V__F___W.B_1QEUK" | "F_VA_F___W.B__QEUK" },
         f_vb_f___w_b_2qeuk => { "F_VB_F___W.B_2QEUK" },
+        f_v__f___w_b__econ => { "F_V__F___W.B__ECON" },
         f_vb_y___w_b_2qeuk => { "F_VB_Y___W.B_2QEUK" },
         f_c__y___w_a__qeuk => { "F_C__Y___W.A__QEUK" | "F_V7_Y___W.A__QEUK" },
         f_v__y___w_a__qeuk => { "F_V__Y___W.A__QEUK" },
