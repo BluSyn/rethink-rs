@@ -22,6 +22,8 @@ fn display_light_on_value(eeprom_checksum: u32) -> Option<u32> {
         0x4eb9 => Some(0),
         // Firmware 0x885612: 0 = on.
         0x4aba | 0x4d06 => Some(0),
+        // US-Q19MWZE, firmware 0x885631: 0 = on.
+        0x5449 => Some(0),
         _ => None,
     }
 }
@@ -2395,6 +2397,20 @@ mod tests {
         (ha, thinq, dev)
     }
 
+    // US-Q19MWZE (firmware 0x885631, EEPROM checksum 0x5449), switched off. Cooling-only,
+    // 0x2d6 = 0x8000.
+    const US_Q19MWZE_CAPS_HEX: &str = "0000040000008702010C79B001E180B047B0A0017CD40AD3E004006480B85020B8903CB8D020B9103CBAD020BB103CB0C1B103B304B2A04000B2C0BC1022B37080000DABC0B480B4E01011B5A08000B542B6A05449B6F0885631B701B740BC40BD00EA10C0BD600C0FDD04FA016C81B5C0B61034B648B5C1B61030B648B5C2B61030B64805BC";
+    const US_Q19MWZE_QUERY_HEX: &str = "0000040000008702041BAB7E407DC07E887F50347F90347EC07F00C85064C8817BD0147C00C8C0834083807C8083C0A880868086C0870087C08F808940E880594088408A10188A50768A80ACE0021A59C05A005A7001050A5F406D4168816901D440F2700A50008200D540D580D5D03CD61020C900CAD05ACB10AFCB40CB9012CBC0CC105ECC4DCC909F8B40E800BF6003FFBFC0BFA003E6C000BE40BE801B00BEC0C340C0C0C380CCC8CD08CD4890004B414BC14CC16002";
+
+    fn us_q19mwze_ready() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        let (ha, thinq, dev) = make_device();
+        thinq.emit_data(&hex_decode(US_Q19MWZE_CAPS_HEX));
+        thinq.emit_data(&hex_decode(US_Q19MWZE_QUERY_HEX));
+        thinq.emit_data(&hex_decode(US_Q19MWZE_QUERY_HEX));
+        thinq.reset_recorder();
+        (ha, thinq, dev)
+    }
+
     fn notify(pairs: &[(u16, u32)]) -> Vec<u8> {
         use rethink_util::packet_codec::{encode_packet, Direction, EncodeInput, TlvEncodeInput};
         use rethink_util::tlv::Tlv;
@@ -2627,5 +2643,21 @@ mod tests {
         ] {
             assert_eq!(feature_attributes(&ha, name)["description"], description, "{name}");
         }
+    }
+
+    #[test]
+    fn us_q19mwze_display_light_is_inverted() {
+        let (ha, thinq, _dev) = us_q19mwze_ready();
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(c["displaylight"]["platform"], "switch");
+        // captured with 0x21f = 0 and the display lit
+        assert_eq!(ha.get_property(DEVICE_ID, "displaylight", "state"), Some("ON".into()));
+        ha.set_property(DEVICE_ID, "displaylight", "command", "OFF");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_DISPLAY_ON_HEX); // 0x21f = 1
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "displaylight", "command", "ON");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_DISPLAY_OFF_HEX); // 0x21f = 0
+        thinq.emit_data(&notify(&[(0x21f, 1)]));
+        assert_eq!(ha.get_property(DEVICE_ID, "displaylight", "state"), Some("OFF".into()));
     }
 }
