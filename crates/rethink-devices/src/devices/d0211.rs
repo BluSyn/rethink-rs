@@ -60,8 +60,17 @@ const COURSES: &[(u8, &str)] = &[
     (0x0b, "Download cycle"),
 ];
 
+/// Hooks for a model that extends this handler, as D2201 does.
+pub(crate) trait Extension: Send + Sync {
+    fn components(&self) -> std::collections::HashMap<String, Value>;
+    /// Reads further fields from a record D0211 accepted.
+    fn process_status(&self, core: &AabbDeviceCore, record: &[u8]);
+    fn set_property(&self, core: &AabbDeviceCore, prop: &str, value: &str);
+}
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
+    ext: Option<Box<dyn Extension>>,
 }
 
 impl Device {
@@ -70,10 +79,25 @@ impl Device {
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
     ) -> Arc<Self> {
+        Self::with_extension(ha, thinq, meta, None)
+    }
+
+    pub(crate) fn with_extension(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        ext: Option<Box<dyn Extension>>,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
-        let this = Arc::new(Self { core: core.clone() });
+        let this = Arc::new(Self {
+            core: core.clone(),
+            ext,
+        });
         let mut base = default_config(&meta, Some(json!({"name": "LG Dishwasher"})));
         base.components = components();
+        if let Some(ext) = &this.ext {
+            base.components.extend(ext.components());
+        }
         core.set_config(base);
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
@@ -86,7 +110,11 @@ impl Device {
 
     fn process_aabb(&self, buf: &[u8]) {
         if let Some(rec) = process_common_status(buf, CLASS_BYTE, RECORD_LEN) {
-            self.process_status(rec);
+            if self.process_status(rec) {
+                if let Some(ext) = &self.ext {
+                    ext.process_status(&self.core, rec);
+                }
+            }
             return;
         }
         if buf.len() == 3 && buf.first() == Some(&CLASS_BYTE) && buf.get(1) == Some(&0xd8) {
@@ -95,14 +123,15 @@ impl Device {
         }
     }
 
-    fn process_status(&self, record: &[u8]) {
+    /// Returns whether the record was accepted, so an [`Extension`] never reads a rejected one.
+    fn process_status(&self, record: &[u8]) -> bool {
         if record.len() < RECORD_LEN || record[1] != RECORD_BODY {
-            return;
+            return false;
         }
         let data = &record[2..];
         let (ih, im, rh, rm) = (data[3], data[4], data[7], data[8]);
         if im > 59 || rm > 59 || ih > 99 || rh > 99 {
-            return;
+            return false;
         }
         let cycle = data[0] == STATE_RUNNING;
         self.core
@@ -139,6 +168,7 @@ impl Device {
             .publish_on_off("rinse_refill", flags & FLAG_RINSE != 0);
         self.core
             .publish_on_off("salt_refill", flags & FLAG_SALT != 0);
+        true
     }
 }
 
@@ -152,7 +182,11 @@ impl DeviceHandler for Device {
     fn drop_device(&self) {
         self.core.drop_device();
     }
-    fn set_property(&self, _prop: &str, _value: &str) {}
+    fn set_property(&self, prop: &str, value: &str) {
+        if let Some(ext) = &self.ext {
+            ext.set_property(&self.core, prop, value);
+        }
+    }
     fn publish_config(&self) {
         self.core.republish_config();
     }
