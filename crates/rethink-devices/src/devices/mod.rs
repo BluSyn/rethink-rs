@@ -94,6 +94,7 @@ register_devices! {
         dhum_056905_ww => { "DHUM_056905_WW" },
         dhum_231006_ww => { "DHUM_231006_WW" },
         hum_056905_ww => { "HUM_056905_WW" },
+        wht_056905_ww => { "WHT_056905_WW" },
         studio_hood => { "STUDIO_HOOD" },
         hwwa9k_f2 => { "HWWA9K_F2" },
         dev_1wpu4cigcr__2 => { "1WPU4CIGCR__2" },
