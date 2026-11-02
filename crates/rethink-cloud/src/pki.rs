@@ -239,9 +239,8 @@ mod tests {
             .next()
             .unwrap()
             .data()
-            .as_utf8()
-            .unwrap()
             .to_string()
+            .unwrap()
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {

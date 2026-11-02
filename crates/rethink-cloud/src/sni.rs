@@ -97,9 +97,8 @@ mod tests {
             .next()
             .unwrap()
             .data()
-            .as_utf8()
-            .unwrap()
             .to_string()
+            .unwrap()
     }
 
     #[test]
