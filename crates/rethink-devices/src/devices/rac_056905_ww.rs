@@ -1399,7 +1399,8 @@ impl Device {
 
     fn add_extended_features(self: &Arc<Self>, config: &mut DeviceDiscovery) {
         let caps = |tag: u16, mask: u32| self.core.get_raw(tag).unwrap_or(0) & mask != 0;
-        if caps(0x2ca, 0x30000) {
+        // wMode AI_AIR cool/heat (bits 16-17) or AC_AI_PLUS_CONVERTIBLE (bit 14, "AI+ convertible")
+        if caps(0x2ca, 0x34000) {
             let modes = vec![0, 4];
             self.add_running_switch(config, 0x23e, "aiair", "AI Air", "mdi:robot-outline", modes.clone(), false);
             self.describe_feature(
@@ -2659,5 +2660,31 @@ mod tests {
         assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_DISPLAY_OFF_HEX); // 0x21f = 0
         thinq.emit_data(&notify(&[(0x21f, 1)]));
         assert_eq!(ha.get_property(DEVICE_ID, "displaylight", "state"), Some("OFF".into()));
+    }
+
+    #[test]
+    fn us_q19mwze_exposes_ai_air_for_ai_plus_convertible() {
+        // 0x2ca = 0x4000: AC_AI_PLUS_CONVERTIBLE only, no AI Air bits 16-17
+        let (ha, _thinq, _dev) = us_q19mwze_ready();
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(c["aiair"]["platform"], "switch");
+    }
+
+    #[test]
+    fn us_q19mwze_ai_air_is_written_only_while_running_and_reads_back() {
+        // 0x23e = 1, accepted by the unit: setpoint 24, both swings and the energy limit off
+        const WRITE_AIAIR_ON_HEX: &str = "01010400000065020101028F812830";
+        let (ha, thinq, _dev) = us_q19mwze_ready();
+        ha.set_property(DEVICE_ID, "aiair", "command", "ON");
+        assert!(thinq.outbox().is_empty());
+
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0)]));
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "aiair", "command", "ON");
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(sent, [WRITE_AIAIR_ON_HEX]);
+
+        thinq.emit_data(&notify(&[(0x23e, 1)]));
+        assert_eq!(ha.get_property(DEVICE_ID, "aiair", "state"), Some("ON".into()));
     }
 }
