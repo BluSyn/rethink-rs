@@ -102,7 +102,12 @@ RUN cargo build --release \
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
+# Upgrade what the base image ships as well, so that a rebuild picks up security fixes such
+# as the ca-certificates update for the eMudhra CA compromise (DSA-6572-1). The system trust
+# store is what the Home Assistant MQTT client checks an mqtts:// broker against; the
+# bridge's HTTPS client uses the webpki roots compiled into the binary instead.
 RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r app \
