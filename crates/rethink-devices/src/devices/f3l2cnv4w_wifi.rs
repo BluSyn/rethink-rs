@@ -211,6 +211,14 @@ fn named(table: &[(u8, &str)], v: u8) -> String {
         .unwrap_or_else(|| v.to_string())
 }
 
+/// For enum sensors, whose state must be one of their options: an unmapped code is unknown.
+fn named_or_none(table: &[(u8, &'static str)], v: u8) -> &'static str {
+    table
+        .iter()
+        .find(|(k, _)| *k == v)
+        .map_or("None", |(_, n)| n)
+}
+
 fn course_id_for_name(name: &str) -> Option<u8> {
     SELECTABLE_COURSE_NAMES
         .iter()
@@ -735,9 +743,9 @@ impl Device {
         let extra_rinse_count = (rinse_option >> 4) & 0x0f;
 
         self.publish_on_off("power", state > 0);
-        self.publish_property("error_message", named(ERRORS, error).into());
+        self.publish_property("error_message", named_or_none(ERRORS, error).into());
         self.publish_on_off("error", error != 0);
-        self.publish_property("status", named(STATES, state).into());
+        self.publish_property("status", named_or_none(STATES, state).into());
         self.publish_property(
             "controls_available",
             if state == 0 || state == 5 {
@@ -757,7 +765,7 @@ impl Device {
             }
             .into(),
         );
-        self.publish_property("pre_state", named(STATES, pre_state).into());
+        self.publish_property("pre_state", named_or_none(STATES, pre_state).into());
         self.publish_property("course", named(AP_COURSE, ap_course).into());
         self.publish_property("op_course", named(OP_COURSE, op_course).into());
         self.publish_property("smart_course", named(SMART_COURSE, smart_course).into());
@@ -1124,6 +1132,20 @@ mod tests {
             Some("Door open error (DE1)".into())
         );
         assert_eq!(value(&ha, "course"), Some("Normal".into()));
+    }
+
+    #[test]
+    fn unmapped_state_and_error_codes_publish_none_on_the_enum_sensors() {
+        let (ha, thinq, _) = make();
+        // state 99, error 200, pre_state 98: none of them in the tables.
+        emit(
+            &thinq,
+            "63 00 00 00 00 05 c8 00 00 00 00 00 00 00 00 00 00 00 00 62 00 00 00 00",
+        );
+        for name in ["status", "error_message", "pre_state"] {
+            assert_eq!(value(&ha, name), Some("None".into()), "{name}");
+        }
+        assert_eq!(value(&ha, "error"), Some("ON".into()));
     }
 
     #[test]
