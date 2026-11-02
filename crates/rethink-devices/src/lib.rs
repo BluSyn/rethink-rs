@@ -4,6 +4,7 @@ pub mod ac_tables;
 pub mod device_trait;
 pub mod devices;
 pub mod fridge_common;
+pub mod js;
 pub mod registry;
 pub mod washer_common;
 
