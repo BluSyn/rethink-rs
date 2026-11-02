@@ -90,6 +90,7 @@ register_devices! {
         rh10v9_ch => { "RH10V9_CH" },
         wtl_fxu_bdv_na_01 => { "WTL_FXU_BDV_NA_01" },
         f3s1cwkb__ => { "F3S1CWKB__" },
+        rv13s1amjw_us => { "RV13S1AMJW_US" },
         dhum_056905_ww => { "DHUM_056905_WW" },
         dhum_231006_ww => { "DHUM_231006_WW" },
         hum_056905_ww => { "HUM_056905_WW" },
