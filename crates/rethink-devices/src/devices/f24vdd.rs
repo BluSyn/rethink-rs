@@ -681,9 +681,10 @@ fn label(table: &'static [(u8, &'static str)], code: u8) -> Option<&'static str>
     table.iter().find(|(c, _)| *c == code).map(|(_, l)| *l)
 }
 
-/// Unmapped codes read `Code <n>`, as upstream reports them.
+/// Unmapped codes publish "None" (Home Assistant's unknown) rather than the PR's `Code <n>`, which
+/// is not among these enum sensors' options and so would be rejected.
 fn label_or_code(table: &'static [(u8, &'static str)], code: u8) -> String {
-    label(table, code).map_or_else(|| format!("Code {code}"), str::to_string)
+    label(table, code).unwrap_or("None").to_string()
 }
 
 fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
@@ -1379,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn an_out_of_range_spin_code_is_reported_as_code_n_not_folded_into_off() {
+    fn an_out_of_range_spin_code_is_reported_as_unknown_not_folded_into_off() {
         let (ha, thinq, _) = make();
         emit(&thinq, CURRENT);
         expect(&ha, "spin", "Off");
@@ -1387,7 +1388,7 @@ mod tests {
         let mut unknown_spin = hex_decode(CURRENT);
         unknown_spin[14] = 9; // AA/len + record at 3 + spin at 9
         thinq.emit_data(&reframe(unknown_spin));
-        expect(&ha, "spin", "Code 9");
+        expect(&ha, "spin", "None");
     }
 
     #[test]
