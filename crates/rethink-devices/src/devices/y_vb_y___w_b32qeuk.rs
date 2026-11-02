@@ -1,9 +1,9 @@
 //! Y_VB_Y___W.B32QEUK washer (LG F4W1175YW), the ezDispense sibling of Y_V8.
 //!
 //! Status uses the Y_V8 39-byte current record. Dose levels, millilitre
-//! amounts, the download slot, and the drawer bit are this model's fields.
-//! A programme start repeats the last reported dose levels. `delay_end` is
-//! withdrawn; reserve time already carries the minutes.
+//! amounts, the download slot, the drawer and the two tank-low alerts are
+//! this model's fields. A programme start repeats the last reported dose
+//! levels. `delay_end` is withdrawn; reserve time already carries the minutes.
 
 use crate::device_trait::DeviceHandler;
 use crate::devices::y_v8_y___w_b32qeuk::{smart_course_name, Device as V8, Extension};
@@ -59,6 +59,14 @@ fn extension(_core: Arc<AabbDeviceCore>) -> Extension {
                 "dispenser_drawer".into(),
                 json!({"platform":"binary_sensor","unique_id":"$deviceid-dispenser_drawer","state_topic":"$this/dispenser_drawer","name":"Dispenser drawer","device_class":"opening"}),
             ),
+            (
+                "detergent_refill".into(),
+                json!({"platform":"binary_sensor","unique_id":"$deviceid-detergent_refill","state_topic":"$this/detergent_refill","name":"Detergent refill","icon":"mdi:cup","device_class":"problem"}),
+            ),
+            (
+                "softener_refill".into(),
+                json!({"platform":"binary_sensor","unique_id":"$deviceid-softener_refill","state_topic":"$this/softener_refill","name":"Softener refill","icon":"mdi:cup-outline","device_class":"problem"}),
+            ),
             ("delay_end".into(), json!({"platform":"sensor"})),
         ],
         after_state: Some(Box::new(move |core, s| {
@@ -70,7 +78,11 @@ fn extension(_core: Arc<AabbDeviceCore>) -> Extension {
             core.publish_property("softener", dose_name(s[33]).into());
             core.publish_property("ezdispense_detergent", i64::from(s[34]).into());
             core.publish_property("ezdispense_softener", i64::from(s[35]).into());
+            // [37]: bit 2 drawer open; bits 0 and 1 detergent and softener tank low, the
+            // softener one reading clear while the drawer is open. Bits 6 and 7 pulse, unknown.
             core.publish_on_off("dispenser_drawer", s[37] & 0x04 != 0);
+            core.publish_on_off("detergent_refill", s[37] & 0x01 != 0);
+            core.publish_on_off("softener_refill", s[37] & 0x02 != 0);
             *dose_state.lock() = [s[32], s[33], s[36]];
         })),
         patch_command: Some(Box::new(move |cmd| {
@@ -133,6 +145,12 @@ mod tests {
     const DRAWER_PULSE_ON: &str = "aaff200a0060004cd4000100ec004e000001000000000000000000000000000000000000000005003400000000000002022a1e000401000001000000000000000000000000000000000000000005003400000000000002022a1e004401bd20bb";
     const DRAWER_PULSE_OFF: &str = "aaff200a0060004cff000100ec004e000001000000000000000000000000000000000000000005003400000000000002022a1e004401000001000000000000000000000000000000000000000005003400000000000002022a1e00040183e8bb";
     const DRAWER_CLOSED: &str = "aaff200a0060004d02000100ec004e000001000000000000000000000000000000000000000005003400000000000002022a1e000401000001000000000000000000000000000000000000000005003400000000000002022a1e000001c8b2bb";
+    // The softener tank low, in the order the washer sent them: [37] bit 1 set throughout,
+    // while bit 6 pulses on and then off.
+    const SOFTENER_LOW_PULSE_ON: &str = "aaff200a006000da2d000100ec004e00000100000000000000000000000000000000000000000f003400000000000002022a1e00020100000100000000000000000000000000000000000000000f003400000000000002022a1e0042011011bb";
+    const SOFTENER_LOW_PULSE_OFF: &str = "aaff200a006000dab9000100ec004e00000100000000000000000000000000000000000000000f003400000000000002022a1e00420100000100000000000000000000000000000000000000000f003400000000000002022a1e000201e3fbbb";
+    // The detergent tank low and the softener tank not: [37] bit 0 set, bit 6 pulsing on.
+    const DETERGENT_LOW_PULSE_ON: &str = "aaff200a006000dec6000100ec004e000001032603260000000000000000000000000003000010003400000000000002022a1e000101000001032603260000000000000000000000000003000010003400000000000002022a1e00410121b4bb";
     // Not a capture: an idle Cotton record with detergent MORE ([32] = 3) and softener LESS
     // ([33] = 1), reported from a simulated washer so the LG app's start carried the doses.
     const COTTON_DOSED: &str = "aaff200a0039040081000100eb0027000001032603260100000000000000000002000003000011007100000000000003010000000000557abb";
@@ -294,6 +312,29 @@ mod tests {
             thinq.emit_data(&hex_decode(frame));
             expect(&ha, "dispenser_drawer", drawer);
         }
+    }
+
+    #[test]
+    fn softener_alert_follows_bit_1_of_37_not_the_bit_6_pulse() {
+        let (ha, thinq, _) = make();
+        for (frame, low) in [
+            (INITIAL, "OFF"),
+            (SOFTENER_LOW_PULSE_ON, "ON"),
+            (SOFTENER_LOW_PULSE_OFF, "ON"),
+            (DRAWER_PULSE_ON, "OFF"),
+            (SINGLE, "OFF"),
+        ] {
+            thinq.emit_data(&hex_decode(frame));
+            expect(&ha, "softener_refill", low);
+            expect(&ha, "detergent_refill", "OFF");
+        }
+    }
+
+    #[test]
+    fn detergent_alert_follows_bit_0_of_37() {
+        let (ha, _, _) = feed(&[DETERGENT_LOW_PULSE_ON]);
+        expect(&ha, "detergent_refill", "ON");
+        expect(&ha, "softener_refill", "OFF");
     }
 
     #[test]
