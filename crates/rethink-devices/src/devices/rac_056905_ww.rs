@@ -160,22 +160,20 @@ impl Device {
             .thinq
             .send("setMaskingInfo", 0, json!({ "blacklist_tlv": "1200" }));
 
-        // Delayed work (TS: 500ms + optional 5s filter probe) runs immediately for tests/runtime ordering.
+        // Without mFilter (0x2f1 bits 0 and 9), probe the basic filter management. The config does
+        // not wait for the reply: process_filter_data adds the filter entities once it arrives.
         let f1 = self.core.get_raw(0x2f1).unwrap_or(0);
         if (f1 & 1) == 0 && (f1 & 0x200) == 0 {
             self.send_filter_query();
-            // Filter probe timeout path (no priv reply in unit tests)
-            self.init_make_set_config();
-        } else {
-            self.init_make_set_config();
         }
+        self.init_make_set_config();
     }
 
     fn send_filter_query(&self) {
         self.core.send_priv_command(0x02, 0x02, &[]);
     }
 
-    fn process_filter_data(&self, _buf9: u8, data: &[u8]) {
+    fn process_filter_data(self: &Arc<Self>, _buf9: u8, data: &[u8]) {
         if data.len() < 1 + 3 * 4 {
             return;
         }
@@ -188,7 +186,13 @@ impl Device {
             inner.filter_life_time = life;
             inner.filter_changed_date = changed;
         }
-        // Initial config already published via timeout path in unit tests; update HA values.
+        if life != 0 {
+            let config = self.core.config.lock().clone();
+            if let Some(mut config) = config.filter(|c| !c.components.contains_key("filterreset")) {
+                self.add_filter_entities(&mut config);
+                self.core.set_config(config);
+            }
+        }
         self.publish_filter_data();
         let do_reset = {
             let mut inner = self.inner.lock();
@@ -266,6 +270,81 @@ impl Device {
                 "filter_needs_change",
             );
         }
+    }
+
+    /// Upstream's filter entities, offered once the unit reports a filter life time.
+    fn add_filter_entities(self: &Arc<Self>, config: &mut DeviceDiscovery) {
+        config.components.insert(
+            "filterused".into(),
+            json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-filterused",
+                "state_topic": "$this/filterused",
+                "name": "Filter used time",
+                "icon": "mdi:air-filter",
+                "device_class": "duration",
+                "unit_of_measurement": "h",
+                "state_class": "total_increasing",
+                "entity_category": "diagnostic",
+            }),
+        );
+        config.components.insert(
+            "filterlife".into(),
+            json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-filterlife",
+                "state_topic": "$this/filterlife",
+                "name": "Filter life time",
+                "icon": "mdi:air-filter",
+                "device_class": "duration",
+                "unit_of_measurement": "h",
+                "entity_category": "diagnostic",
+            }),
+        );
+        config.components.insert(
+            "changeddate".into(),
+            json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-filterchangeddate",
+                "state_topic": "$this/filterchangeddate",
+                "name": "Filter usage last reset",
+                "icon": "mdi:calendar-refresh-outline",
+                "device_class": "date",
+                "entity_category": "diagnostic",
+            }),
+        );
+        config.components.insert(
+            "filterreset".into(),
+            json!({
+                "platform": "button",
+                "unique_id": "$deviceid-filterreset",
+                "command_topic": "$this/filterreset/set",
+                "name": "Reset filter usage",
+                "icon": "mdi:calendar-refresh-outline",
+                "entity_category": "diagnostic",
+            }),
+        );
+        let this = self.clone();
+        // No TLV behind the button: a press queries the filter, and the reply sends the reset.
+        let mut fr = FieldDefinition::new("", "");
+        fr.write_xform = Some(Box::new(|val| {
+            Some(if val == "PRESS" {
+                1i64.into()
+            } else {
+                0i64.into()
+            })
+        }));
+        fr.write_callback = Some(Box::new(move |val| {
+            if val == 1 {
+                this.inner.lock().filter_do_reset = true;
+                this.send_filter_query();
+            }
+            false
+        }));
+        self.core
+            .fields_by_ha
+            .lock()
+            .insert("filterreset".into(), Arc::new(fr));
     }
 
     fn process_filter_cmd_resp(&self, success: bool, _data: &[u8]) {
@@ -873,81 +952,10 @@ impl Device {
             }));
         }
 
+        // Known here only if a filter reply came before the first values.
         let filter_life = self.inner.lock().filter_life_time;
         if filter_life != 0 {
-            config.components.insert(
-                "filterused".into(),
-                json!({
-                    "platform": "sensor",
-                    "unique_id": "$deviceid-filterused",
-                    "state_topic": "$this/filterused",
-                    "name": "Filter used time",
-                    "icon": "mdi:air-filter",
-                    "device_class": "duration",
-                    "unit_of_measurement": "h",
-                    "state_class": "total_increasing",
-                    "entity_category": "diagnostic",
-                }),
-            );
-            config.components.insert(
-                "filterlife".into(),
-                json!({
-                    "platform": "sensor",
-                    "unique_id": "$deviceid-filterlife",
-                    "state_topic": "$this/filterlife",
-                    "name": "Filter life time",
-                    "icon": "mdi:air-filter",
-                    "device_class": "duration",
-                    "unit_of_measurement": "h",
-                    "entity_category": "diagnostic",
-                }),
-            );
-            config.components.insert(
-                "changeddate".into(),
-                json!({
-                    "platform": "sensor",
-                    "unique_id": "$deviceid-filterchangeddate",
-                    "state_topic": "$this/filterchangeddate",
-                    "name": "Filter usage last reset",
-                    "icon": "mdi:calendar-refresh-outline",
-                    "device_class": "date",
-                    "entity_category": "diagnostic",
-                }),
-            );
-            config.components.insert(
-                "filterreset".into(),
-                json!({
-                    "platform": "button",
-                    "unique_id": "$deviceid-filterreset",
-                    "command_topic": "$this/filterreset/set",
-                    "name": "Reset filter usage",
-                    "icon": "mdi:calendar-refresh-outline",
-                    "entity_category": "diagnostic",
-                }),
-            );
-            let this = self.clone();
-            let mut fr = FieldDefinition::new("", "");
-            // registered manually under filterreset key
-            fr.write_xform = Some(Box::new(|val| {
-                Some(if val == "PRESS" {
-                    1i64.into()
-                } else {
-                    0i64.into()
-                })
-            }));
-            fr.write_callback = Some(Box::new(move |val| {
-                if val == 1 {
-                    this.inner.lock().filter_do_reset = true;
-                    this.send_filter_query();
-                }
-                false
-            }));
-            // Use fields_by_ha with key filterreset
-            let fr = Arc::new(fr);
-            self.core
-                .fields_by_ha
-                .lock()
-                .insert("filterreset".into(), fr);
+            self.add_filter_entities(&mut config);
         }
 
         let accum = self.core.get_raw(0x2d5).unwrap_or(0);
@@ -1946,6 +1954,10 @@ mod tests {
     const DISPLAY_ON_NOTIFY_HEX: &str = "0000040000008702047D0287C1BF4D";
     const WRITE_DISPLAY_ON_HEX: &str = "010104000000650201010287C1E95D";
     const WRITE_DISPLAY_OFF_HEX: &str = "010104000000650201010287C0F97C";
+    // Filter query (private command 0x02/0x02) and its reply, captured from a new WIN_056905_WW
+    // (upstream PR #179): used 0 h, life 720 h, never reset.
+    const FILTER_QUERY_HEX: &str = "00FF0400000065FD02000102511B";
+    const FILTER_REPLY_HEX: &str = "02FF0400000087FD03010D0200000000D0020000000000003920";
 
     fn meta() -> Metadata {
         Metadata::new("RAC_056905_WW", "TEST", "1.0")
@@ -2174,6 +2186,100 @@ mod tests {
         let (_ha, thinq, _dev) = make_device();
         assert_eq!(thinq.outbox().len(), 1);
         assert_eq!(hex_encode(&thinq.outbox()[0]), CAPS_REQUEST_HEX);
+    }
+
+    #[test]
+    fn filter_reply_adds_the_filter_entities() {
+        let (ha, thinq, _dev) = make_device();
+        let components = || ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(CAPS_RESPONSE_HEX));
+        thinq.emit_data(&hex_decode(QUERY_RESPONSE_HEX));
+        // 0x2f1 = 0 (no mFilter): the filter is probed, and the config goes out before the reply
+        assert!(thinq.outbox().iter().any(|p| hex_encode(p) == FILTER_QUERY_HEX));
+        assert!(!components().contains_key("filterused"));
+
+        // a unit without a filter life time gets no filter entities
+        let mut no_life = hex_decode(FILTER_REPLY_HEX);
+        no_life[16..20].fill(0);
+        thinq.emit_data(&no_life);
+        assert!(!components().contains_key("filterused"));
+
+        thinq.emit_data(&hex_decode(FILTER_REPLY_HEX));
+        let c = components();
+        assert_eq!(
+            c["filterused"],
+            json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-filterused",
+                "state_topic": "$this/filterused",
+                "name": "Filter used time",
+                "icon": "mdi:air-filter",
+                "device_class": "duration",
+                "unit_of_measurement": "h",
+                "state_class": "total_increasing",
+                "entity_category": "diagnostic",
+            })
+        );
+        assert_eq!(
+            c["filterlife"],
+            json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-filterlife",
+                "state_topic": "$this/filterlife",
+                "name": "Filter life time",
+                "icon": "mdi:air-filter",
+                "device_class": "duration",
+                "unit_of_measurement": "h",
+                "entity_category": "diagnostic",
+            })
+        );
+        assert_eq!(
+            c["changeddate"],
+            json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-filterchangeddate",
+                "state_topic": "$this/filterchangeddate",
+                "name": "Filter usage last reset",
+                "icon": "mdi:calendar-refresh-outline",
+                "device_class": "date",
+                "entity_category": "diagnostic",
+            })
+        );
+        assert_eq!(
+            c["filterreset"],
+            json!({
+                "platform": "button",
+                "unique_id": "$deviceid-filterreset",
+                "command_topic": "$this/filterreset/set",
+                "name": "Reset filter usage",
+                "icon": "mdi:calendar-refresh-outline",
+                "entity_category": "diagnostic",
+            })
+        );
+        // the filter alert entities stay, and the rest of the config is kept
+        assert!(c.contains_key("filter_needs_change") && c.contains_key("filter_changed"));
+        assert!(c.contains_key("climate") && c.contains_key("jet"));
+        let props = ha.device(DEVICE_ID).unwrap().properties;
+        assert_eq!(props["filterused"], PropertyValue::Int(0));
+        assert_eq!(props["filterlife"], PropertyValue::Int(720));
+        assert_eq!(props["filterchangeddate"], "0000-00-00".into());
+        assert_eq!(props["filter_needs_change"], "OFF".into());
+
+        // the button queries first; the reply then sends the reset
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "filterreset", "command", "PRESS");
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(sent, [FILTER_QUERY_HEX]);
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(FILTER_REPLY_HEX));
+        let out = thinq.outbox();
+        assert_eq!(out.len(), 1);
+        // command 0x02/0x01 with the life time and today's date, big-endian
+        assert_eq!(&hex_encode(&out[0])[..40], "00FF0400000065FD01000D0200000000000002D0");
+        assert_eq!(out[0].len(), 26);
+        let date = u32::from_be_bytes(out[0][20..24].try_into().unwrap());
+        assert!(chrono::NaiveDate::from_ymd_opt((date / 10000) as i32, date / 100 % 100, date % 100).is_some());
     }
 
     #[test]
