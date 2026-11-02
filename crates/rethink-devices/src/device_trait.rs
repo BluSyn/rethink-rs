@@ -3,6 +3,7 @@
 use rethink_core::ha::{DeviceDiscovery, HaConnection, PropertyValue};
 use rethink_core::metadata::Metadata;
 use rethink_core::thinq::{Thinq1Device, Thinq2Device};
+use std::any::Any;
 use std::sync::Arc;
 
 /// Platform a device runs on.
@@ -12,13 +13,16 @@ pub enum Platform {
     Thinq2,
 }
 
-/// Trait implemented by every HA device handler.
-pub trait DeviceHandler: Send + Sync {
+/// Trait implemented by every HA device handler. `Any` lets `take_over` recognise its own type.
+pub trait DeviceHandler: Any + Send + Sync {
     fn id(&self) -> &str;
     fn start(&self);
     /// Stop background work without touching HA availability: the handler is being replaced by a
     /// new session, or its offline publish is deferred. `drop_device` must still work afterwards.
     fn retire(&self) {}
+    /// Called before `start` when this handler replaces `previous` after a reconnect, to carry
+    /// over state that only lives in rethink (choices made in HA but not sent yet).
+    fn take_over(&self, _previous: &dyn DeviceHandler) {}
     fn drop_device(&self);
     fn set_property(&self, prop: &str, value: &str);
     fn publish_config(&self);

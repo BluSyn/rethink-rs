@@ -7,6 +7,7 @@ pub mod fridge_common;
 pub mod js;
 pub mod registry;
 pub mod tl_us_washer_courses;
+pub mod timers;
 pub mod washer_common;
 
 #[cfg(test)]

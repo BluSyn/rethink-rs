@@ -323,7 +323,7 @@ impl HaBridge {
             return;
         };
         // The new session is already here: retire the old handler without publishing offline.
-        if let Some(old) = old {
+        if let Some(old) = &old {
             old.retire();
         }
 
@@ -361,6 +361,9 @@ impl HaBridge {
                 bridge.schedule_offline(id.clone(), ha);
             }
         });
+        if let Some(old) = old {
+            hadevice.take_over(old.as_ref());
+        }
         hadevice.start();
     }
 }

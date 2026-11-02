@@ -1,10 +1,13 @@
 //! Shared helpers for in-module device tests (`#[cfg(test)]`).
 
+use crate::timers::Timers;
 use rethink_core::{
     wrap_aabb, HaConnection, MockHaConnection, MockThinq1Device, MockThinq2Device, Metadata,
     Thinq1Device, Thinq2Device,
 };
+use rethink_util::sync::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub const DEVICE_ID: &str = "test-id";
 
@@ -67,6 +70,53 @@ pub fn outbox_has_inner(thinq: &MockThinq2Device, inner: &[u8]) -> bool {
         .any(|p| p.len() >= 4 + inner.len() && p[2..2 + inner.len()] == *inner)
 }
 
+/// Timers that only fire when the test advances the clock, like node:test's mock timers.
+#[derive(Default)]
+pub struct ManualTimers {
+    clock: Mutex<Clock>,
+}
+
+#[derive(Default)]
+struct Clock {
+    now: Duration,
+    pending: Vec<(Duration, Box<dyn FnOnce() + Send>)>,
+}
+
+impl ManualTimers {
+    /// Move the clock forward by `ms`, running every task that falls due, earliest first.
+    pub fn tick(&self, ms: u64) {
+        let end = self.clock.lock().now + Duration::from_millis(ms);
+        loop {
+            let task = {
+                let mut clock = self.clock.lock();
+                let next = clock
+                    .pending
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (due, _))| *due <= end)
+                    .min_by_key(|(_, (due, _))| *due)
+                    .map(|(i, _)| i);
+                let Some(next) = next else {
+                    clock.now = end;
+                    return;
+                };
+                let (due, task) = clock.pending.remove(next);
+                clock.now = due;
+                task
+            };
+            task();
+        }
+    }
+}
+
+impl Timers for ManualTimers {
+    fn after(&self, delay: Duration, task: Box<dyn FnOnce() + Send>) {
+        let mut clock = self.clock.lock();
+        let due = clock.now + delay;
+        clock.pending.push((due, task));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +126,36 @@ mod tests {
     fn prop_none_without_device() {
         let ha = MockHaConnection::new();
         assert!(prop(&ha, "power").is_none());
+    }
+
+    #[test]
+    fn manual_timers_fire_in_due_order_only_when_ticked() {
+        let timers = Arc::new(ManualTimers::default());
+        let fired = Arc::new(Mutex::new(Vec::new()));
+        for (name, ms) in [("late", 300), ("early", 100)] {
+            let fired = fired.clone();
+            timers.after(
+                Duration::from_millis(ms),
+                Box::new(move || fired.lock().push(name)),
+            );
+        }
+        timers.tick(99);
+        assert!(fired.lock().is_empty());
+        let chained = timers.clone();
+        let fired_later = fired.clone();
+        timers.after(
+            Duration::from_millis(1),
+            Box::new(move || {
+                chained.after(
+                    Duration::from_millis(100),
+                    Box::new(move || fired_later.lock().push("chained")),
+                );
+            }),
+        );
+        timers.tick(200);
+        assert_eq!(*fired.lock(), ["early", "chained"]);
+        timers.tick(1);
+        assert_eq!(*fired.lock(), ["early", "chained", "late"]);
     }
 
     #[test]
