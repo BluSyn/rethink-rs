@@ -142,25 +142,16 @@ impl Bridge {
         Ok(thinq_api::sign_in_url(&web, country_code))
     }
 
-    pub async fn complete_login(
-        &self,
-        country_code: &str,
-        callback_url: &str,
-    ) -> anyhow::Result<bool> {
+    /// `pasted` is the post-login URL, or the signInAct response when LG's sign-in page stalls.
+    pub async fn complete_login(&self, country_code: &str, pasted: &str) -> anyhow::Result<bool> {
         let mut client = thinq_api::Client::new(Environment {
             country_code: country_code.into(),
             language_code: None,
         });
-        let (_web, auth) = client.get_urls().await?;
-        let url = url::Url::parse(callback_url)?;
-        let code = url
-            .query_pairs()
-            .find(|(k, _)| k == "code")
-            .map(|(_, v)| v.to_string());
-        let Some(code) = code else {
+        let (web, auth) = client.get_urls().await?;
+        let Some(token) = oauth2::from_sign_in(&web, &auth, country_code, pasted).await? else {
             return Ok(false);
         };
-        let token = oauth2::from_code(&auth, &code).await?;
         self.storage.set_credentials(Some(Credentials {
             refresh_token: token.refresh_token,
             env: Environment {
