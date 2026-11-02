@@ -49,6 +49,16 @@ pub fn emit_inner(thinq: &MockThinq2Device, inner: &[u8]) {
     thinq.emit_data(&wrap_aabb(inner));
 }
 
+/// The `XX EB` single-record frame carrying the current record of an `XX EC` pair.
+pub fn eb_from_ec(ec_frame: &[u8], record_len: usize) -> Vec<u8> {
+    let inner = &ec_frame[2..ec_frame.len() - 2];
+    assert_eq!(inner.len(), 2 + 2 * record_len, "not an EC pair");
+    assert_eq!(inner[1], 0xec, "not an EC pair");
+    let mut eb = vec![inner[0], 0xeb];
+    eb.extend_from_slice(&inner[2 + record_len..]);
+    wrap_aabb(&eb)
+}
+
 /// True if any AABB-wrapped outbox packet contains this inner payload.
 pub fn outbox_has_inner(thinq: &MockThinq2Device, inner: &[u8]) -> bool {
     thinq
@@ -77,5 +87,11 @@ mod tests {
         core.send(&inner);
         assert!(outbox_has_inner(&thinq, &inner));
         assert!(!outbox_has_inner(&thinq, &[0x00, 0x01]));
+    }
+
+    #[test]
+    fn eb_from_ec_keeps_the_current_record() {
+        let ec = wrap_aabb(&hex_decode("20EC0102AABB"));
+        assert_eq!(eb_from_ec(&ec, 2), wrap_aabb(&hex_decode("20EBAABB")));
     }
 }
