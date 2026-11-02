@@ -107,6 +107,13 @@ impl Thinq2Device for T2Adapter {
         }
         self.dev.notify_data(buf);
     }
+    fn on_send_packet(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>) {
+        self.dev.add_send_handler(move |msg| {
+            if let crate::devmgr::SendToDevice::T2Packet(buf) = msg {
+                handler(&buf);
+            }
+        });
+    }
 }
 
 struct T1Adapter {
@@ -550,5 +557,31 @@ mod tests {
         fn is_connected(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn t2_send_packet_listeners_see_packets_only() {
+        let dev = ConnectedDevice::new(
+            "id".into(),
+            Platform::Thinq2,
+            Metadata::new("M", "M", "1"),
+            Arc::new(|_buf: Vec<u8>| {}),
+            Arc::new(|_msg: SendToDevice| {}),
+        );
+        let adapter = T2Adapter {
+            dev: dev.clone(),
+            handlers: Mutex::new(Vec::new()),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        adapter.on_send_packet(Box::new(move |buf| record.lock().push(buf.to_vec())));
+        dev.notify_send(SendToDevice::T2Packet(vec![0xaa, 0x01]));
+        dev.notify_send(SendToDevice::T2Ack(vec![0xaa, 0x02]));
+        dev.notify_send(SendToDevice::T2Clip {
+            cmd: "x".into(),
+            msg_type: 1,
+            data: serde_json::Value::Null,
+        });
+        assert_eq!(*seen.lock(), vec![vec![0xaa, 0x01]]);
     }
 }

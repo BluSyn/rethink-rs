@@ -5,12 +5,27 @@
 //! Express Cool is Super Cool, ecoFriendly is Vacation, and byte 95 is the
 //! writable Fresh Converter. `10AF` watt-hours are summed, `10C5` carries
 //! door totals, and `1031` is the two firmware modules.
+//!
+//! Night view (the door light's night mode) is status byte 30 (0 off, 2 dusk
+//! till dawn, 3 specific hours); byte 26 counts its changes. It is set with
+//! `F010 02 <mode> <start: yy mm dd hh mm ss> <end> <preview> <brightness %>`:
+//! mode 0 off (zero times), 1 dusk till dawn (sent only for the preview, with
+//! preview 01), 2 specific hours. The times are the dated UTC window running
+//! now or next, which the fridge then repeats every night. The hours and the
+//! brightness are never reported, so they are known only from our own writes
+//! and from LG's cloud commands passing through the bridge; until then they
+//! are unknown and nothing that needs them is sent. Dusk till dawn is left to
+//! the LG app, whose times come from LG's cloud.
 
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::request_fridge_status;
 use crate::fridge_common::{
     convert_freezer_temperature, convert_fridge_temperature, freezer_range, fridge_range,
     TemperatureUnit,
+};
+use chrono::{
+    DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeDelta,
+    TimeZone, Timelike, Utc,
 };
 use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, PropertyValue, Thinq2Device};
@@ -21,9 +36,20 @@ use std::sync::Arc;
 const STATUS_LENGTH: usize = 96;
 const COMMAND_LENGTH: usize = 118;
 const FRESH_CONVERTER: usize = 95;
+const NIGHT_VIEW: usize = 30;
 const DOOR_OPENINGS_RECORD: u8 = 0x01;
 const DOOR_OPEN_TIME_RECORD: u8 = 0x11;
 const FIRMWARE_RECORD_LENGTH: usize = 24;
+
+const NIGHT_VIEW_MODES: &[(&str, u8)] = &[("Off", 0), ("Dusk till dawn", 2), ("Specific hours", 3)];
+// the modes as the F010 command numbers them
+const NIGHT_VIEW_OFF: u8 = 0;
+const NIGHT_VIEW_DUSK_TILL_DAWN: u8 = 1;
+const NIGHT_VIEW_SPECIFIC_HOURS: u8 = 2;
+const NIGHT_VIEW_BRIGHTNESS: &[(&str, u8)] = &[("10%", 10), ("30%", 30), ("50%", 50), ("70%", 70)];
+const NIGHT_VIEW_COMMAND_LENGTH: usize = 18;
+const TIME_PATTERN: &str = "^([01][0-9]|2[0-3]):[0-5][0-9]$";
+const DAY_MINUTES: i64 = 24 * 60;
 
 const COMMAND_FIXED: &[(usize, u8)] = &[
     (21, 0x00),
@@ -57,20 +83,124 @@ fn fresh_code(name: &str) -> Option<u8> {
     }
 }
 
+fn label_of(table: &[(&'static str, u8)], code: u8) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(_, c)| *c == code)
+        .map(|(label, _)| *label)
+}
+
+fn code_of(table: &[(&str, u8)], label: &str) -> Option<u8> {
+    table
+        .iter()
+        .find(|(l, _)| *l == label)
+        .map(|(_, code)| *code)
+}
+
+fn labels_of(table: &[(&'static str, u8)]) -> Vec<&'static str> {
+    table.iter().map(|(label, _)| *label).collect()
+}
+
+/// A `TIME_PATTERN` value as minutes of the day.
+fn parse_time(value: &str) -> Option<u32> {
+    let b = value.as_bytes();
+    if b.len() != 5 || b[2] != b':' || ![0, 1, 3, 4].iter().all(|&i| b[i].is_ascii_digit()) {
+        return None;
+    }
+    let field = |i: usize| u32::from(b[i] - b'0') * 10 + u32::from(b[i + 1] - b'0');
+    let (hours, minutes) = (field(0), field(3));
+    (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
+}
+
+fn format_time(minutes: Option<u32>) -> String {
+    minutes.map_or_else(|| "None".into(), |m| format!("{:02}:{:02}", m / 60, m % 60))
+}
+
+/// The clock and zone the night view hours are kept in: the host's, or fixed ones in tests.
+trait Clock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+    fn local(&self, at: DateTime<Utc>) -> NaiveDateTime;
+    fn instant(&self, local: NaiveDateTime) -> DateTime<Utc>;
+}
+
+struct HostClock;
+
+impl Clock for HostClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+    fn local(&self, at: DateTime<Utc>) -> NaiveDateTime {
+        at.with_timezone(&Local).naive_local()
+    }
+    fn instant(&self, local: NaiveDateTime) -> DateTime<Utc> {
+        js_local_instant(&Local, local)
+    }
+}
+
+/// The instant JS `new Date(y, m, d, h, min)` gives a local time: the first of a repeated
+/// time, and a skipped one read with the offset from before the gap.
+fn js_local_instant<Tz: TimeZone>(zone: &Tz, local: NaiveDateTime) -> DateTime<Utc> {
+    match zone.from_local_datetime(&local) {
+        LocalResult::Single(at) => at.with_timezone(&Utc),
+        // chrono orders the two by offset, not by instant
+        LocalResult::Ambiguous(a, b) => a.min(b).with_timezone(&Utc),
+        LocalResult::None => {
+            let before = zone.offset_from_utc_datetime(&(local - TimeDelta::days(1)));
+            (local - before.fix()).and_utc()
+        }
+    }
+}
+
+/// A `yy mm dd hh mm` UTC time; out-of-range fields roll over as in `Date.UTC`.
+fn utc_time(at: &[u8]) -> Option<DateTime<Utc>> {
+    let month = i32::from(at[1]) - 1;
+    let year = 2000 + i32::from(at[0]) + month.div_euclid(12);
+    let first = NaiveDate::from_ymd_opt(year, month.rem_euclid(12) as u32 + 1, 1)?;
+    let time = first.and_time(NaiveTime::MIN)
+        + TimeDelta::days(i64::from(at[2]) - 1)
+        + TimeDelta::hours(i64::from(at[3]))
+        + TimeDelta::minutes(i64::from(at[4]));
+    Some(time.and_utc())
+}
+
+/// The reported mode, and the hours and brightness as last sent to the fridge, by us or by
+/// LG's cloud; `None` until then.
+#[derive(Clone, Copy, Default)]
+struct NightView {
+    mode: Option<&'static str>,
+    /// local minutes of the day
+    start: Option<u32>,
+    end: Option<u32>,
+    brightness: Option<u8>,
+}
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     temperature_unit: Mutex<Option<TemperatureUnit>>,
     energy_wh: Mutex<i64>,
+    night_view: Mutex<NightView>,
+    clock: Box<dyn Clock>,
     meta: Metadata,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
+        Self::with_clock(ha, thinq, meta, Box::new(HostClock))
+    }
+
+    fn with_clock(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        clock: Box<dyn Clock>,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
         let this = Arc::new(Self {
             core: core.clone(),
             temperature_unit: Mutex::new(None),
             energy_wh: Mutex::new(0),
+            night_view: Mutex::new(NightView::default()),
+            clock,
             meta,
         });
         let dev = this.clone();
@@ -79,6 +209,8 @@ impl Device {
                 dev.process_aabb(inner);
             }
         }));
+        let dev = this.clone();
+        thinq.on_send_packet(Box::new(move |frame| dev.learn_night_view(frame)));
         this
     }
 
@@ -151,6 +283,45 @@ impl Device {
                 "command_topic": "$this/fresh_converter/set",
                 "name": "Fresh Converter+",
                 "options": FRESH_OPTIONS,
+            })),
+            ("night_view".into(), json!({
+                "platform": "select", "icon": "mdi:weather-night",
+                "unique_id": "$deviceid-night_view",
+                "state_topic": "$this/night_view",
+                "command_topic": "$this/night_view/set",
+                "name": "Night view",
+                "options": labels_of(NIGHT_VIEW_MODES),
+            })),
+            ("night_view_start".into(), json!({
+                "platform": "text", "icon": "mdi:clock-start",
+                "unique_id": "$deviceid-night_view_start",
+                "state_topic": "$this/night_view_start",
+                "command_topic": "$this/night_view_start/set",
+                "name": "Night view start",
+                "pattern": TIME_PATTERN, "min": 5, "max": 5,
+            })),
+            ("night_view_end".into(), json!({
+                "platform": "text", "icon": "mdi:clock-end",
+                "unique_id": "$deviceid-night_view_end",
+                "state_topic": "$this/night_view_end",
+                "command_topic": "$this/night_view_end/set",
+                "name": "Night view end",
+                "pattern": TIME_PATTERN, "min": 5, "max": 5,
+            })),
+            ("night_view_brightness".into(), json!({
+                "platform": "select", "icon": "mdi:brightness-6",
+                "unique_id": "$deviceid-night_view_brightness",
+                "state_topic": "$this/night_view_brightness",
+                "command_topic": "$this/night_view_brightness/set",
+                "name": "Night view brightness",
+                "options": labels_of(NIGHT_VIEW_BRIGHTNESS),
+            })),
+            ("night_view_preview".into(), json!({
+                "platform": "button", "icon": "mdi:lightbulb-on-outline",
+                "unique_id": "$deviceid-night_view_preview",
+                "command_topic": "$this/night_view_preview/set",
+                "payload_press": "PRESS",
+                "name": "Night view preview",
             })),
             ("energy".into(), json!({
                 "platform": "sensor", "device_class": "energy",
@@ -234,6 +405,118 @@ impl Device {
         self.core.publish_on_off("vacation", rec[12] == 1);
         self.core
             .publish_property("fresh_converter", fresh_name(rec[FRESH_CONVERTER]).into());
+        let mode = label_of(NIGHT_VIEW_MODES, rec[NIGHT_VIEW]);
+        self.night_view.lock().mode = mode;
+        self.core
+            .publish_property("night_view", mode.unwrap_or("None").into());
+        self.publish_night_view_settings();
+    }
+
+    fn publish_night_view_settings(&self) {
+        let night_view = *self.night_view.lock();
+        self.core
+            .publish_property("night_view_start", format_time(night_view.start).into());
+        self.core
+            .publish_property("night_view_end", format_time(night_view.end).into());
+        let brightness = night_view
+            .brightness
+            .and_then(|code| label_of(NIGHT_VIEW_BRIGHTNESS, code));
+        self.core
+            .publish_property("night_view_brightness", brightness.unwrap_or("None").into());
+    }
+
+    /// Picks up the hours and brightness from an F010 frame on its way to the fridge.
+    fn learn_night_view(&self, frame: &[u8]) {
+        if frame.len() != 2 + NIGHT_VIEW_COMMAND_LENGTH + 2 || frame[0] != 0xaa {
+            return;
+        }
+        let cmd = &frame[2..frame.len() - 2];
+        // not F010, or a preview
+        if cmd[..3] != [0xf0, 0x10, 0x02] || cmd[16] != 0 {
+            return;
+        }
+        {
+            let mut night_view = self.night_view.lock();
+            if cmd[3] == NIGHT_VIEW_SPECIFIC_HOURS {
+                night_view.start = self.local_minutes(&cmd[4..10]);
+                night_view.end = self.local_minutes(&cmd[10..16]);
+            }
+            if label_of(NIGHT_VIEW_BRIGHTNESS, cmd[17]).is_some() {
+                night_view.brightness = Some(cmd[17]);
+            }
+        }
+        if self.temperature_unit.lock().is_some() {
+            self.publish_night_view_settings();
+        }
+    }
+
+    fn local_minutes(&self, at: &[u8]) -> Option<u32> {
+        let local = self.clock.local(utc_time(at)?);
+        Some(local.hour() * 60 + local.minute())
+    }
+
+    /// The window from `start` to `end` (local minutes of the day) that is running now, or
+    /// else the next one.
+    fn night_view_window(&self, start: u32, end: u32) -> [DateTime<Utc>; 2] {
+        let now = self.clock.now();
+        let today = self.clock.local(now).date().and_time(NaiveTime::MIN);
+        let length = match (i64::from(end) - i64::from(start)).rem_euclid(DAY_MINUTES) {
+            0 => DAY_MINUTES,
+            minutes => minutes,
+        };
+        let window = |day_offset: i64| {
+            let from = self.clock.instant(
+                today + TimeDelta::days(day_offset) + TimeDelta::minutes(i64::from(start)),
+            );
+            [from, from + TimeDelta::minutes(length)]
+        };
+        let yesterday = window(-1);
+        if now < yesterday[1] {
+            yesterday
+        } else {
+            window(0)
+        }
+    }
+
+    /// Sends the night view command; false when a setting it needs is still unknown.
+    fn send_night_view(&self, mode: u8, preview: bool) -> bool {
+        let night_view = *self.night_view.lock();
+        if night_view.brightness.is_none() && mode != NIGHT_VIEW_OFF {
+            tracing::debug!("Night view: set the brightness first");
+            return false;
+        }
+        let mut cmd = [0u8; NIGHT_VIEW_COMMAND_LENGTH];
+        cmd[..4].copy_from_slice(&[0xf0, 0x10, 0x02, mode]);
+        if mode == NIGHT_VIEW_SPECIFIC_HOURS && !preview {
+            let (Some(start), Some(end)) = (night_view.start, night_view.end) else {
+                tracing::debug!("Night view: set the start and end time first");
+                return false;
+            };
+            for (i, at) in self.night_view_window(start, end).iter().enumerate() {
+                cmd[4 + i * 6..10 + i * 6].copy_from_slice(&[
+                    (at.year() - 2000) as u8,
+                    at.month() as u8,
+                    at.day() as u8,
+                    at.hour() as u8,
+                    at.minute() as u8,
+                    0,
+                ]);
+            }
+        }
+        cmd[16] = u8::from(preview);
+        // the app sends a brightness with Off too; with none known yet, the app's default
+        cmd[17] = night_view.brightness.unwrap_or(30);
+        self.core.send(&cmd);
+        true
+    }
+
+    /// After an hours or brightness write: publish it, and resend while the fridge runs them.
+    fn night_view_setting_changed(&self) {
+        self.publish_night_view_settings();
+        let running = self.night_view.lock().mode == Some("Specific hours");
+        if running {
+            self.send_night_view(NIGHT_VIEW_SPECIFIC_HOURS, false);
+        }
     }
 
     fn process_energy(&self, wh: u16) {
@@ -341,6 +624,51 @@ impl DeviceHandler for Device {
                     self.command(&[(FRESH_CONVERTER, code)]);
                 }
             }
+            "night_view" => {
+                let sent = match mqtt_value {
+                    "Off" => self.send_night_view(NIGHT_VIEW_OFF, false),
+                    "Specific hours" => self.send_night_view(NIGHT_VIEW_SPECIFIC_HOURS, false),
+                    _ => {
+                        tracing::debug!(
+                            "Night view: dusk till dawn can only be set from the LG app"
+                        );
+                        false
+                    }
+                };
+                // HA keeps showing the option it asked for until it gets a state
+                if !sent {
+                    let mode = self.night_view.lock().mode;
+                    self.core.ha.publish_property(
+                        &self.core.id,
+                        "night_view",
+                        mode.unwrap_or("None").into(),
+                    );
+                }
+            }
+            "night_view_start" | "night_view_end" => {
+                let Some(minutes) = parse_time(mqtt_value) else {
+                    return;
+                };
+                {
+                    let mut night_view = self.night_view.lock();
+                    if prop == "night_view_start" {
+                        night_view.start = Some(minutes);
+                    } else {
+                        night_view.end = Some(minutes);
+                    }
+                }
+                self.night_view_setting_changed();
+            }
+            "night_view_brightness" => {
+                let Some(brightness) = code_of(NIGHT_VIEW_BRIGHTNESS, mqtt_value) else {
+                    return;
+                };
+                self.night_view.lock().brightness = Some(brightness);
+                self.night_view_setting_changed();
+            }
+            "night_view_preview" => {
+                self.send_night_view(NIGHT_VIEW_DUSK_TILL_DAWN, true);
+            }
             _ => {}
         }
     }
@@ -360,6 +688,7 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::FixedOffset;
     use rethink_core::{hex_decode, hex_encode, wrap_aabb, MockHaConnection, MockThinq2Device};
 
     const ID: &str = "test-id";
@@ -378,11 +707,98 @@ mod tests {
     const APP_SMART_LEARNER_OFF: &str = "AA7CF017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFF000000FFFF00FFFFFFFF00FFFFFFFFFFFFFFFFFF00FFFFFF1EFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0AFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBCBB";
     const APP_FRESH_CONVERTER_2: &str = "AA7CF017FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000FFFF00FFFFFFFF00FFFFFFFFFFFFFFFFFF00FFFFFF1EFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0AFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF02FFFFFFFFFFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBEBB";
 
+    // Night view (F010) commands the LG app sent through the cloud, from a fridge in
+    // Europe/Sofia (UTC+3 until 25 October).
+    // Specific hours 21:00 to 06:00 local, 30% brightness, set on 2026-10-21 at 10:56 local
+    const APP_SPECIFIC_21_06: &str = "AA16F01002021A0A151200001A0A16030000001E3FBB";
+    // 21:00 to 07:00 local at 70%, 10% and 50%, set on 2026-10-22 at 19:59 local
+    const APP_SPECIFIC_70: &str = "AA16F01002021A0A161200001A0A170400000046C0BB";
+    const APP_SPECIFIC_10: &str = "AA16F01002021A0A161200001A0A17040000000A0CBB";
+    const APP_SPECIFIC_50: &str = "AA16F01002021A0A161200001A0A170400000032D4BB";
+    // the same hours at 30%, re-sent by the cloud at 00:11 local after rethink reconnected
+    const CLOUD_SPECIFIC_HOURS_AT_0011: &str = "AA16F01002021A0A161200001A0A17040000001E38BB";
+    // dusk till dawn at 70% on 2026-10-21: sunset 18:36, sunrise 07:47 local
+    const APP_DUSK_70: &str = "AA16F01002011A0A150F24001A0A16042F000046B7BB";
+    const APP_OFF: &str = "AA16F0100200000000000000000000000000001EB5BB";
+    const APP_PREVIEW: &str = "AA16F0100201000000000000000000000000011EB7BB";
+
+    /// Europe/Sofia's 2026 rules: UTC+2, and UTC+3 from 29 March to 25 October, 01:00 UTC.
+    #[derive(Clone, Copy, Debug)]
+    struct Sofia;
+
+    impl Sofia {
+        fn offset_at(utc: &NaiveDateTime) -> FixedOffset {
+            let change = |month, day| {
+                NaiveDate::from_ymd_opt(2026, month, day)
+                    .and_then(|date| date.and_hms_opt(1, 0, 0))
+                    .unwrap()
+            };
+            let summer = (change(3, 29)..change(10, 25)).contains(utc);
+            FixedOffset::east_opt(if summer { 3 * 3600 } else { 2 * 3600 }).unwrap()
+        }
+    }
+
+    impl TimeZone for Sofia {
+        type Offset = FixedOffset;
+        fn from_offset(_: &FixedOffset) -> Self {
+            Sofia
+        }
+        fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_time(NaiveTime::MIN))
+        }
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<FixedOffset> {
+            // a repeated time lists the smaller offset first, as chrono's Local does
+            let fits: Vec<FixedOffset> = [2, 3]
+                .into_iter()
+                .filter_map(|hours| FixedOffset::east_opt(hours * 3600))
+                .filter(|&offset| Self::offset_at(&(*local - offset)) == offset)
+                .collect();
+            match fits[..] {
+                [offset] => LocalResult::Single(offset),
+                [first, second] => LocalResult::Ambiguous(first, second),
+                _ => LocalResult::None,
+            }
+        }
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+            Self::offset_at(&utc.and_time(NaiveTime::MIN))
+        }
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+            Self::offset_at(utc)
+        }
+    }
+
+    /// A stopped clock in Sofia, where the night view captures come from.
+    struct SofiaClock(DateTime<Utc>);
+
+    impl Clock for SofiaClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+        fn local(&self, at: DateTime<Utc>) -> NaiveDateTime {
+            at.with_timezone(&Sofia).naive_local()
+        }
+        fn instant(&self, local: NaiveDateTime) -> DateTime<Utc> {
+            js_local_instant(&Sofia, local)
+        }
+    }
+
     fn make() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
         let ha = MockHaConnection::new();
         let meta = Metadata::new("2REBGLUB_2P__", "2REBGLUB_2P__", "");
         let thinq = MockThinq2Device::new(ID, meta.clone());
         (ha.clone(), thinq.clone(), Device::new(ha, thinq, meta))
+    }
+
+    /// `ready()` with the clock stopped at `now` in Sofia.
+    fn ready_at(now: &str) -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        let ha = MockHaConnection::new();
+        let meta = Metadata::new("2REBGLUB_2P__", "2REBGLUB_2P__", "");
+        let thinq = MockThinq2Device::new(ID, meta.clone());
+        let clock = Box::new(SofiaClock(now.parse().unwrap()));
+        let dev = Device::with_clock(ha.clone(), thinq.clone(), meta, clock);
+        thinq.emit_data(&hex_decode(STATUS_INITIAL));
+        thinq.reset_recorder();
+        (ha, thinq, dev)
     }
 
     fn prop(ha: &MockHaConnection, name: &str) -> Option<String> {
@@ -409,7 +825,10 @@ mod tests {
         assert_eq!(comps["fridge_setpoint"]["unit_of_measurement"], json!("°C"));
         assert!(comps.get("drawer_mode").is_none());
         assert!(comps.get("express_cool").is_none());
-        assert_eq!(comps["fresh_converter"]["options"], json!(["Meat", "Fish", "Cheese"]));
+        assert_eq!(
+            comps["fresh_converter"]["options"],
+            json!(["Meat", "Fish", "Cheese"])
+        );
         assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("4"));
         assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("-18"));
         assert_eq!(prop(&ha, "door").as_deref(), Some("OFF"));
@@ -490,7 +909,10 @@ mod tests {
         let (_, thinq, dev) = make();
         thinq.reset_recorder();
         dev.start();
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA0EF0ED1211010000010400EBBB");
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA0EF0ED1211010000010400EBBB"
+        );
     }
 
     #[test]
@@ -512,6 +934,189 @@ mod tests {
                 expected,
                 "{prop_name}={value}"
             );
+        }
+    }
+
+    #[test]
+    fn night_view_entities() {
+        let (ha, _, _) = ready();
+        let comps = ha.device(ID).unwrap().config.unwrap().components;
+        assert_eq!(comps["night_view"]["platform"], json!("select"));
+        assert_eq!(comps["night_view_start"]["platform"], json!("text"));
+        assert_eq!(comps["night_view_end"]["platform"], json!("text"));
+        assert_eq!(comps["night_view_brightness"]["platform"], json!("select"));
+        assert_eq!(comps["night_view_preview"]["platform"], json!("button"));
+        assert_eq!(
+            comps["night_view"]["options"],
+            json!(["Off", "Dusk till dawn", "Specific hours"])
+        );
+        assert_eq!(
+            comps["night_view_brightness"]["options"],
+            json!(["10%", "30%", "50%", "70%"])
+        );
+        assert_eq!(prop(&ha, "night_view").as_deref(), Some("Dusk till dawn"));
+        // the fridge does not report these
+        assert_eq!(prop(&ha, "night_view_start").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "night_view_end").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "night_view_brightness").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn night_view_settings_are_learned_from_the_cloud_commands() {
+        let (ha, thinq, _) = ready_at("2026-10-22T21:11:43Z");
+        thinq.emit_send_packet(&hex_decode(CLOUD_SPECIFIC_HOURS_AT_0011));
+        assert_eq!(prop(&ha, "night_view_start").as_deref(), Some("21:00"));
+        assert_eq!(prop(&ha, "night_view_end").as_deref(), Some("07:00"));
+        assert_eq!(prop(&ha, "night_view_brightness").as_deref(), Some("30%"));
+        // dusk till dawn carries LG's sun times, which are not the hours
+        thinq.emit_send_packet(&hex_decode(APP_DUSK_70));
+        assert_eq!(prop(&ha, "night_view_brightness").as_deref(), Some("70%"));
+        assert_eq!(prop(&ha, "night_view_start").as_deref(), Some("21:00"));
+    }
+
+    #[test]
+    fn night_view_writes_match_the_app_commands() {
+        // (now, writes after the default hours and brightness, the last command sent)
+        type Case = (
+            &'static str,
+            &'static [(&'static str, &'static str)],
+            &'static str,
+        );
+        let cases: &[Case] = &[
+            // specific hours set in the morning: tonight's window
+            (
+                "2026-10-21T07:56:54Z",
+                &[("night_view_end", "06:00")],
+                APP_SPECIFIC_21_06,
+            ),
+            (
+                "2026-10-22T16:59:49Z",
+                &[("night_view_brightness", "70%")],
+                APP_SPECIFIC_70,
+            ),
+            (
+                "2026-10-22T16:59:49Z",
+                &[("night_view_brightness", "10%")],
+                APP_SPECIFIC_10,
+            ),
+            (
+                "2026-10-22T16:59:49Z",
+                &[("night_view_brightness", "50%")],
+                APP_SPECIFIC_50,
+            ),
+            // after midnight, the window that started the evening before
+            ("2026-10-22T21:11:43Z", &[], CLOUD_SPECIFIC_HOURS_AT_0011),
+            ("2026-10-21T07:56:48Z", &[("night_view", "Off")], APP_OFF),
+            (
+                "2026-10-21T07:56:48Z",
+                &[("night_view_preview", "PRESS")],
+                APP_PREVIEW,
+            ),
+        ];
+        let defaults = [
+            ("night_view_start", "21:00"),
+            ("night_view_end", "07:00"),
+            ("night_view_brightness", "30%"),
+        ];
+        for &(now, writes, expected) in cases {
+            let (_, thinq, dev) = ready_at(now);
+            for (prop_name, value) in defaults.iter().chain(writes) {
+                dev.set_property(prop_name, value);
+            }
+            if !writes
+                .iter()
+                .any(|(p, _)| *p == "night_view" || *p == "night_view_preview")
+            {
+                dev.set_property("night_view", "Specific hours");
+            }
+            let outbox = thinq.outbox();
+            assert_eq!(
+                hex_encode(outbox.last().unwrap()),
+                expected,
+                "{now} {writes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn night_view_sends_nothing_until_the_settings_it_needs_are_known() {
+        let (ha, thinq, dev) = ready_at("2026-10-21T07:56:54Z");
+        dev.set_property("night_view", "Specific hours");
+        dev.set_property("night_view_preview", "PRESS");
+        assert!(thinq.outbox().is_empty(), "no brightness yet");
+        assert_eq!(
+            prop(&ha, "night_view").as_deref(),
+            Some("Dusk till dawn"),
+            "HA is told the mode did not change"
+        );
+
+        dev.set_property("night_view_brightness", "30%");
+        dev.set_property("night_view_end", "06:00");
+        dev.set_property("night_view", "Specific hours");
+        assert!(thinq.outbox().is_empty(), "no start time yet");
+
+        dev.set_property("night_view_start", "9pm");
+        assert!(thinq.outbox().is_empty(), "not a time");
+        dev.set_property("night_view_start", "21:00");
+        assert!(
+            thinq.outbox().is_empty(),
+            "the fridge still reports dusk till dawn"
+        );
+        dev.set_property("night_view", "Specific hours");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), APP_SPECIFIC_21_06);
+    }
+
+    #[test]
+    fn night_view_off_needs_no_settings_and_dusk_till_dawn_is_not_sent() {
+        let (_, thinq, dev) = ready();
+        dev.set_property("night_view", "Dusk till dawn");
+        assert!(thinq.outbox().is_empty());
+        dev.set_property("night_view", "Off");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), APP_OFF);
+    }
+
+    #[test]
+    fn night_view_hours_across_the_dst_changes_follow_js_dates() {
+        // frames and read-back hours from the upstream handler under TZ=Europe/Sofia
+        let cases = [
+            // 25 October: 03:30 comes twice, and the window starts at the first
+            (
+                "2026-10-24T22:30:00Z",
+                "03:30",
+                "05:00",
+                "AA16F01002021A0A19001E001A0A19020000001E29BB",
+                "03:30",
+                "04:00",
+            ),
+            // 29 March: 03:30 is skipped, and is read with the winter offset
+            (
+                "2026-03-28T22:00:00Z",
+                "03:30",
+                "07:00",
+                "AA16F01002021A031D011E001A031D050000001E2FBB",
+                "04:30",
+                "08:00",
+            ),
+            // a window running across the autumn change keeps its length
+            (
+                "2026-10-24T22:00:00Z",
+                "21:00",
+                "07:00",
+                "AA16F01002021A0A181200001A0A19040000001E24BB",
+                "21:00",
+                "06:00",
+            ),
+        ];
+        for (now, start, end, expected, start_after, end_after) in cases {
+            let (ha, thinq, dev) = ready_at(now);
+            dev.set_property("night_view_start", start);
+            dev.set_property("night_view_end", end);
+            dev.set_property("night_view_brightness", "30%");
+            dev.set_property("night_view", "Specific hours");
+            assert_eq!(hex_encode(&thinq.outbox()[0]), expected, "{now}");
+            // the hours are read back from the command just sent, as upstream does
+            assert_eq!(prop(&ha, "night_view_start").as_deref(), Some(start_after));
+            assert_eq!(prop(&ha, "night_view_end").as_deref(), Some(end_after));
         }
     }
 

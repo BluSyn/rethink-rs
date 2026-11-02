@@ -23,6 +23,11 @@ pub trait Thinq2Device: Send + Sync {
     fn on_data(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>);
     /// Inject a data packet as if received from the appliance (tests + broker).
     fn emit_data(&self, buf: &[u8]);
+    /// Every packet sent to the appliance: the handler's own and, through the bridge, LG's
+    /// cloud commands (TS `sendData`). Default is a no-op so existing adapters compile.
+    fn on_send_packet(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>) {
+        let _ = handler;
+    }
 }
 
 /// Trait for ThinQ1 devices (JSON control body; binary status reports).
@@ -50,6 +55,7 @@ pub struct MockThinq2Device {
     outbox: Mutex<Vec<Vec<u8>>>,
     sent: Mutex<Vec<SentMessage>>,
     handlers: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
+    send_handlers: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
 }
 
 impl MockThinq2Device {
@@ -60,7 +66,16 @@ impl MockThinq2Device {
             outbox: Mutex::new(Vec::new()),
             sent: Mutex::new(Vec::new()),
             handlers: Mutex::new(Vec::new()),
+            send_handlers: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Show `buf` to the send-packet listeners without recording it, like a cloud command
+    /// passing through the bridge.
+    pub fn emit_send_packet(&self, buf: &[u8]) {
+        for h in self.send_handlers.lock().iter() {
+            h(buf);
+        }
     }
 
     pub fn outbox(&self) -> Vec<Vec<u8>> {
@@ -87,8 +102,8 @@ impl Thinq2Device for MockThinq2Device {
     }
 
     fn send_packet(&self, buf: &[u8]) {
+        self.emit_send_packet(buf);
         self.outbox.lock().push(buf.to_vec());
-        // also notify any send-data listeners if needed
     }
 
     fn send_ack(&self, buf: &[u8]) {
@@ -113,6 +128,10 @@ impl Thinq2Device for MockThinq2Device {
         for h in guard.iter() {
             h(buf);
         }
+    }
+
+    fn on_send_packet(&self, handler: Box<dyn Fn(&[u8]) + Send + Sync>) {
+        self.send_handlers.lock().push(handler);
     }
 }
 
@@ -188,6 +207,23 @@ pub fn hex_encode(b: &[u8]) -> String {
 
 pub fn hex_decode(s: &str) -> Vec<u8> {
     rethink_util::hex::decode_ignore_ws(s).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod mock_tests {
+    use super::*;
+
+    #[test]
+    fn send_listeners_see_sent_and_emitted_packets_and_only_sent_ones_are_recorded() {
+        let thinq = MockThinq2Device::new("id", Metadata::new("M", "M", "1"));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        thinq.on_send_packet(Box::new(move |buf| record.lock().push(buf.to_vec())));
+        thinq.send_packet(&[0xaa, 0x01]);
+        thinq.emit_send_packet(&[0xaa, 0x02]);
+        assert_eq!(*seen.lock(), vec![vec![0xaa, 0x01], vec![0xaa, 0x02]]);
+        assert_eq!(thinq.outbox(), vec![vec![0xaa, 0x01]]);
+    }
 }
 
 #[cfg(test)]
