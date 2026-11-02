@@ -44,8 +44,9 @@ const STATE_PAUSED: u8 = 3;
 const OPT1_RESERVATION: u8 = 0x01;
 const OPT1_ANTI_CREASE: u8 = 0x02;
 const OPT1_CHILD_LOCK: u8 = 0x10;
-const OPT1_DAMP_DRY_BEEP: u8 = 0x40;
-const OPT1_HAND_IRON: u8 = 0x80;
+// The spec's SelfCleaning (0x20), DampDryBeep (0x40) and HandIron (0x80) belong to the family-wide
+// value table: none of them is on this model's panel, or was ever seen set on three units.
+
 /// Option2 bit 0, RemoteStart. The appliance also holds it while a cycle runs and drops it in pause.
 const OPT2_REMOTE_START: u8 = 0x01;
 
@@ -113,6 +114,12 @@ const ERRORS: &[(u8, &str)] = &[
 ];
 
 const NO_YES: [&str; 2] = ["No", "Yes"];
+
+/// Components this handler no longer has, published as a bare platform so that HA removes them.
+const TOMBSTONES: &[(&str, &str)] = &[
+    ("damp_dry_beep", "binary_sensor"),
+    ("hand_iron", "binary_sensor"),
+];
 
 /// What each base course takes in a remote start (ThinQ1 modelJSON TITAN2.0_D_WIFI_CZ, Course):
 /// `(course, dry levels, Eco Hybrid values, MoreLessTime minutes)`. The first value is the
@@ -238,6 +245,11 @@ impl Device {
         });
         let mut config = default_config(&meta, Some(json!({"name": "LG Dryer"})));
         config.components = components();
+        for &(key, platform) in TOMBSTONES {
+            config
+                .components
+                .insert(key.into(), json!({ "platform": platform }));
+        }
         core.set_config(config);
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
@@ -300,10 +312,6 @@ impl Device {
         );
         self.core
             .publish_on_off("child_lock", option1 & OPT1_CHILD_LOCK != 0);
-        self.core
-            .publish_on_off("damp_dry_beep", option1 & OPT1_DAMP_DRY_BEEP != 0);
-        self.core
-            .publish_on_off("hand_iron", option1 & OPT1_HAND_IRON != 0);
 
         if is_off {
             return;
@@ -431,10 +439,10 @@ fn label(table: &'static [(u8, &'static str)], value: &str) -> Option<&'static s
         .map(|(_, name)| *name)
 }
 
+/// The spec's ProcessState 1 (Steam) is left out: this model has no steam.
 fn phase_label(code: u8) -> Option<&'static str> {
     match code {
         0 => Some("Detecting"),
-        1 => Some("Steam"),
         2 | 3 | 4 => Some("Drying"),
         5 => Some("Cooling"),
         6 => Some("Anti-crease"),
@@ -448,14 +456,7 @@ fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
 }
 
 fn components() -> std::collections::HashMap<String, serde_json::Value> {
-    let phase_options = [
-        "Detecting",
-        "Steam",
-        "Drying",
-        "Cooling",
-        "Anti-crease",
-        "End",
-    ];
+    let phase_options = ["Detecting", "Drying", "Cooling", "Anti-crease", "End"];
     [
         (
             "power".into(),
@@ -686,26 +687,6 @@ fn components() -> std::collections::HashMap<String, serde_json::Value> {
                 "entity_category": "diagnostic",
             }),
         ),
-        (
-            "damp_dry_beep".into(),
-            json!({
-                "platform": "binary_sensor",
-                "unique_id": "$deviceid-damp_dry_beep",
-                "state_topic": "$this/damp_dry_beep",
-                "name": "Damp dry beep",
-                "icon": "mdi:water-alert-outline",
-            }),
-        ),
-        (
-            "hand_iron".into(),
-            json!({
-                "platform": "binary_sensor",
-                "unique_id": "$deviceid-hand_iron",
-                "state_topic": "$this/hand_iron",
-                "name": "Hand iron",
-                "icon": "mdi:iron",
-            }),
-        ),
     ]
     .into_iter()
     .collect()
@@ -896,10 +877,28 @@ mod tests {
         assert_eq!(prop(&ha, "delay"), "OFF".into());
         assert_eq!(prop(&ha, "anti_crease"), "No".into());
         assert_eq!(prop(&ha, "child_lock"), "OFF".into());
-        assert_eq!(prop(&ha, "damp_dry_beep"), "OFF".into());
-        assert_eq!(prop(&ha, "hand_iron"), "OFF".into());
         assert_eq!(prop(&ha, "remote_start"), "OFF".into());
         assert_eq!(prop(&ha, "energy"), PropertyValue::Int(0));
+    }
+
+    #[test]
+    fn withdrawn_binary_sensors_are_tombstoned() {
+        for model in ["RC90U2_WW", "RC90V9_WW", "RC90V9_AUS"] {
+            let (ha, thinq, _dev) = make(model);
+            thinq.emit_data(&hex_decode(EB_READY_COTTON));
+            let info = ha.device(DEVICE_ID).unwrap();
+            let components = &info.config.as_ref().unwrap().components;
+            for key in ["damp_dry_beep", "hand_iron"] {
+                assert_eq!(
+                    components[key],
+                    json!({"platform": "binary_sensor"}),
+                    "{model}"
+                );
+                assert!(!info.properties.contains_key(key), "{model} {key}");
+            }
+            let phases = components["phase"]["options"].as_array().unwrap();
+            assert!(!phases.contains(&json!("Steam")), "{model}");
+        }
     }
 
     #[test]
