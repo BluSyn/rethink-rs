@@ -67,9 +67,13 @@ pub async fn signed_request(
             )
             .body(b.to_string());
     }
-    let resp = req.send().await?;
-    let val = resp.json().await?;
-    Ok(val)
+    let result: Result<serde_json::Value, reqwest::Error> =
+        async { req.send().await?.json().await }.await;
+    result.map_err(|e| {
+        let e = anyhow::Error::from(e);
+        eprintln!("[bridge] Failed to fetch {url}: {e:#}");
+        e
+    })
 }
 
 #[derive(Debug, Clone)]

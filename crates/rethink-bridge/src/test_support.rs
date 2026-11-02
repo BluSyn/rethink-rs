@@ -180,8 +180,18 @@ impl TestPki {
     }
 }
 
-/// HTTP/1.1 stand-in that answers every request `200 OK`, or with `hang` reads the request
-/// and never answers. Counts the connections it accepted and those the client closed.
+/// How [`HttpStub`] answers a request.
+pub enum Reply {
+    /// `200 OK` with this body.
+    Ok(String),
+    /// Read the request and never answer.
+    Hang,
+    /// Close the connection without an answer.
+    Close,
+}
+
+/// HTTP/1.1 stand-in, one request per connection. Counts the connections it accepted and
+/// those the client closed.
 pub struct HttpStub {
     pub url: String,
     pub accepted: Arc<AtomicUsize>,
@@ -189,16 +199,30 @@ pub struct HttpStub {
 }
 
 impl HttpStub {
+    /// Answers `200 OK` with an empty body, or with `hang` never answers.
     pub async fn start(hang: bool) -> Self {
+        Self::serve(move |_| {
+            if hang {
+                Reply::Hang
+            } else {
+                Reply::Ok(String::new())
+            }
+        })
+        .await
+    }
+
+    /// Answers the `n`th request (from 0) with `reply(n)`.
+    pub async fn serve(reply: impl Fn(usize) -> Reply + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let accepted = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicUsize::new(0));
         let (acc, clo) = (accepted.clone(), closed.clone());
+        let reply = Arc::new(reply);
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
-                acc.fetch_add(1, Ordering::SeqCst);
-                let clo = clo.clone();
+                let n = acc.fetch_add(1, Ordering::SeqCst);
+                let (clo, reply) = (clo.clone(), reply.clone());
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 4096];
@@ -211,10 +235,21 @@ impl HttpStub {
                             Ok(n) => buf.extend_from_slice(&chunk[..n]),
                         }
                     }
-                    if !hang {
-                        let _ = sock
-                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                            .await;
+                    match reply(n) {
+                        Reply::Ok(body) => {
+                            let head = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                                 content-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = sock.write_all(head.as_bytes()).await;
+                            let _ = sock.write_all(body.as_bytes()).await;
+                        }
+                        Reply::Hang => {}
+                        Reply::Close => {
+                            clo.fetch_add(1, Ordering::SeqCst);
+                            return;
+                        }
                     }
                     while matches!(sock.read(&mut chunk).await, Ok(n) if n > 0) {}
                     clo.fetch_add(1, Ordering::SeqCst);

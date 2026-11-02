@@ -8,6 +8,12 @@ use std::sync::Mutex;
 
 const GATEWAY_URL: &str = "https://route.lgthinq.com:46030/v1/service/application/gateway-uri";
 
+const FETCH_ATTEMPTS: u32 = 4;
+#[cfg(not(test))]
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
 static GATEWAY_CACHE: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
 
 pub fn sign_in_url(web_base: &str, country_code: &str) -> String {
@@ -68,10 +74,11 @@ impl Client {
         }
     }
 
+    /// Up to [`FETCH_ATTEMPTS`] tries, [`RETRY_DELAY`] apart; each failure is logged.
     async fn api_fetch(&self, url: &str, method: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let client = reqwest::Client::new();
-        let mut last_err = None;
-        for _ in 0..4 {
+        let mut attempt = 1;
+        let out: Value = loop {
             let mut req = match method {
                 "POST" => client.post(url),
                 "DELETE" => client.delete(url),
@@ -84,28 +91,29 @@ impl Client {
             if let Some(ref b) = body {
                 req = req.json(b);
             }
-            match req.send().await {
-                Ok(resp) => {
-                    let out: Value = resp.json().await?;
-                    let code = out
-                        .get("resultCode")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if code != "0000" {
-                        anyhow::bail!(
-                            "thinq error {code}: {}",
-                            out.get("result").cloned().unwrap_or(Value::Null)
-                        );
-                    }
-                    return Ok(out.get("result").cloned().unwrap_or(Value::Null));
-                }
+            let result: Result<Value, reqwest::Error> =
+                async { req.send().await?.json().await }.await;
+            match result {
+                Ok(out) => break out,
                 Err(e) => {
-                    last_err = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let e = anyhow::Error::from(e);
+                    eprintln!("[bridge] Error fetching {url}: {e:#}");
+                    if attempt >= FETCH_ATTEMPTS {
+                        return Err(e);
+                    }
+                    attempt += 1;
+                    tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
+        };
+        let code = out.get("resultCode").and_then(|v| v.as_str()).unwrap_or("");
+        if code != "0000" {
+            anyhow::bail!(
+                "thinq error {code}: {}",
+                out.get("result").cloned().unwrap_or(Value::Null)
+            );
         }
-        Err(last_err.unwrap().into())
+        Ok(out.get("result").cloned().unwrap_or(Value::Null))
     }
 
     pub async fn ensure_gateway(&mut self) -> anyhow::Result<&Value> {
@@ -415,12 +423,18 @@ impl Client {
             .get("modelJsonUri")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing modelJsonUri"))?;
-        let resp = reqwest::Client::new().get(uri).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            anyhow::bail!("Can't download the modelJSON: HTTP {}", status.as_u16());
-        }
-        Ok(resp.text().await?)
+        let download = async {
+            let resp = reqwest::Client::new().get(uri).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                anyhow::bail!("Can't download the modelJSON: HTTP {}", status.as_u16());
+            }
+            Ok(resp.text().await?)
+        };
+        download.await.map_err(|e| {
+            eprintln!("[bridge] Failed to fetch {uri}: {e:#}");
+            e
+        })
     }
 
     pub fn thinq1_state(&self) -> anyhow::Result<Value> {
@@ -445,6 +459,48 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{HttpStub, Reply};
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn api_fetch_tries_four_times_and_retries_bad_answers_too() {
+        let client = Client::new(Environment {
+            country_code: "US".into(),
+            language_code: None,
+        });
+        // No answer, then one that is not JSON, then the real one.
+        let lg = HttpStub::serve(|n| match n {
+            0 => Reply::Close,
+            1 => Reply::Ok("<html>busy</html>".into()),
+            _ => Reply::Ok(r#"{"resultCode":"0000","result":{"ok":true}}"#.into()),
+        })
+        .await;
+        let out = client
+            .api_fetch(&format!("{}/service/homes", lg.url), "GET", None)
+            .await
+            .unwrap();
+        assert_eq!(out, json!({"ok": true}));
+        assert_eq!(lg.accepted.load(Ordering::SeqCst), 3);
+
+        let down = HttpStub::serve(|_| Reply::Close).await;
+        assert!(client
+            .api_fetch(&format!("{}/service/homes", down.url), "GET", None)
+            .await
+            .is_err());
+        assert_eq!(
+            down.accepted.load(Ordering::SeqCst),
+            FETCH_ATTEMPTS as usize
+        );
+
+        // An error answer is LG's verdict, not a failed fetch: no retry.
+        let refused = HttpStub::serve(|_| Reply::Ok(r#"{"resultCode":"0102"}"#.into())).await;
+        let err = client
+            .api_fetch(&format!("{}/service/homes", refused.url), "GET", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("0102"), "{err}");
+        assert_eq!(refused.accepted.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn sign_in_url_contains_required_params() {

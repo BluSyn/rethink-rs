@@ -613,7 +613,8 @@ mod lifecycle_tests {
     use super::*;
     use crate::pair::{format_device_packet, parse_lg_packet_payload};
     use crate::test_support::{
-        eventually, expect_closed, read_t1_frame, write_t1_frame, HttpStub, TestPki, TlsStub, WAIT,
+        eventually, expect_closed, read_t1_frame, write_t1_frame, HttpStub, Reply, TestPki,
+        TlsStub, WAIT,
     };
     use crate::thinq1_conn::format_status_body;
     use crate::thinq2_conn::LgToDevice;
@@ -1068,6 +1069,34 @@ mod lifecycle_tests {
                 "{how}: only a close keeps the device wanted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_total_device_info_post_aborts_the_attempt() {
+        let http = HttpStub::serve(|_| Reply::Close).await;
+        let rti = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge = test_bridge();
+        let id = "t1-post-fails";
+        let state = t1_saved_state(rti.local_addr().unwrap().port(), &http.url);
+        bridge.storage.set_device_state_json(id, Some(state));
+        let local = MockLocal::new(id, "thinq1");
+        bridge
+            .enable(local.clone() as Arc<dyn LocalDevice>, None, None)
+            .await
+            .unwrap();
+
+        eventually("the POST is retried", || {
+            http.accepted.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rti.accept())
+                .await
+                .is_err(),
+            "no RTI connection without TotalDeviceInfoSvc"
+        );
+        assert_eq!(bridge.bridge_flags(id), (true, false));
+        bridge.disable(id).await.unwrap();
     }
 
     #[tokio::test]

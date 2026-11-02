@@ -55,8 +55,13 @@ async fn api_fetch_json(url: &str, method: &str, headers: &[(&str, &str)], body:
     if let Some(b) = body {
         req = req.header("Content-Type", "application/json").body(b.to_string());
     }
-    let resp = req.send().await?;
-    let out: serde_json::Value = resp.json().await?;
+    let result: Result<serde_json::Value, reqwest::Error> =
+        async { req.send().await?.json().await }.await;
+    let out = result.map_err(|e| {
+        let e = anyhow::Error::from(e);
+        eprintln!("[bridge] Failed to fetch {url}: {e:#}");
+        e
+    })?;
     let code = out.get("resultCode").and_then(|v| v.as_str()).unwrap_or("");
     if !code.is_empty() && code != "0000" {
         anyhow::bail!("thinq route error {code}: {out}");

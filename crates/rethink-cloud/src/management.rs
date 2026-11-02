@@ -610,9 +610,9 @@ async fn bridge_enable(
     State(state): State<MgmtState>,
     Path(device_id): Path<String>,
     body: Result<Json<EnableBody>, axum::extract::rejection::JsonRejection>,
-) -> StatusCode {
+) -> Response {
     let Some(bridge) = state.bridge.clone() else {
-        return StatusCode::NOT_FOUND;
+        return StatusCode::NOT_FOUND.into_response();
     };
     let dt = body.ok().and_then(|b| b.0.device_type);
     let (status_tx, mut status_rx) = mpsc::unbounded_channel::<String>();
@@ -622,7 +622,7 @@ async fn bridge_enable(
             as Arc<dyn rethink_bridge::LocalDevice>,
         None => {
             broadcast(&state, &json!({ "status": "device not connected" }));
-            return StatusCode::BAD_REQUEST;
+            return StatusCode::BAD_REQUEST.into_response();
         }
     };
     let report: Box<dyn FnMut(&str) + Send> = Box::new(move |s: &str| {
@@ -635,10 +635,11 @@ async fn bridge_enable(
     match result {
         Ok(true) => {
             broadcast(&state, &json!({ "devices": enum_devices(&state) }));
-            StatusCode::NO_CONTENT
+            StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => StatusCode::BAD_REQUEST,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(false) => StatusCode::BAD_REQUEST.into_response(),
+        // The panel shows the text in its error toast.
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
     }
 }
 
@@ -1257,6 +1258,7 @@ async fn api_device_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge_adapter::ConnectedAsLocal;
     use crate::devmgr::ConnectedDevice;
     use rethink_bridge::{BridgeState, Credentials, Environment, JsonStorage};
     use rethink_core::metadata::Metadata;
@@ -1516,10 +1518,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn bridge_session_changes_are_broadcast_to_the_panel() {
-        use crate::bridge_adapter::ConnectedAsLocal;
-
+    /// Management state with a logged-in bridge whose `dev-1` has `saved` as its LG state, and
+    /// a connected ThinQ2 `dev-1`.
+    fn bridged_state(saved: Value) -> (MgmtState, Arc<ConnectedDevice>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("rethink-mgmt-{}", uuid::Uuid::new_v4()));
         let storage = Arc::new(JsonStorage::new(&dir));
         storage.set_credentials(Some(Credentials {
@@ -1529,13 +1530,8 @@ mod tests {
                 language_code: None,
             },
         }));
-        storage.set_device_state_json("dev-1", Some(json!({"testMode": true})));
-        let bridge = Bridge::new(storage);
-        let state = test_state(Some(bridge.clone()));
-        let (tx, mut panel) = mpsc::unbounded_channel();
-        state.subscribers.lock().push(tx);
-        let _ = router(state.clone());
-
+        storage.set_device_state_json("dev-1", Some(saved));
+        let state = test_state(Some(Bridge::new(storage)));
         let dev = ConnectedDevice::new(
             "dev-1".into(),
             Platform::Thinq2,
@@ -1544,6 +1540,17 @@ mod tests {
             Arc::new(|_| {}),
         );
         state.manager.accept(dev.clone());
+        (state, dev, dir)
+    }
+
+    #[tokio::test]
+    async fn bridge_session_changes_are_broadcast_to_the_panel() {
+        let (state, dev, dir) = bridged_state(json!({"testMode": true}));
+        let (tx, mut panel) = mpsc::unbounded_channel();
+        state.subscribers.lock().push(tx);
+        let _ = router(state.clone());
+
+        let bridge = state.bridge.clone().unwrap();
         bridge.on_local_device(Arc::new(ConnectedAsLocal(dev.clone())));
         let started: Value = serde_json::from_str(&panel.try_recv().unwrap()).unwrap();
         assert_eq!(started["devices"]["dev-1"]["bridgeState"], "online");
@@ -1552,6 +1559,27 @@ mod tests {
         let stopped: Value = serde_json::from_str(&panel.try_recv().unwrap()).unwrap();
         assert_eq!(stopped["devices"], json!({}));
         assert!(panel.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_enable_answers_with_the_error() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // A saved state the bridge cannot start a session from.
+        let (state, _dev, dir) = bridged_state(json!({"platform": "thinq2", "mqttServer": ""}));
+        let request = axum::http::Request::post("/bridge/dev-1/enable")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let response = router(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "ThinQ2 state missing mqttServer — re-enable to re-pair"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

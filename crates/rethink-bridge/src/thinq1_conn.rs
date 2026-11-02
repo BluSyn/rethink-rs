@@ -142,30 +142,12 @@ impl Link {
             "{}/lgehadm/api/Device/TotalDeviceInfoSvc",
             self.state.http_server.trim_end_matches('/')
         );
-        if let Ok(client) = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-        {
-            let _ = client
-                .post(url)
-                .header("Accept", "text/xml")
-                .header("content-type", "text/xml;charset=utf-8")
-                .header("x-lgedm-userid", "lgehadmUser")
-                .header(
-                    "x-lgedm-password",
-                    "bxLoLAZ+rp3oJDbEzRuIfAG4YumeqwWM9l6uUH6TupQ=",
-                )
-                .header("x-lgedm-deviceid", &self.device_id)
-                .header("x-lgedm-devicetype", &self.device_type)
-                .body(format!(
-                    "<lgedmRoot><countryCode>WW</countryCode><modelName>{}</modelName>\
-                     <itemList><item>THINQ_TIME_SYNC_URI</item>\
-                     <elementList><elementCode>pushDetailYn</elementCode>\
-                     <elementValue>Y</elementValue></elementList></itemList></lgedmRoot>",
-                    self.model_name
-                ))
-                .send()
-                .await;
+        if let Err(e) = self.total_device_info(&url).await {
+            eprintln!(
+                "[bridge] Failed to fetch {url}: {:#}",
+                anyhow::Error::from(e)
+            );
+            return None;
         }
         if self.stop.is_stopped() {
             return None;
@@ -180,12 +162,39 @@ impl Link {
             Ok(_) => None,
             Err(e) => {
                 eprintln!(
-                    "[bridge] Error communicating with {}: {e}",
+                    "[bridge] Error communicating with {}: {e:#}",
                     self.state.rti_server
                 );
                 None
             }
         }
+    }
+
+    async fn total_device_info(&self, url: &str) -> Result<String, reqwest::Error> {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()?
+            .post(url)
+            .header("Accept", "text/xml")
+            .header("content-type", "text/xml;charset=utf-8")
+            .header("x-lgedm-userid", "lgehadmUser")
+            .header(
+                "x-lgedm-password",
+                "bxLoLAZ+rp3oJDbEzRuIfAG4YumeqwWM9l6uUH6TupQ=",
+            )
+            .header("x-lgedm-deviceid", &self.device_id)
+            .header("x-lgedm-devicetype", &self.device_type)
+            .body(format!(
+                "<lgedmRoot><countryCode>WW</countryCode><modelName>{}</modelName>\
+                 <itemList><item>THINQ_TIME_SYNC_URI</item>\
+                 <elementList><elementCode>pushDetailYn</elementCode>\
+                 <elementValue>Y</elementValue></elementList></itemList></lgedmRoot>",
+                self.model_name
+            ))
+            .send()
+            .await?
+            .text()
+            .await
     }
 
     async fn handshake(&self) -> anyhow::Result<TlsStream<TcpStream>> {

@@ -1741,7 +1741,9 @@ async function fetchWrapper(path, body, options) {
     options.body = JSON.stringify(body)
     try {
         const response = await fetch(`${baseUrl}${path}`, options)
-        if (response.status >= 300) M.toast({ html: `HTTP error ${response.status}: ${await response.text()}` })
+        // The body can be an error message passed on from the LG cloud: text, not markup.
+        if (response.status >= 300)
+            M.toast({ html: `HTTP error ${response.status}: ${escapeHtml(await response.text())}` })
         return response
     } catch (err) {
         M.toast({ html: `FETCH error: ${err}` })

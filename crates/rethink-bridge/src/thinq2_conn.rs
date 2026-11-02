@@ -91,6 +91,7 @@ pub fn connect_thinq2(
     let pub_topic = state.pub_topic.clone();
     let did = device_id.to_string();
     let model = model_name.to_string();
+    let mqtt_server = state.mqtt_server.clone();
     let mid_c = mid.clone();
     let client_c = client.clone();
     let stop_c = stop.clone();
@@ -169,7 +170,7 @@ pub fn connect_thinq2(
                 }
                 Err(e) => {
                     connected = false;
-                    eprintln!("[bridge] {did} mqtt error: {e}");
+                    eprintln!("[bridge] Error communicating with {mqtt_server}: {e}");
                     on_link(false);
                     tokio::select! {
                         biased;
