@@ -154,7 +154,7 @@ pub fn drying_mode(code: u32) -> Option<&'static str> {
 pub const DOSES: &[&str] = &["Off", "Low", "Medium", "High"];
 
 pub fn error_message(code: usize) -> &'static str {
-    ERRORS.get(code).and_then(|x| *x).unwrap_or("unknown")
+    ERRORS.get(code).and_then(|x| *x).unwrap_or("None")
 }
 
 pub fn state_name(code: usize) -> &'static str {
@@ -322,7 +322,8 @@ mod tests {
         assert_eq!(state_name(99), "unknown");
         assert_eq!(error_message(0), "OK");
         assert_eq!(error_message(1), "Door lock error (DE2)");
-        assert_eq!(error_message(999), "unknown");
+        assert_eq!(error_message(10), "None");
+        assert_eq!(error_message(999), "None");
     }
 
     #[test]
