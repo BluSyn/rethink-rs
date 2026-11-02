@@ -54,6 +54,7 @@ register_devices! {
         win_056905_ww => { "WIN_056905_WW" },
         dev_2ref11eida__4 => { "2REF11EIDA__4" },
         dev_2ref11eidg__4 => { "2REF11EIDG__4" },
+        dev_2ref11eict__4 => { "2REF11EICT__4" },
         dev_2ref11ebivpc4 => { "2REF11EBIVPC4" },
         dev_2ref12eii_p_2 => { "2REF12EII_P_2" },
         dev_2ref11eii__m2 => { "2REF11EII__M2" },
