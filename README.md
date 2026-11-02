@@ -34,10 +34,15 @@ A working `rethink-cloud` binary exists and can enroll appliances, serve MQTT di
 
 Supported in this tree (model IDs in `crates/rethink-devices`):
 
-- **Air conditioners:** RAC / CST DualCool family, WIN window AC, POT portable
-- **Fridges:** several `2REF*` / `2RES*` / `2REB*` AABB models
-- **Washers / dryers / WashTower:** F_/Y_ UK-EU washers, F3L2 / F3L7, T1789 / T17A1, RV13 BSD/ES/U6, RH10 heat-pump dryer, WTL WashTower, WTDN3 (ThinQ1)
-- **Other:** DHUM / HUM, STUDIO_HOOD, H11 dishwasher, VCDWL2QEUK
+- **Air conditioners:** RAC / CST DualCool family, WIN window AC, POT portable, PAC floor-standing (`PAC_910604_WW`), DUCT ducted (`DUCT_626301_WW`)
+- **Air & water:** DHUM dehumidifiers, HUM air-purifying humidifier, `AIR_910604_WW` air purifier, `VENT_725601_WW` ventilator, `WHT_056905_WW` heat-pump water heater, `1WPU4CIGCR__2` / `1WPD6CMIDR__3` water purifiers
+- **Fridges:** several `2REF*` / `2RES*` / `2REB*` AABB models, including the GLUB bottom freezers
+- **Washers:** F_ / Y_ / G2 UK / EU / AU front-loaders, VCDWL2QEUK, US front-loaders (F3L2 / F3L7 / F3M2 / F3P2 / F3P3, F24VDD, FAFXU25006), top-loaders (T1789 / T17A1, TLVE5BB), ThinQ1 washers (WTDN3, WTWN3, F3L2CNV4W_WIFI, F3L2CYV5W_WIFI)
+- **Dryers & combos:** RV13 US dryers, BDH_D30007_US, heat-pump dryers (RH10, RH16, RC90U2 on ThinQ2 and ThinQ1 incl. RC90V9 / RH90V9, SDH_GVX5_6211), washer/dryers (F_V__F___W.B__ECON, Y_V8_F, V_V__F)
+- **WashTower:** WTL_FXU_BDV_NA_01, WKEX200HBA (F3S1CWKB__ + RV13S1AMJW_US)
+- **Stylers:** S5MPC, ST_B_E4H01Y_APL
+- **Kitchen:** dishwashers (H11, N17, N02, D0211 / D2211, D2201, D30), STUDIO_HOOD range hood, ranges and ovens (WFV474PGV, WLSI_633_, WLREL6323S), microwaves (WMVEM1825, WMVEL2137)
+- **Vacuums:** CordZero A9 stick vacuums (HWWA9K_F2, HWWA9S_F2U)
 
 Unlisted appliances can still be used in **bridge mode** (no HA translation). For new devices or gaps, contribute **upstream**, not here.
 
@@ -73,7 +78,7 @@ Network / DNS (`rethink.lgthinq.com`, etc.): follow **[upstream installation](ht
 | `rethink-bridge` | Optional LG-cloud bridge helpers |
 | `rethink-cloud` | Main server |
 | `rethink-setup` | SoftAP provisioning CLI |
-| `rethink-tools` | packet-parser / packet-sender / capture / MCP / lgcloud-monitor |
+| `rethink-tools` | packet-parser / packet-sender / capture / MCP / lgcloud-monitor / thinq-control |
 
 Adding a device in *this* tree (for your own fork only): implement `crates/rethink-devices/src/devices/<module>.rs` with tests in the same file, then one line in the `register_devices!` table in `devices/mod.rs`. Prefer sending that work **upstream**.
 
