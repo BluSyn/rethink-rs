@@ -11,14 +11,16 @@ use openssl::x509::extension::{
 };
 use openssl::x509::{X509Builder, X509NameBuilder, X509};
 use rethink_util::length_prefixed_frame;
+use rethink_util::sync::Mutex;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
@@ -295,6 +297,227 @@ impl TlsStub {
             .await
             .expect("timed out waiting for a TLS connection")
             .unwrap()
+    }
+}
+
+/// A response to `query` in the shape real servers send: a CNAME to "cdns.<name>" followed by
+/// `answers` (type, ttl, rdata) for it, with compression pointers. Port of the `response`
+/// helper in upstream's tests/bridge/resolver.test.ts.
+pub fn dns_response(query: &[u8], answers: &[(u16, u32, Vec<u8>)], rcode: u16) -> Vec<u8> {
+    let rr = |rtype: u16, ttl: u32, data: &[u8], name: &[u8]| {
+        let mut out = name.to_vec();
+        out.extend_from_slice(&rtype.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&ttl.to_be_bytes());
+        out.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    };
+    let mut msg = query[..12].to_vec();
+    msg[2..4].copy_from_slice(&(0x8180 | rcode).to_be_bytes());
+    msg[6..8].copy_from_slice(&(answers.len() as u16 + 1).to_be_bytes());
+    msg.extend_from_slice(&query[12..]);
+    // "cdns." + a pointer to the question name
+    let cname_target = [0x04, b'c', b'd', b'n', b's', 0xc0, 0x0c];
+    let cname_rdata_offset = query.len() + 2 + 10;
+    let pointer_to_cname = [
+        0xc0 | (cname_rdata_offset >> 8) as u8,
+        (cname_rdata_offset & 0xff) as u8,
+    ];
+    msg.extend(rr(5, 300, &cname_target, &[0xc0, 0x0c]));
+    for (rtype, ttl, data) in answers {
+        msg.extend(rr(*rtype, *ttl, data, &pointer_to_cname));
+    }
+    msg
+}
+
+/// The names a DNS stand-in knows: `(name, address, ttl)`.
+pub type DnsRecords = Vec<(&'static str, IpAddr, u32)>;
+
+/// Name and type of a query's question.
+pub fn dns_question(query: &[u8]) -> (String, u16) {
+    let mut labels = Vec::new();
+    let mut i = 12;
+    while query[i] != 0 {
+        let n = query[i] as usize;
+        labels.push(String::from_utf8_lossy(&query[i + 1..i + 1 + n]).into_owned());
+        i += n + 1;
+    }
+    (
+        labels.join("."),
+        u16::from_be_bytes([query[i + 1], query[i + 2]]),
+    )
+}
+
+/// The records of `records` asked for, or NXDOMAIN for a name it does not know.
+pub fn dns_answer(query: &[u8], records: &[(&str, IpAddr, u32)]) -> Vec<u8> {
+    let (name, qtype) = dns_question(query);
+    let known: Vec<_> = records.iter().filter(|(n, ..)| *n == name).collect();
+    let answers: Vec<(u16, u32, Vec<u8>)> = known
+        .iter()
+        .filter_map(|(_, ip, ttl)| match (ip, qtype) {
+            (IpAddr::V4(v4), 1) => Some((1, *ttl, v4.octets().to_vec())),
+            (IpAddr::V6(v6), 28) => Some((28, *ttl, v6.octets().to_vec())),
+            _ => None,
+        })
+        .collect();
+    dns_response(query, &answers, if known.is_empty() { 3 } else { 0 })
+}
+
+/// Plain DNS stand-in, UDP and TCP on the same port, answering like [`dns_answer`].
+pub struct DnsStub {
+    pub addr: SocketAddr,
+    udp_queries: Arc<AtomicUsize>,
+    tcp_queries: Arc<AtomicUsize>,
+}
+
+impl DnsStub {
+    pub async fn start(records: DnsRecords) -> Self {
+        Self::start_with(records, Duration::ZERO, false).await
+    }
+
+    /// Answers after `delay`; with `truncate_udp`, UDP answers only say "truncated".
+    pub async fn start_with(records: DnsRecords, delay: Duration, truncate_udp: bool) -> Self {
+        let (udp, tcp) = loop {
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            if let Ok(tcp) = TcpListener::bind(udp.local_addr().unwrap()).await {
+                break (Arc::new(udp), tcp);
+            }
+        };
+        let addr = udp.local_addr().unwrap();
+        let records = Arc::new(records);
+        let udp_queries = Arc::new(AtomicUsize::new(0));
+        let tcp_queries = Arc::new(AtomicUsize::new(0));
+        let (count, answers) = (udp_queries.clone(), records.clone());
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, peer)) = udp.recv_from(&mut buf).await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let (query, udp, answers) = (buf[..n].to_vec(), udp.clone(), answers.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let mut answer = dns_answer(&query, &answers);
+                    if truncate_udp {
+                        answer.truncate(12);
+                        answer[2] |= 0x02;
+                        answer[4..].fill(0);
+                    }
+                    let _ = udp.send_to(&answer, peer).await;
+                });
+            }
+        });
+        let (count, answers) = (tcp_queries.clone(), records);
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = tcp.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let answers = answers.clone();
+                tokio::spawn(async move {
+                    let mut len = [0u8; 2];
+                    if sock.read_exact(&mut len).await.is_err() {
+                        return;
+                    }
+                    let mut query = vec![0u8; u16::from_be_bytes(len) as usize];
+                    if sock.read_exact(&mut query).await.is_err() {
+                        return;
+                    }
+                    let answer = dns_answer(&query, &answers);
+                    let mut framed = (answer.len() as u16).to_be_bytes().to_vec();
+                    framed.extend(answer);
+                    let _ = sock.write_all(&framed).await;
+                });
+            }
+        });
+        Self {
+            addr,
+            udp_queries,
+            tcp_queries,
+        }
+    }
+
+    /// As written in `bridge.dns`.
+    pub fn entry(&self) -> String {
+        self.addr.to_string()
+    }
+
+    pub fn queries(&self) -> usize {
+        self.udp_queries.load(Ordering::SeqCst)
+    }
+
+    pub fn tcp_queries(&self) -> usize {
+        self.tcp_queries.load(Ordering::SeqCst)
+    }
+}
+
+/// RFC 8484 stand-in over plain HTTP: answers `GET …?dns=<base64url query>` like
+/// [`dns_answer`], or with `status` alone when that is not 200. Keeps each request's target
+/// and accept header.
+pub struct DohStub {
+    pub url: String,
+    pub requests: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl DohStub {
+    pub async fn start(records: DnsRecords, status: u16) -> Self {
+        use base64::Engine;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/dns-query", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (log, records) = (requests.clone(), Arc::new(records));
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let (log, records) = (log.clone(), records.clone());
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut chunk).await {
+                            Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]),
+                            _ => return,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head).into_owned();
+                    let target = head.split(' ').nth(1).unwrap_or("").to_string();
+                    let accept = head
+                        .lines()
+                        .filter_map(|l| l.split_once(':'))
+                        .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+                        .map(|(_, v)| v.trim().to_string())
+                        .unwrap_or_default();
+                    log.lock().push((target.clone(), accept));
+                    let answer = url::Url::parse(&format!("http://doh{target}"))
+                        .ok()
+                        .and_then(|u| {
+                            u.query_pairs()
+                                .find(|(k, _)| k == "dns")
+                                .map(|(_, v)| v.into_owned())
+                        })
+                        .and_then(|q| {
+                            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                .decode(q)
+                                .ok()
+                        })
+                        .map(|query| dns_answer(&query, &records));
+                    let resp = match answer {
+                        Some(answer) if status == 200 => {
+                            let mut resp = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/dns-message\r\n\
+                                 content-length: {}\r\nconnection: close\r\n\r\n",
+                                answer.len()
+                            )
+                            .into_bytes();
+                            resp.extend(answer);
+                            resp
+                        }
+                        _ => format!(
+                            "HTTP/1.1 {status} Nope\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .into_bytes(),
+                    };
+                    let _ = sock.write_all(&resp).await;
+                });
+            }
+        });
+        Self { url, requests }
     }
 }
 

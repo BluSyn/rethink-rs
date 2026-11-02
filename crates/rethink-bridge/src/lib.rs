@@ -409,6 +409,7 @@ impl Bridge {
         }
 
         let stop = StopSignal::new();
+        let resolver = resolver::global();
         let link_up = Arc::new(AtomicBool::new(test_mode));
         let on_link: OnLink = {
             let bridge = Arc::downgrade(self);
@@ -438,6 +439,7 @@ impl Bridge {
                 device.deploy_payload(),
                 stop.clone(),
                 on_link,
+                resolver,
             )?;
             let dev = device.clone();
             spawn_forward(stop.clone(), from_lg, move |msg| {
@@ -453,6 +455,7 @@ impl Bridge {
                 device_type.as_deref(),
                 stop.clone(),
                 on_link,
+                resolver,
             )?;
             let dev = device.clone();
             spawn_forward(stop.clone(), from_lg, move |body| {

@@ -24,8 +24,12 @@ sha2 = { workspace = true }
 rsa = { workspace = true }
 rand = { workspace = true }
 openssl = "0.10"
-rumqttc = { workspace = true }
+# proxy: the MQTT link can go through the in-process CONNECT proxy (see resolver.rs).
+rumqttc = { workspace = true, features = ["proxy"] }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 webpki-roots = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }

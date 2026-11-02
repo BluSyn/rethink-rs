@@ -76,7 +76,7 @@ impl Client {
 
     /// Up to [`FETCH_ATTEMPTS`] tries, [`RETRY_DELAY`] apart; each failure is logged.
     async fn api_fetch(&self, url: &str, method: &str, body: Option<Value>) -> anyhow::Result<Value> {
-        let client = reqwest::Client::new();
+        let client = crate::resolver::http_client().build()?;
         let mut attempt = 1;
         let out: Value = loop {
             let mut req = match method {
@@ -424,7 +424,11 @@ impl Client {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing modelJsonUri"))?;
         let download = async {
-            let resp = reqwest::Client::new().get(uri).send().await?;
+            let resp = crate::resolver::http_client()
+                .build()?
+                .get(uri)
+                .send()
+                .await?;
             let status = resp.status();
             if !status.is_success() {
                 anyhow::bail!("Can't download the modelJSON: HTTP {}", status.as_u16());

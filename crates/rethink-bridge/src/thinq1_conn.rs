@@ -6,6 +6,7 @@
 //! or sent afterwards.
 
 use crate::pair::Thinq1DeviceState;
+use crate::resolver::Resolver;
 use crate::stop::StopSignal;
 use crate::{OnLink, RECONNECT_PERIOD};
 use rethink_util::length_prefixed_frame::{self, Splitter};
@@ -58,7 +59,7 @@ impl Thinq1Handle {
 }
 
 /// Start the session's connection task; it runs until `stop`. `on_link` hears when the TLS
-/// link to LG is up and when it has dropped.
+/// link to LG is up and when it has dropped. LG's names are looked up through `resolver`.
 pub fn connect_thinq1(
     state: &Thinq1DeviceState,
     device_id: &str,
@@ -66,6 +67,7 @@ pub fn connect_thinq1(
     device_type: Option<&str>,
     stop: StopSignal,
     on_link: OnLink,
+    resolver: Arc<Resolver>,
 ) -> anyhow::Result<(Thinq1Handle, mpsc::UnboundedReceiver<serde_json::Value>)> {
     let (host, port) = parse_host_port(&state.rti_server)?;
     let (write_tx, write_rx) = mpsc::unbounded_channel();
@@ -89,6 +91,7 @@ pub fn connect_thinq1(
         from_lg: from_lg_tx,
         stop: stop.clone(),
         on_link,
+        resolver,
     };
     tokio::spawn(async move {
         tokio::select! {
@@ -112,6 +115,7 @@ struct Link {
     from_lg: mpsc::UnboundedSender<serde_json::Value>,
     stop: StopSignal,
     on_link: OnLink,
+    resolver: Arc<Resolver>,
 }
 
 impl Link {
@@ -171,7 +175,8 @@ impl Link {
     }
 
     async fn total_device_info(&self, url: &str) -> Result<String, reqwest::Error> {
-        reqwest::Client::builder()
+        self.resolver
+            .http_client()
             .danger_accept_invalid_certs(true)
             .build()?
             .post(url)
@@ -205,7 +210,8 @@ impl Link {
                 .with_custom_certificate_verifier(Arc::new(NoVerifier))
                 .with_no_client_auth();
         let connector = TlsConnector::from(Arc::new(config));
-        let tcp = TcpStream::connect((self.host.as_str(), self.port)).await?;
+        let tcp = self.resolver.connect(&self.host, self.port).await?;
+        // The resolved address is only for TCP; TLS still names the host.
         let server_name = ServerName::try_from(self.host.clone())
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .to_owned();
@@ -369,7 +375,53 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{read_t1_frame, DnsStub, HttpStub, TestPki, TlsStub};
     use rethink_util::length_prefixed_frame;
+
+    #[tokio::test]
+    async fn lg_names_resolve_through_the_bridge_servers_and_tls_keeps_the_hostname() {
+        let pki = TestPki::new();
+        let mut rti = TlsStub::start(pki.server_config(&pki.leaf(&["rti.test"]), false)).await;
+        let http = HttpStub::start(false).await;
+        let http_port = url::Url::parse(&http.url).unwrap().port().unwrap();
+        // Names only the bridge's DNS server knows.
+        let dns = DnsStub::start(vec![
+            ("rti.test", "127.0.0.1".parse().unwrap(), 60),
+            ("http.test", "127.0.0.1".parse().unwrap(), 60),
+        ])
+        .await;
+        let resolver = Arc::new(Resolver::new(&[dns.entry()]).unwrap());
+        let state = Thinq1DeviceState {
+            rti_server: format!("rti.test:{}", rti.port),
+            http_server: format!("http://http.test:{http_port}"),
+        };
+        let stop = StopSignal::new();
+        let (_handle, _from_lg) = connect_thinq1(
+            &state,
+            "t1-dns",
+            "MODEL",
+            None,
+            stop.clone(),
+            Arc::new(|_| {}),
+            resolver,
+        )
+        .unwrap();
+
+        let (mut lg, sni) = rti.next().await;
+        assert_eq!(sni.as_deref(), Some("rti.test"));
+        assert_eq!(
+            read_t1_frame(&mut lg).await.unwrap()["Body"]["Cmd"],
+            "Alive"
+        );
+        assert_eq!(
+            http.accepted.load(Ordering::SeqCst),
+            1,
+            "TotalDeviceInfoSvc"
+        );
+        assert_eq!(dns.queries(), 4, "A and AAAA for each name");
+        stop.stop();
+        assert!(read_t1_frame(&mut lg).await.is_none());
+    }
 
     #[test]
     fn status_body_is_b64_and_framed() {

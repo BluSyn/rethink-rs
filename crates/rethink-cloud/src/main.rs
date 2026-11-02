@@ -136,7 +136,9 @@ async fn main() -> Result<()> {
         config.hostname.clone(),
     )?);
     if let Some(ref bridge) = config.bridge {
-        rethink_bridge::resolver::set_servers(bridge.dns.clone().unwrap_or_default());
+        // Like upstream, a server list that does not parse stops rethink here.
+        rethink_bridge::resolver::set_servers(bridge.dns.as_deref().unwrap_or_default())
+            .map_err(|e| anyhow::anyhow!("Invalid bridge.dns: {e}"))?;
     }
 
     let manager = devmgr::DeviceManager::new();

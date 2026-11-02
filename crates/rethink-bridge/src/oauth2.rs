@@ -42,7 +42,7 @@ pub async fn signed_request(
     }
     let signature = sign(&to_sign, &timestamp);
 
-    let client = reqwest::Client::new();
+    let client = crate::resolver::http_client().build()?;
     let mut req = if body.is_some() {
         client.post(url)
     } else {
@@ -149,7 +149,8 @@ pub async fn from_sign_in(
         .append_pair("redirectUri", "https://kr.m.lgaccount.com/login/iabClose")
         .append_pair("state", "signin")
         .finish();
-    let answer: serde_json::Value = reqwest::Client::new()
+    let answer: serde_json::Value = crate::resolver::http_client()
+        .build()?
         .post(url::Url::parse(web_url)?.join("/lgacc/front/v1/signin/oauth")?)
         .header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
         .body(body)

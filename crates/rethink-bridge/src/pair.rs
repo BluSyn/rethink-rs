@@ -44,7 +44,7 @@ pub struct PairResult {
 }
 
 async fn api_fetch_json(url: &str, method: &str, headers: &[(&str, &str)], body: Option<&str>) -> anyhow::Result<serde_json::Value> {
-    let client = reqwest::Client::new();
+    let client = crate::resolver::http_client().build()?;
     let mut req = match method {
         "POST" => client.post(url),
         _ => client.get(url),
