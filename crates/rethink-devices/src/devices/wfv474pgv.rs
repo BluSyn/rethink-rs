@@ -601,6 +601,15 @@ fn components() -> Map<String, Value> {
     comps
 }
 
+/// Entities earlier releases of this fork published under other keys; Home Assistant removes each
+/// on seeing only its `platform`.
+const TOMBSTONES: &[(&str, &str)] = &[
+    ("lower_oven_state", "sensor"),
+    ("raw_status", "sensor"),
+    ("undecoded_frame", "sensor"),
+    ("upper_oven_state", "sensor"),
+];
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     remote: Mutex<RemoteParams>,
@@ -615,6 +624,11 @@ impl Device {
         let core = AabbDeviceCore::new(ha, thinq.clone());
         let mut config = default_config(&meta, Some(json!({"name": "LG Oven"})));
         config.components = components().into_iter().collect();
+        for (key, platform) in TOMBSTONES {
+            config
+                .components
+                .insert((*key).into(), json!({ "platform": platform }));
+        }
         core.set_config(config);
 
         let remote = RemoteParams::default();
@@ -1016,8 +1030,11 @@ mod tests {
         prop(ha, name).unwrap_or_else(|| panic!("{name} was never published"))
     }
 
+    /// The discovery components, without removal tombstones (platform-only entries).
     fn components(ha: &MockHaConnection) -> HashMap<String, Value> {
-        ha.device(DEVICE_ID).unwrap().config.unwrap().components
+        let mut c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        c.retain(|_, v| v.as_object().is_none_or(|o| o.len() > 1));
+        c
     }
 
     /// Frames the handler does not decode must not reach HA at all, so "ignored" means no
@@ -2089,5 +2106,15 @@ mod tests {
 
         assert_eq!(p(&ha, "upper_oven_mode"), "Bake");
         assert_eq!(p(&ha, "lower_oven_mode"), "Convection Bake");
+    }
+
+    #[test]
+    fn entities_from_earlier_releases_are_withdrawn_with_tombstones() {
+        let (ha, _, _) = make();
+        let all = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        for (key, platform) in TOMBSTONES {
+            assert_eq!(all[*key], json!({ "platform": platform }), "{key}");
+            assert!(!components(&ha).contains_key(*key), "{key}");
+        }
     }
 }

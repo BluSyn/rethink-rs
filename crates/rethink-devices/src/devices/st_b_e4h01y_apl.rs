@@ -682,6 +682,18 @@ struct Inner {
     has_problem: Option<bool>,
 }
 
+/// Entities earlier releases of this fork published under other keys; Home Assistant removes each
+/// on seeing only its `platform`.
+const TOMBSTONES: &[(&str, &str)] = &[
+    ("energy", "sensor"),
+    ("internal_light", "sensor"),
+    ("night_care_window", "sensor"),
+    ("problem", "binary_sensor"),
+    ("remaining", "sensor"),
+    ("reserved_at", "sensor"),
+    ("total", "sensor"),
+];
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     inner: Mutex<Inner>,
@@ -696,6 +708,11 @@ impl Device {
         let core = AabbDeviceCore::new(ha, thinq.clone());
         let mut config = default_config(&meta, Some(json!({"name": "LG Styler"})));
         config.components = components();
+        for (key, platform) in TOMBSTONES {
+            config
+                .components
+                .insert((*key).into(), json!({ "platform": platform }));
+        }
         core.set_config(config);
 
         let this = Arc::new(Self {
@@ -1047,8 +1064,11 @@ mod tests {
         hex_encode(packet).to_ascii_lowercase()
     }
 
+    /// The discovery components, without removal tombstones (platform-only entries).
     fn components(ha: &MockHaConnection) -> HashMap<String, Value> {
-        ha.device(DEVICE_ID).unwrap().config.unwrap().components
+        let mut c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        c.retain(|_, v| v.as_object().is_none_or(|o| o.len() > 1));
+        c
     }
 
     fn properties(ha: &MockHaConnection) -> HashMap<String, PropertyValue> {
@@ -1777,5 +1797,15 @@ mod tests {
     #[test]
     fn registry_resolves() {
         assert!(crate::registry::t2_factory("ST_B_E4H01Y_APL").is_some());
+    }
+
+    #[test]
+    fn entities_from_earlier_releases_are_withdrawn_with_tombstones() {
+        let (ha, _, _) = make();
+        let all = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        for (key, platform) in TOMBSTONES {
+            assert_eq!(all[*key], json!({ "platform": platform }), "{key}");
+            assert!(!components(&ha).contains_key(*key), "{key}");
+        }
     }
 }
