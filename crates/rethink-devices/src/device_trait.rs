@@ -16,6 +16,9 @@ pub enum Platform {
 pub trait DeviceHandler: Send + Sync {
     fn id(&self) -> &str;
     fn start(&self);
+    /// Stop background work without touching HA availability: the handler is being replaced by a
+    /// new session, or its offline publish is deferred. `drop_device` must still work afterwards.
+    fn retire(&self) {}
     fn drop_device(&self);
     fn set_property(&self, prop: &str, value: &str);
     fn publish_config(&self);

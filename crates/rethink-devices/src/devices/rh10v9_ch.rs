@@ -518,11 +518,14 @@ impl DeviceHandler for Device {
         });
         *self.monitor_thread.lock() = Some(handle);
     }
-    fn drop_device(&self) {
+    fn retire(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(h) = self.monitor_thread.lock().take() {
             let _ = h.join();
         }
+    }
+    fn drop_device(&self) {
+        self.retire();
         self.core.drop_device();
     }
     fn set_property(&self, prop: &str, value: &str) {
