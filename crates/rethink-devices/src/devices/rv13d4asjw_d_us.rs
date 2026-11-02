@@ -687,10 +687,7 @@ impl Device {
                 rec[TIME_DRY_OFFSET] = step;
             }
             _ => {
-                let Some(minutes) = value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
+                let Some(minutes) = crate::js::number(value)
                     .map(js_round)
                     .filter(|m| m.is_finite())
                 else {
@@ -1227,5 +1224,23 @@ mod tests {
             hex_encode(&thinq.outbox()[0]),
             "AA0EF0ED1121010000001800B5BB"
         );
+    }
+
+    #[test]
+    fn more_less_payloads_parse_like_javascript_number() {
+        for (payload, byte) in [("", 0u8), ("0x10", 16), (" 12.6 ", 13), ("-40", (-30i8) as u8)] {
+            let (_, thinq, dev) = make();
+            thinq.emit_data(&hex_decode(PAUSED_TOWELS));
+            thinq.reset_recorder();
+            dev.set_property("more_less_time", payload);
+            let sent = thinq.outbox();
+            assert_eq!(sent.len(), 1, "{payload:?}");
+            assert_eq!(sent[0][2 + 19], byte, "{payload:?}");
+        }
+        let (_, thinq, dev) = make();
+        thinq.emit_data(&hex_decode(PAUSED_TOWELS));
+        thinq.reset_recorder();
+        dev.set_property("more_less_time", "abc");
+        assert!(thinq.outbox().is_empty());
     }
 }
