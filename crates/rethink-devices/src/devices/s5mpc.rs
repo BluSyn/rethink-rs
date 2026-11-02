@@ -27,6 +27,7 @@
 //!
 //! Port of upstream PR #173.
 
+use crate::course_memory::CourseMemory;
 use crate::device_trait::DeviceHandler;
 use crate::js;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
@@ -34,10 +35,9 @@ use rethink_core::ha::{DeviceDiscovery, PropertyValue};
 use rethink_core::{hex_decode, unwrap_aabb, HaConnection, Metadata, Thinq2Device};
 use rethink_util::packet_codec::aabb_checksum;
 use rethink_util::sync::Mutex;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const STATE_TAG: u8 = 0x31;
@@ -81,8 +81,6 @@ const RESERVE_MAX: u8 = 19;
 const DOWNLOADED_COURSE: u8 = 10;
 const DEFAULT_COURSE: u8 = 1;
 const DEFAULT_SMART: i64 = 66;
-
-const MEMORY_FILE: &str = "/app/data/rethink-course-memory.json";
 
 /// `styler.state`, which is not positional: the running codes jump to 50 and up.
 const STATES: &[(&[u8], &str)] = &[
@@ -384,8 +382,6 @@ const SMART_PARAMS: &[(u8, u8, &str)] = &[
 /// Last selection per device id. Every reconnect builds a new handler, which must not fall back
 /// to its defaults.
 static REMEMBERED: Mutex<BTreeMap<String, Memory>> = Mutex::new(BTreeMap::new());
-/// This module's reads and writes of the memory file.
-static MEMORY_FILE_LOCK: Mutex<()> = Mutex::new(());
 
 fn state_label(code: u8) -> Option<&'static str> {
     STATES
@@ -706,58 +702,11 @@ fn config(meta: &Metadata) -> DeviceDiscovery {
     config
 }
 
-fn memory_file() -> PathBuf {
-    std::env::var_os("RETHINK_MEMORY_FILE")
-        .map_or_else(|| PathBuf::from(MEMORY_FILE), PathBuf::from)
-}
-
-/// The file holds one entry per device id. A missing or torn file reads as no memory.
-fn load_memory(file: &Path, id: &str) -> Option<Memory> {
-    let _file = MEMORY_FILE_LOCK.lock();
-    let all: Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
-    let entry = all.get(id)?;
-    Some(Memory {
-        smart: entry.get("smart")?.as_i64()?,
-        smart_selected: entry.get("smartSelected")?.as_bool()?,
-    })
-}
-
-/// Rewrites the file, other devices' entries included, through a temporary one: a crash leaves
-/// either the old file or the new.
-fn save_memory(file: &Path, id: &str, entry: Memory) -> std::io::Result<()> {
-    let _file = MEMORY_FILE_LOCK.lock();
-    let existing = std::fs::read_to_string(file)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok());
-    let mut all = match existing {
-        None => Map::new(),
-        Some(Value::Object(all)) => all,
-        Some(_) => return Err(std::io::Error::other("not a JSON object")),
-    };
-    all.insert(
-        id.to_string(),
-        json!({"smart": entry.smart, "smartSelected": entry.smart_selected}),
-    );
-    let mut tmp = file.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    let written = write_synced(&tmp, &Value::Object(all).to_string())
-        .and_then(|()| std::fs::rename(&tmp, file));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
-}
-
-fn write_synced(path: &Path, contents: &str) -> std::io::Result<()> {
-    let mut out = std::fs::File::create(path)?;
-    out.write_all(contents.as_bytes())?;
-    out.sync_all()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// This handler's entry in the shared course memory file (upstream's format).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Memory {
     smart: i64,
+    #[serde(rename = "smartSelected")]
     smart_selected: bool,
 }
 
@@ -773,13 +722,11 @@ struct State {
     /// Last state the appliance reported, `None` before the first state frame.
     powered_on: Option<bool>,
     has_problem: Option<bool>,
-    /// The entry last written to the memory file.
-    saved: Option<Memory>,
 }
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
-    memory_file: PathBuf,
+    memory: CourseMemory,
     state: Mutex<State>,
 }
 
@@ -789,7 +736,7 @@ impl Device {
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
     ) -> Arc<Self> {
-        Self::with_memory_file(ha, thinq, meta, memory_file())
+        Self::with_memory_file(ha, thinq, meta, CourseMemory::default_file())
     }
 
     fn with_memory_file(
@@ -801,7 +748,7 @@ impl Device {
         let core = AabbDeviceCore::new(ha, thinq.clone());
         let this = Arc::new(Self {
             core: core.clone(),
-            memory_file,
+            memory: CourseMemory::new(memory_file, thinq.id()),
             state: Mutex::new(State {
                 selected_course: DEFAULT_COURSE,
                 selected_smart: DEFAULT_SMART,
@@ -811,7 +758,6 @@ impl Device {
                 store: false,
                 powered_on: None,
                 has_problem: None,
-                saved: None,
             }),
         });
 
@@ -836,7 +782,7 @@ impl Device {
     /// Picks up the selection an earlier handler for this device left, in process or on disk.
     fn restore(&self) {
         let remembered = REMEMBERED.lock().get(&self.core.id).copied();
-        let remembered = remembered.or_else(|| load_memory(&self.memory_file, &self.core.id));
+        let remembered = remembered.or_else(|| self.memory.load::<Memory>());
         let mut st = self.state.lock();
         if let Some(memory) = remembered {
             st.selected_smart = memory.smart;
@@ -858,13 +804,7 @@ impl Device {
             smart_selected: st.smart_selected,
         };
         REMEMBERED.lock().insert(self.core.id.clone(), entry);
-        if st.saved == Some(entry) {
-            return;
-        }
-        match save_memory(&self.memory_file, &self.core.id, entry) {
-            Ok(()) => st.saved = Some(entry),
-            Err(err) => tracing::warn!(id = %self.core.id, "course memory save failed: {err}"),
-        }
+        self.memory.save(&entry);
     }
 
     fn process_data(&self, data: &[u8]) {
