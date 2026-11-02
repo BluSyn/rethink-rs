@@ -5,6 +5,7 @@
 //! the LG cloud; offsets confirmed against ovenState at the same timestamp.
 
 use crate::device_trait::DeviceHandler;
+use crate::js;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
 use rethink_core::hex_decode;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
@@ -49,7 +50,7 @@ fn status_name(code: u8) -> &'static str {
         0x04 => "Paused",
         0x05 => "Done",
         0x07 => "Settings",
-        _ => "unknown",
+        _ => "None",
     }
 }
 
@@ -60,7 +61,7 @@ fn cook_mode_name(code: u8) -> &'static str {
         0x15 => "Inverter defrost",
         0x18 => "Sensor cook",
         0x1f => "Auto cook",
-        _ => "unknown",
+        _ => "None",
     }
 }
 
@@ -109,7 +110,7 @@ fn cook_item_name(id: u16) -> &'static str {
         3369 => "Steam fish",
         3370 => "Steam zucchini",
         3378 => "Kids chicken nuggets",
-        _ => "unknown",
+        _ => "None",
     }
 }
 
@@ -373,12 +374,9 @@ impl Device {
                 self.set_vent(speed);
             }
             "fan_speed" => {
-                let Ok(v) = mqtt_value.parse::<f64>() else {
+                let Some(v) = js::number(mqtt_value).filter(|v| v.is_finite()) else {
                     return;
                 };
-                if !v.is_finite() {
-                    return;
-                }
                 self.set_vent(clamp_u8(v, MAX_VENT_SPEED));
             }
             "light_power" => {
@@ -390,12 +388,9 @@ impl Device {
                 self.set_lamp(level);
             }
             "light_level" => {
-                let Ok(v) = mqtt_value.parse::<f64>() else {
+                let Some(v) = js::number(mqtt_value).filter(|v| v.is_finite()) else {
                     return;
                 };
-                if !v.is_finite() {
-                    return;
-                }
                 self.set_lamp(clamp_u8(v, MAX_LAMP_LEVEL));
             }
             _ => {}
@@ -445,39 +440,52 @@ mod tests {
         make_t2("WMVEL2137", Device::new)
     }
 
-    // Live MVEL2033F captures from upstream master tests (831f3a4).
+    fn feed(thinq: &rethink_core::MockThinq2Device, frame: &str) {
+        thinq.emit_data(&hex_decode(frame));
+    }
+
+    // Live MVEL2033F captures, each matched to the cloud's ovenState at the same moment.
+    // AA 62 41 EC <46B previous> <46B current> <cksum> BB, or AA 34 41 EB <46B current> <cksum> BB.
+    // Vent just switched on at the panel (Turbo, 4) with the lamp on High (2).
     const SAMPLE_VENT_TURBO_LAMP_HIGH: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005320008080808001000000003000015500000000000000FF030D000000000000000000000000000000C300000000532400808080800100000080BB";
     const SAMPLE_VENT_OFF_LAMP_HIGH: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005324008080808001000000003000015500000000000000FF030D000000000000000000000000000000C300000000532000808080800100000080BB";
+    // Vent 1, lamp 2: the frame that settles the nibble order.
     const SAMPLE_VENT_LOW_LAMP_HIGH: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005324008080808001000000003000015500000000000000FF030D000000000000000000000000000000C300000000532100808080800100000083BB";
     const SAMPLE_LAMP_LOW: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005300008080808001000000003000015500000000000000FF030D000000000000000000000000000000C3000000005310008080808001000000F4BB";
+    // A five-minute full-power run as it started and one second later.
     const SAMPLE_COOKING_FULL_POWER_5MIN: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C3000000005300008080808001000000023000004401000000000A00FF030D000500000500000000000000000000C7000100005300018080808001000000C9BB";
     const SAMPLE_COOKING_4M59S: &str = "AA6241EC023000004401000000000A00FF030D000500000500000000000000000000C7000100005300018080808001000000023000004401000000000A00FF030D00043B000500000000000000000000C7000100005300018080808001000000B4BB";
+    // Paused with 4:30 left (door opened).
     const SAMPLE_PAUSED: &str = "AA6241EC023000004401000000000A00FF030D00043B000500000000000000000000C7000100005300018080808001000000043000004401000000000A00FF030D00041E000500000000000000000000C700010000530001808080800100000055BB";
+    // 30 seconds at the panel's "50" power.
     const SAMPLE_COOKING_HALF_POWER_30S: &str = "AA6241EC073000004001000000000000FF030D000000000000000000000000000000C3000100005300008080808001000000023000004401000000000500FF030D00001E00001E000000000000000000C7000100005300018080808001000000E9BB";
     const SAMPLE_DONE: &str = "AA6241EC023000004401000000000A00FF030D00001E00001E000000000000000000C7000100005300018080808001000000053000015500000000000000FF030D000000000000000000000000000000C300000000530000808080800100000086BB";
+    // The panel sitting in its Sensor Cook selection screen (cloud LWOState=PREFERENCE).
     const SAMPLE_SENSOR_COOK_SETTINGS: &str = "AA6241EC003000015500000000000000FF030D000000000000000000000000000000C300000000530000808080800100000007300000401800FE00000000FF030D000000000000000000000000000000E3000000005300008080808001000000EDBB";
+    // Kids Menu > Mac and cheese, 1:10 left.
     const SAMPLE_AUTO_COOK_RUNNING: &str = "AA6241EC07300000401F000000000000FF030D000000000000000000000000000000C300000000530000808080800100000002300000441F0D1200000A00FF030D00010A00010A000000000000000000C7000000005300018080808001000000A1BB";
+    // Sensor Cook dishes 255 (0x00FF, Rice) and 264 (0x0108, Reheat soup or sauce).
     const SAMPLE_SENSOR_COOK_RICE: &str = "AA6241EC07300000401800FF00000000FF030D000000000000000000000000000000E300000000530000808080800100000002300000441800FF00000000FF030D000000000000000000000000000000E3000000005300018080808001000000B4BB";
     const SAMPLE_SENSOR_REHEAT_SOUP: &str = "AA6241EC073000004018010800000000FF030D000000000000000000000000000000E3000000005300008080808001000000023000004418010800000000FF030D000000000000000000000000000000E3000000005300018080808001000000A0BB";
+    // Soften > Butter, dish 3354 at power 2 for 50 seconds.
     const SAMPLE_SOFTEN_BUTTER: &str = "AA6241EC07300000401F000000000000FF030D000000000000000000000000000000C300000000530000808080800100000002300000441F0D1A00000200FF030D000032000032000000000000000000C700000000530001808080800100000017BB";
+    // Two-pound poultry defrost: ten minutes at power 7.
     const SAMPLE_DEFROST_RUNNING: &str = "AA6241EC07300000401500D300000000FF030D000000000000000000000000000000C300000000530000808080800100000002300000441500D400000700FF030D000A00000A00000000000000000000C700000000530001808080800100000031BB";
+    // The 41 EB reply to the start() query: idle, vent off, lamp 2.
     const SAMPLE_INITIAL_STATUS: &str = "AA3441EB003000015500000000000000FF030D000000000000000000000000000000C300000000532000808080800100000083BB";
+    // A 90-minute kitchen timer: the minutes byte reads 90, with no hour byte and no borrow.
     const TIMER_90_MINUTES: &str = "aa6241ec003000014000000000000000ff030d000000000000000000000000000000c3000000005300008080808001000000003000015500000000000000ff030d000000000000005a00000000000000c300000000530000808080800100000083bb";
+    // A 90-minute cook: remaining reads a flat 90 minutes, the cook length 1 hour 30.
     const COOKING_90_MINUTES: &str = "aa6241ec073000004001000000000000ff030d000000000000000000000000000000c3000100005300008080808001000000023000004401000000000a00ff030d005a00011e00000000000000000000c7000100005300018080808001000000abbb";
-
-    #[test]
-    fn registry_resolves_separately_from_wmvem1825() {
-        let a = t2_factory("WMVEL2137").expect("WMVEL2137");
-        let b = t2_factory("WMVEM1825").expect("WMVEM1825");
-        assert!(!std::ptr::fn_addr_eq(a, b));
-    }
 
     #[test]
     fn config_published_on_device_creation() {
         let (ha, _, _) = make();
         let device = ha.device(DEVICE_ID).unwrap();
         let comps = &device.config.as_ref().unwrap().components;
-        for k in [
+        let mut keys: Vec<&str> = comps.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected = vec![
             "status",
             "cook_mode",
             "cook_item",
@@ -487,21 +495,29 @@ mod tests {
             "timer",
             "fan_power",
             "light_power",
-        ] {
-            assert!(comps.contains_key(k), "missing {k}");
-        }
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
         assert_eq!(comps["status"]["device_class"], "enum");
-        assert_eq!(comps["status"]["options"], json!(STATES));
+        assert_eq!(
+            comps["status"]["options"],
+            json!(["Idle", "Cooking", "Paused", "Done", "Settings"])
+        );
+        assert_eq!(comps["remaining_time"]["device_class"], "duration");
         assert_eq!(comps["remaining_time"]["unit_of_measurement"], "s");
         assert_eq!(comps["timer"]["device_class"], "duration");
+        // "None" is the payload for an unknown value, so it cannot also label "no dish chosen"
         let items = comps["cook_item"]["options"].as_array().unwrap();
         assert!(!items.iter().any(|v| v.as_str() == Some("None")));
-        assert_eq!(comps["fan_power"]["speed_range_max"], MAX_VENT_SPEED);
-        assert_eq!(comps["light_power"]["brightness_scale"], MAX_LAMP_LEVEL);
+        assert_eq!(comps["fan_power"]["platform"], "fan");
+        assert_eq!(comps["fan_power"]["speed_range_min"], 1);
+        assert_eq!(comps["fan_power"]["speed_range_max"], 4);
+        assert_eq!(comps["light_power"]["platform"], "light");
+        assert_eq!(comps["light_power"]["brightness_scale"], 2);
     }
 
     #[test]
-    fn start_sends_lg_cloud_status_query() {
+    fn start_sends_the_status_query_the_lg_cloud_uses() {
         let (_, thinq, dev) = make();
         DeviceHandler::start(dev.as_ref());
         assert_eq!(
@@ -511,36 +527,39 @@ mod tests {
     }
 
     #[test]
-    fn vent_and_lamp_are_opposite_nibbles() {
+    fn vent_speed_and_lamp_level_come_from_opposite_nibbles_of_one_byte() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_VENT_TURBO_LAMP_HIGH));
+        feed(&thinq, SAMPLE_VENT_TURBO_LAMP_HIGH);
         assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("4"));
         assert_eq!(prop(&ha, "fan_power").as_deref(), Some("ON"));
         assert_eq!(prop(&ha, "light_level").as_deref(), Some("2"));
         assert_eq!(prop(&ha, "light_power").as_deref(), Some("ON"));
 
-        thinq.emit_data(&hex_decode(SAMPLE_VENT_LOW_LAMP_HIGH));
+        feed(&thinq, SAMPLE_VENT_LOW_LAMP_HIGH);
         assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("1"));
         assert_eq!(prop(&ha, "light_level").as_deref(), Some("2"));
 
-        thinq.emit_data(&hex_decode(SAMPLE_VENT_OFF_LAMP_HIGH));
+        feed(&thinq, SAMPLE_VENT_OFF_LAMP_HIGH);
         assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("0"));
         assert_eq!(prop(&ha, "fan_power").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "light_level").as_deref(), Some("2"));
 
-        thinq.emit_data(&hex_decode(SAMPLE_LAMP_LOW));
+        feed(&thinq, SAMPLE_LAMP_LOW);
         assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("0"));
         assert_eq!(prop(&ha, "light_level").as_deref(), Some("1"));
     }
 
+    // The command frames below were sent to a real MVEL2033F, which acknowledged each one.
     #[test]
-    fn vent_set_sends_absolute_level_and_leaves_lamp() {
+    fn setting_the_vent_speed_sends_an_absolute_level_and_leaves_the_lamp_alone() {
         let (_, thinq, dev) = make();
         dev.set_property("fan_speed", "1");
         assert_eq!(
             hex_encode(&thinq.outbox()[0]),
             "AA0EF043220401018080808046BB"
         );
+
+        // sent while the fan ran at 4: it went to 2, so the level byte is absolute
         thinq.reset_recorder();
         dev.set_property("fan_speed", "2");
         assert_eq!(
@@ -550,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn lamp_set_leaves_vent_alone() {
+    fn setting_the_lamp_level_leaves_the_vent_alone() {
         let (_, thinq, dev) = make();
         dev.set_property("light_level", "1");
         assert_eq!(
@@ -560,13 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn turning_a_control_off_is_one_sided() {
+    fn turning_a_control_off_sends_the_off_command_for_that_control_only() {
         let (_, thinq, dev) = make();
         dev.set_property("light_power", "OFF");
         assert_eq!(
             hex_encode(&thinq.outbox()[0]),
             "AA0EF043220480800000808044BB"
         );
+
         thinq.reset_recorder();
         dev.set_property("fan_power", "OFF");
         assert_eq!(
@@ -576,15 +596,17 @@ mod tests {
     }
 
     #[test]
-    fn turning_on_restores_last_reported_level() {
+    fn turning_a_control_on_restores_the_level_it_last_reported() {
         let (_, thinq, dev) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_VENT_TURBO_LAMP_HIGH));
+        feed(&thinq, SAMPLE_VENT_TURBO_LAMP_HIGH);
         thinq.reset_recorder();
+
         dev.set_property("fan_power", "ON");
         assert_eq!(
             hex_encode(&thinq.outbox()[0]),
             "AA0EF043220401048080808043BB"
         );
+
         thinq.reset_recorder();
         dev.set_property("light_power", "ON");
         assert_eq!(
@@ -594,95 +616,137 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_levels_are_clamped() {
+    fn out_of_range_levels_are_clamped_rather_than_sent_verbatim() {
         let (_, thinq, dev) = make();
         dev.set_property("fan_speed", "9");
         assert_eq!(
             hex_encode(&thinq.outbox()[0]),
             "AA0EF043220401048080808043BB"
         );
+
         thinq.reset_recorder();
         dev.set_property("light_level", "not a number");
         assert_eq!(thinq.outbox().len(), 0);
     }
 
     #[test]
-    fn cooking_state_mode_power_and_remaining() {
+    fn level_payloads_are_parsed_like_javascript_number() {
+        let (_, thinq, dev) = make();
+        for (payload, expected) in [
+            ("", Some("AA0EF043220400008080808044BB")),
+            (" 2 ", Some("AA0EF043220401028080808041BB")),
+            ("0x2", Some("AA0EF043220401028080808041BB")),
+            ("Infinity", None),
+        ] {
+            thinq.reset_recorder();
+            dev.set_property("fan_speed", payload);
+            let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+            assert_eq!(sent.first().map(String::as_str), expected, "{payload:?}");
+        }
+    }
+
+    #[test]
+    fn cooking_state_mode_power_level_and_remaining_time() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_COOKING_FULL_POWER_5MIN));
+        feed(&thinq, SAMPLE_COOKING_FULL_POWER_5MIN);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Cooking"));
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Microwave"));
         assert_eq!(prop(&ha, "power_level").as_deref(), Some("100"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("300"));
-        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("300"));
 
-        thinq.emit_data(&hex_decode(SAMPLE_COOKING_4M59S));
+        feed(&thinq, SAMPLE_COOKING_4M59S);
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("299"));
-        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("300"));
 
-        thinq.emit_data(&hex_decode(SAMPLE_COOKING_HALF_POWER_30S));
+        feed(&thinq, SAMPLE_COOKING_HALF_POWER_30S);
         assert_eq!(prop(&ha, "power_level").as_deref(), Some("50"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("30"));
+        // rec[20] is a seconds byte: a sub-minute cook length is not just hours and minutes
         assert_eq!(prop(&ha, "cook_time").as_deref(), Some("30"));
     }
 
     #[test]
-    fn duration_over_an_hour_counts_minutes_without_borrow() {
+    fn a_duration_over_an_hour_keeps_counting_in_minutes_it_does_not_borrow() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(TIMER_90_MINUTES));
+        feed(&thinq, TIMER_90_MINUTES);
         assert_eq!(prop(&ha, "timer").as_deref(), Some("5400"));
     }
 
     #[test]
-    fn cook_length_stays_apart_from_remaining() {
+    fn the_cook_length_is_kept_apart_from_what_is_left_of_it() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(COOKING_90_MINUTES));
+        feed(&thinq, SAMPLE_COOKING_FULL_POWER_5MIN);
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("300"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("300"));
+
+        feed(&thinq, SAMPLE_COOKING_4M59S);
+        assert_eq!(prop(&ha, "cook_time").as_deref(), Some("300"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("299"));
+
+        // the length is 1 hour 30 in rec[18..19]; the remaining time a flat 90 minutes
+        feed(&thinq, COOKING_90_MINUTES);
         assert_eq!(prop(&ha, "cook_time").as_deref(), Some("5400"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("5400"));
     }
 
     #[test]
-    fn paused_done_and_settings() {
+    fn paused_done_and_settings_states() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_PAUSED));
+        feed(&thinq, SAMPLE_PAUSED);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Paused"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("270"));
-        thinq.emit_data(&hex_decode(SAMPLE_DONE));
+
+        feed(&thinq, SAMPLE_DONE);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Done"));
         assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
-        thinq.emit_data(&hex_decode(SAMPLE_SENSOR_COOK_SETTINGS));
+
+        feed(&thinq, SAMPLE_SENSOR_COOK_SETTINGS);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Settings"));
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Sensor cook"));
     }
 
     #[test]
-    fn dish_id_is_big_endian_16bit() {
+    fn a_preset_run_reports_the_auto_cook_mode() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_SENSOR_COOK_RICE));
+        feed(&thinq, SAMPLE_AUTO_COOK_RUNNING);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Cooking"));
+        assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Auto cook"));
+        assert_eq!(prop(&ha, "power_level").as_deref(), Some("100"));
+        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("70"));
+    }
+
+    #[test]
+    fn the_dish_is_read_as_one_16_bit_id_spanning_both_of_its_bytes() {
+        let (ha, thinq, _) = make();
+        feed(&thinq, SAMPLE_SENSOR_COOK_RICE);
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Sensor cook"));
         assert_eq!(prop(&ha, "cook_item").as_deref(), Some("Rice"));
-        thinq.emit_data(&hex_decode(SAMPLE_SENSOR_REHEAT_SOUP));
+
+        // 0x0108: a single-byte read would report Shrimp (8)
+        feed(&thinq, SAMPLE_SENSOR_REHEAT_SOUP);
         assert_eq!(
             prop(&ha, "cook_item").as_deref(),
             Some("Reheat soup or sauce")
         );
-        thinq.emit_data(&hex_decode(SAMPLE_AUTO_COOK_RUNNING));
+
+        feed(&thinq, SAMPLE_AUTO_COOK_RUNNING);
         assert_eq!(
             prop(&ha, "cook_item").as_deref(),
             Some("Kids mac and cheese")
         );
-        thinq.emit_data(&hex_decode(SAMPLE_SOFTEN_BUTTER));
+
+        feed(&thinq, SAMPLE_SOFTEN_BUTTER);
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Auto cook"));
         assert_eq!(prop(&ha, "cook_item").as_deref(), Some("Soften butter"));
         assert_eq!(prop(&ha, "power_level").as_deref(), Some("20"));
-        thinq.emit_data(&hex_decode(SAMPLE_INITIAL_STATUS));
+
+        feed(&thinq, SAMPLE_INITIAL_STATUS);
         assert_eq!(prop(&ha, "cook_item").as_deref(), Some("Not selected"));
     }
 
     #[test]
-    fn defrost_reports_mode_and_chosen_power() {
+    fn a_defrost_run_reports_its_mode_and_the_power_level_the_appliance_chose() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_DEFROST_RUNNING));
+        feed(&thinq, SAMPLE_DEFROST_RUNNING);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Cooking"));
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Inverter defrost"));
         assert_eq!(prop(&ha, "power_level").as_deref(), Some("70"));
@@ -690,9 +754,9 @@ mod tests {
     }
 
     #[test]
-    fn single_record_eb_decodes_like_ec_current() {
+    fn the_single_record_41_eb_reply_decodes_like_the_41_ec_current_record() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_INITIAL_STATUS));
+        feed(&thinq, SAMPLE_INITIAL_STATUS);
         assert_eq!(prop(&ha, "status").as_deref(), Some("Idle"));
         assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("Off"));
         assert_eq!(prop(&ha, "fan_speed").as_deref(), Some("0"));
@@ -700,10 +764,33 @@ mod tests {
     }
 
     #[test]
-    fn wrong_length_or_class_publishes_nothing() {
+    fn unmapped_codes_publish_none() {
         let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode("AA0B413E000D000D001BBB"));
-        thinq.emit_data(&hex_decode("AA6141EC003000015500000000000000FFBB"));
-        assert!(prop(&ha, "status").is_none());
+        let mut frame = hex_decode(SAMPLE_INITIAL_STATUS);
+        // the EB record starts after AA 34 41 EB
+        frame[4] = 0x09;
+        frame[4 + 5] = 0x02;
+        frame[4 + 7] = 0x01;
+        thinq.emit_data(&frame);
+        assert_eq!(prop(&ha, "status").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "cook_mode").as_deref(), Some("None"));
+        assert_eq!(prop(&ha, "cook_item").as_deref(), Some("None"));
+    }
+
+    #[test]
+    fn frames_of_the_wrong_length_or_class_publish_nothing() {
+        let (ha, thinq, _) = make();
+        // a 41/3e frame, which carries no state this handler decodes
+        feed(&thinq, "AA0B413E000D000D001BBB");
+        // an EC frame truncated by one byte
+        feed(&thinq, "AA6141EC003000015500000000000000FFBB");
+        assert!(ha.device(DEVICE_ID).unwrap().properties.is_empty());
+    }
+
+    #[test]
+    fn registry_resolves_separately_from_wmvem1825() {
+        let a = t2_factory("WMVEL2137").expect("WMVEL2137");
+        let b = t2_factory("WMVEM1825").expect("WMVEM1825");
+        assert!(!std::ptr::fn_addr_eq(a, b));
     }
 }
