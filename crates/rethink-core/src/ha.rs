@@ -16,6 +16,8 @@ pub struct DeviceInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sw_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -633,6 +635,7 @@ mod ha_mqtt_sink_tests {
                 identifiers: json!(["$deviceid"]),
                 manufacturer: Some("LG".into()),
                 model: Some("DHUM".into()),
+                model_id: None,
                 sw_version: None,
                 name: Some("Dehumidifier".into()),
             },

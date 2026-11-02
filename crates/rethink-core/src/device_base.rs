@@ -42,6 +42,7 @@ pub fn default_config(meta: &Metadata, device_info: Option<Value>) -> DeviceDisc
         identifiers: json!(["$deviceid"]),
         manufacturer: Some("LG".into()),
         model: Some(meta.model_name.clone()),
+        model_id: None,
         sw_version: meta.sw_version.clone(),
         name: None,
     };
