@@ -457,11 +457,12 @@ impl TlvDeviceCore {
             && buf.len() > 12
         {
             if let Some(h) = self.on_priv_cmd_resp.lock().as_ref() {
+                // A 13- or 14-byte response carries no data (upstream's subarray is empty there).
                 h(
                     buf[0] == 0x02,
                     buf[1],
                     buf[12],
-                    &buf[13..buf.len().saturating_sub(2)],
+                    buf.get(13..buf.len() - 2).unwrap_or_default(),
                 );
             }
         }
@@ -750,6 +751,32 @@ pub fn insert_component(config: &mut DeviceDiscovery, key: &str, obj: Map<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_priv_command_responses_carry_no_data_instead_of_panicking() {
+        let ha = crate::MockHaConnection::new();
+        let thinq = crate::MockThinq2Device::new("id", Metadata::new("X", "X", "1"));
+        let core = TlvDeviceCore::new(ha, thinq.clone());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        *core.on_priv_cmd_resp.lock() = Some(Box::new(move |ok, seq, result, data: &[u8]| {
+            s.lock().push((ok, seq, result, data.to_vec()));
+        }));
+        let header = [
+            0x02, 0x07, 0x04, 0x00, 0x00, 0x00, 0x87, 0xfd, 0x10, 0x00, 0x05, 0xfe, 0x00,
+        ];
+        thinq.emit_data(&header);
+        thinq.emit_data(&[&header[..], &[0xaa]].concat());
+        thinq.emit_data(&[&header[..], &[0x11, 0x22, 0xc0, 0xde]].concat());
+        assert_eq!(
+            *seen.lock(),
+            vec![
+                (true, 7, 0, vec![]),
+                (true, 7, 0, vec![]),
+                (true, 7, 0, vec![0x11, 0x22]),
+            ]
+        );
+    }
 
     #[test]
     fn wrap_unwrap_roundtrip() {
