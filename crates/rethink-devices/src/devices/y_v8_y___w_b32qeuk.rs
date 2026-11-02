@@ -6,10 +6,10 @@
 
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::set_power_start_pause;
+use crate::js::number;
 use crate::washer_common::{
     error_message, error_options, fy_steam_name, soil_level, spin_options, spin_value,
-    washer_status_options, FY_STEAM,
-    temperature_value, SOIL_LABELS, TEMPERATURE_LABELS,
+    temperature_value, washer_status_options, FY_STEAM, SOIL_LABELS, TEMPERATURE_LABELS,
 };
 use rethink_core::device_base::{default_config, process_enveloped_status, AabbDeviceCore};
 use rethink_core::hex_decode;
@@ -99,7 +99,8 @@ struct Settings {
     spin: u8,
     temp: u8,
     rinse: u8,
-    delay_end: u8,
+    /// Hours as `Number()` parsed them: 4.5 is kept and published, and sent as 4.
+    delay_end: f64,
     options: u8,
 }
 
@@ -110,7 +111,7 @@ struct Pending {
     spin: Option<u8>,
     temp: Option<u8>,
     rinse: Option<u8>,
-    delay_end: Option<u8>,
+    delay_end: Option<f64>,
     options: Option<u8>,
 }
 
@@ -272,7 +273,7 @@ impl Device {
             spin: s[10],
             temp: s[11],
             rinse: s[12],
-            delay_end: s[14],
+            delay_end: f64::from(s[14]),
             options,
         };
         self.publish_settings();
@@ -314,7 +315,7 @@ impl Device {
             soil_level(s.soil as usize).unwrap_or("None").into(),
         );
         self.core
-            .publish_property("set_delay_end", i64::from(s.delay_end).into());
+            .publish_property("set_delay_end", s.delay_end.into());
         self.core
             .publish_on_off("set_turbowash", s.options & OPT_TURBO != 0);
         self.core
@@ -340,7 +341,7 @@ impl Device {
             s.temp,
             s.rinse,
             0,
-            s.delay_end,
+            s.delay_end as u8,
             0,
             0,
             s.options,
@@ -410,10 +411,11 @@ impl Device {
                 self.publish_settings();
             }
             "set_delay_end" => {
-                if let Ok(hours) = mqtt_value.parse::<i64>() {
-                    if hours == 0 || (3..=19).contains(&hours) {
-                        self.pending.lock().delay_end = Some(hours as u8);
-                    }
+                // modelJson allows 3..19; 0 is no delayed end.
+                if let Some(hours) =
+                    number(mqtt_value).filter(|h| *h == 0.0 || (3.0..=19.0).contains(h))
+                {
+                    self.pending.lock().delay_end = Some(hours);
                 }
                 self.publish_settings();
             }
@@ -726,26 +728,43 @@ mod tests {
     use rethink_core::{hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Thinq2Device};
 
     const ID: &str = "test-id";
+    // Captures from a Y_V8_Y___W.B32QEUK running a 14-minute programme (upstream issue #11).
     const INITIAL: &str = "aaff200a0039000381000100eb0027000001032603260000000000000000000000000003000011007100000000000000000000000000974ebb";
     const RUNNING: &str = "aaff200a0039000398000100eb0027000006000e000e0c0003020201000000014220000101001100710000010000000000000000000056d9bb";
     const RINSING: &str = "aaff200a00390003c6000100eb0027000007000b000e0c000302000100000001420000010600110071000001000022000000000000004970bb";
     const SPINNING: &str = "aaff200a0039000435000100eb00270000080005000e0c00000200000000000042000001070011007100000100002600000000000000af09bb";
     const END: &str = "aaff200a0039000478000100eb002700000a0000000e0c00000000000000000040000001080011007100000100002900000000000000c901bb";
     const POWER_OFF: &str = "aaff200a0039000487000100eb00270000000000000e0c000000000000000000000000000a0011007100000100002900000000000000cb19bb";
+    // An FSR7A04PG switched on from Home Assistant, then its temperature and steam changed on the
+    // panel. Each 0xec envelope carries the record being replaced, then the one replacing it.
     const PAIR_ON: &str = "aaff200a006000027f000100ec004e00000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000e0048000000000000000000000000006e4bbb";
     const PAIR_COURSE: &str = "aaff200a0060000286000100ec004e00000100000000000000000000000000000000000000000e004800000000000000000000000000000001003b003b3a00030a0401000000000001000200000e0048000004000000000000000000004282bb";
     const PAIR_STEAM: &str = "aaff200a0060000288000100ec004e000001003b003b3a00030a0401000000000001000200000e004800000400000000000000000000000001013201323a00030a0601000000800001000300000e0048000004000000000000000000000709bb";
     const PAIR_OFF: &str = "aaff200a006000028b000100ec004e000001013201323a00030a0601000000800001000300000e004800000400000000000000000000000000013201323a0000000000000000000001000301000e004800000400000000000000000000befabb";
+    // The downloaded Hygiene programme (0x48) selected, on its Allergy SpaSteam base (0x2d).
     const PAIR_HYGIENE: &str = "aaff200a006000074f000100ec004e00000100000000000000000000000000004200000000000e004800000000000000000000000000000001023002302d00030a0601000000804200000000480e00480000000000000000000000c000b72abb";
+
+    const WRITE_INIT: &str = "AA0EF0ED1121010000001800B5BB";
+    const WRITE_POWER_ON: &str = "AA08F02A010098BB";
+    const WRITE_POWER_OFF: &str = "AA09F0240101009CBB";
+    const WRITE_PAUSE: &str = "AA09F02404010099BB";
+    const WRITE_START: &str = "AA09F02405010098BB";
+    // The LG app starting Allergy SpaSteam at 60 °C with steam, captured through bridge mode.
+    const APP_START: &str = "AA16F0262D03FF06010000000080030000000000DABB";
 
     fn meta() -> Metadata {
         Metadata::new("Y_V8_Y___W.B32QEUK", "Y_V8_Y___W.B32QEUK", "2.11.207")
     }
 
-    fn feed(frames: &[&str]) -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+    fn make() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
         let ha = MockHaConnection::new();
         let thinq = MockThinq2Device::new(ID, meta());
         let dev = Device::new(ha.clone(), thinq.clone(), meta());
+        (ha, thinq, dev)
+    }
+
+    fn feed(frames: &[&str]) -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        let (ha, thinq, dev) = make();
         for frame in frames {
             thinq.emit_data(&hex_decode(frame));
         }
@@ -756,185 +775,293 @@ mod tests {
         ha.device(ID)?.properties.get(name).map(|p| p.as_string())
     }
 
-    fn inner(packet: &[u8]) -> Vec<u8> {
+    fn expect(ha: &MockHaConnection, name: &str, value: &str) {
+        assert_eq!(prop(ha, name).as_deref(), Some(value), "{name}");
+    }
+
+    fn components(ha: &MockHaConnection) -> std::collections::HashMap<String, Value> {
+        ha.device(ID).unwrap().config.unwrap().components
+    }
+
+    fn options(component: &Value) -> Vec<String> {
+        component["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn last_packet(thinq: &MockThinq2Device) -> String {
+        hex_encode(thinq.outbox().last().unwrap())
+    }
+
+    fn last_inner(thinq: &MockThinq2Device) -> Vec<u8> {
+        let packet = thinq.outbox().last().unwrap().clone();
         packet[2..packet.len() - 2].to_vec()
     }
 
     #[test]
-    fn initial_and_running_frames_use_the_39_byte_record() {
-        let (ha, thinq, _) = feed(&[INITIAL]);
-        assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
-        assert_eq!(prop(&ha, "error").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "error_message").as_deref(), Some("OK"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("218"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("218"));
-        assert_eq!(prop(&ha, "cycles").as_deref(), Some("17"));
-        assert_eq!(prop(&ha, "energy").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "door_lock").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "child_lock").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "reserve_time").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "turbowash").as_deref(), Some("OFF"));
+    fn config_is_published_on_construction() {
+        let (ha, _, _) = make();
+        assert!(ha.device(ID).unwrap().config.is_some(), "config published");
+        let status = options(&components(&ha)["status"]);
+        assert!(status.iter().any(|o| o == "Washing"));
+        assert!(status.iter().any(|o| o == "Error"));
+    }
+
+    #[test]
+    fn initial_state_push_decodes_status_time_and_cycles() {
+        let (ha, _, _) = feed(&[INITIAL]);
+        expect(&ha, "power", "ON");
+        expect(&ha, "status", "Standby");
+        expect(&ha, "error", "OFF");
+        expect(&ha, "error_message", "OK");
+        expect(&ha, "remaining_time", "218");
+        expect(&ha, "initial_time", "218");
+        expect(&ha, "cycles", "17");
+        expect(&ha, "energy", "0");
+        // Lock byte 0x00: remote start off, door and child lock ON (unlocked, inverted).
+        expect(&ha, "remote_start", "OFF");
+        expect(&ha, "door_lock", "ON");
+        expect(&ha, "child_lock", "ON");
+        expect(&ha, "reserve_time", "0");
+        expect(&ha, "turbowash", "OFF");
+    }
+
+    #[test]
+    fn running_state_with_door_locked_and_remote_start_active() {
+        let (ha, _, _) = feed(&[RUNNING]);
+        expect(&ha, "status", "Washing");
+        expect(&ha, "course", "Speed 14");
+        expect(&ha, "spin", "400 rpm");
+        expect(&ha, "temp", "20 °C");
+        expect(&ha, "initial_time", "14");
+        expect(&ha, "remaining_time", "14");
+        // Lock byte 0x42: door locked (0x40) and remote start (0x02).
+        expect(&ha, "remote_start", "ON");
+        expect(&ha, "door_lock", "OFF");
+        expect(&ha, "child_lock", "ON");
+        expect(&ha, "wrinkle_care", "OFF");
+        expect(&ha, "turbowash", "ON");
+        expect(&ha, "steam", "OFF");
+        expect(&ha, "prewash", "OFF");
+        expect(&ha, "soil", "Normal");
+        expect(&ha, "ai_dd", "OFF");
+        expect(&ha, "rinse", "Normal");
+        expect(&ha, "reserve_time", "0");
+    }
+
+    #[test]
+    fn spin_holds_for_the_whole_cycle_and_energy_accumulates() {
+        let (ha, thinq, _) = feed(&[RUNNING]);
+        expect(&ha, "spin", "400 rpm");
+        expect(&ha, "energy", "0");
+
+        thinq.emit_data(&hex_decode(RINSING));
+        expect(&ha, "spin", "400 rpm");
+        expect(&ha, "energy", "34");
+
+        thinq.emit_data(&hex_decode(SPINNING));
+        expect(&ha, "spin", "400 rpm");
+        expect(&ha, "energy", "38");
+
+        // The total holds once the cycle is over.
+        thinq.emit_data(&hex_decode(END));
+        expect(&ha, "energy", "41");
+        thinq.emit_data(&hex_decode(POWER_OFF));
+        expect(&ha, "energy", "41");
+    }
+
+    #[test]
+    fn rinsing_state() {
+        let (ha, _, _) = feed(&[RINSING]);
+        expect(&ha, "status", "Rinsing");
+        expect(&ha, "remaining_time", "11");
+    }
+
+    #[test]
+    fn spinning_state() {
+        let (ha, _, _) = feed(&[SPINNING]);
+        expect(&ha, "status", "Spinning");
+    }
+
+    #[test]
+    fn end_state() {
+        let (ha, _, _) = feed(&[END]);
+        expect(&ha, "status", "End");
+        expect(&ha, "remaining_time", "0");
+        expect(&ha, "door_lock", "OFF");
+        expect(&ha, "remote_start", "OFF");
+    }
+
+    #[test]
+    fn power_off_transition() {
+        let (ha, _, _) = feed(&[POWER_OFF]);
+        expect(&ha, "power", "OFF");
+        expect(&ha, "status", "Off");
+    }
+
+    #[test]
+    fn a_status_envelope_is_acked_so_the_appliance_stops_retransmitting_it() {
+        let (_, thinq, _) = make();
+        thinq.reset_recorder();
+
+        thinq.emit_data(&hex_decode(INITIAL));
+
+        // INITIAL carries sequence 0x0381 at inner[5..7], acked under the `ack` command.
         let acks: Vec<String> = thinq
             .sent()
             .into_iter()
             .filter(|m| m.cmd == "ack")
             .map(|m| m.data.as_str().unwrap_or("").to_string())
             .collect();
-        assert_eq!(
-            acks,
-            vec![hex_encode(&wrap_aabb(&hex_decode("f0000a040381")))]
-        );
-        assert!(thinq.outbox().is_empty());
-
-        let (ha, _, _) = feed(&[RUNNING]);
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Washing"));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Speed 14"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("400 rpm"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("20 °C"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("14"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("14"));
-        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "door_lock").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "child_lock").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "wrinkle_care").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "turbowash").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "steam").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "prewash").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "soil").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "ai_dd").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "rinse").as_deref(), Some("Normal"));
+        assert_eq!(acks, [hex_encode(&wrap_aabb(&hex_decode("f0000a040381")))]);
+        assert!(thinq.outbox().is_empty(), "the ack is not sent as a packet");
     }
 
     #[test]
-    fn spin_holds_and_energy_accumulates_across_the_cycle() {
-        let (ha, thinq, _) = feed(&[RUNNING]);
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("400 rpm"));
-        assert_eq!(prop(&ha, "energy").as_deref(), Some("0"));
-        thinq.emit_data(&hex_decode(RINSING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Rinsing"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("11"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("400 rpm"));
-        assert_eq!(prop(&ha, "energy").as_deref(), Some("34"));
-        thinq.emit_data(&hex_decode(SPINNING));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Spinning"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("400 rpm"));
-        assert_eq!(prop(&ha, "energy").as_deref(), Some("38"));
-        thinq.emit_data(&hex_decode(END));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("End"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "door_lock").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "energy").as_deref(), Some("41"));
-        thinq.emit_data(&hex_decode(POWER_OFF));
-        assert_eq!(prop(&ha, "power").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Off"));
-        assert_eq!(prop(&ha, "energy").as_deref(), Some("41"));
-    }
-
-    #[test]
-    fn ec_pairs_publish_the_replacing_record() {
-        let (ha, _, _) = feed(&[PAIR_ON]);
-        assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
-        assert_eq!(prop(&ha, "cycles").as_deref(), Some("14"));
-
-        let (ha, _, _) = feed(&[PAIR_COURSE]);
-        assert_eq!(prop(&ha, "course").as_deref(), Some("AI Wash"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("1400 rpm"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("40 °C"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("59"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("59"));
-        assert_eq!(prop(&ha, "ai_dd").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "steam").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "soil").as_deref(), Some("Normal"));
-
-        let (ha, _, _) = feed(&[PAIR_STEAM]);
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
-        assert_eq!(prop(&ha, "steam").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("1400 rpm"));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("AI Wash"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("110"));
-        assert_eq!(prop(&ha, "crease_care").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "prewash").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "medic_rinse").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "steam_softener").as_deref(), Some("OFF"));
-
-        let (ha, thinq, _) = feed(&[PAIR_STEAM]);
-        thinq.emit_data(&hex_decode(PAIR_OFF));
-        assert_eq!(prop(&ha, "power").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Off"));
-        assert_eq!(prop(&ha, "steam").as_deref(), Some("OFF"));
-
-        let (ha, thinq, _) = feed(&[]);
+    fn frames_not_matching_the_aa_bb_envelope_are_ignored() {
+        let (ha, thinq, _) = make();
+        let before = prop(&ha, "power");
         thinq.emit_data(&hex_decode("001122"));
-        thinq.emit_data(&hex_decode("aa08200a01020304bb"));
-        thinq.emit_data(&hex_decode("aa13200a001300028b000100ec004e00010203bb"));
-        assert!(ha.device(ID).unwrap().properties.is_empty());
+        assert_eq!(prop(&ha, "power"), before);
     }
 
     #[test]
-    fn downloaded_course_is_separate_from_its_base() {
-        let (ha, _, _) = feed(&[PAIR_HYGIENE]);
-        assert_eq!(prop(&ha, "smart_course").as_deref(), Some("Hygiene"));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Allergy SpaSteam"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("60 °C"));
-        assert_eq!(prop(&ha, "steam").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("1400 rpm"));
-        assert_eq!(prop(&ha, "rinse").as_deref(), Some("Normal"));
+    fn frames_with_wrong_inner_length_are_ignored() {
+        let (ha, thinq, _) = make();
+        let before = prop(&ha, "power");
+        thinq.emit_data(&hex_decode("AA08200A01020304BB"));
+        assert_eq!(prop(&ha, "power"), before);
+    }
 
+    #[test]
+    fn ec_pair_switching_on_is_reported_so_the_power_switch_holds() {
+        let (ha, _, _) = feed(&[PAIR_ON]);
+        expect(&ha, "power", "ON");
+        expect(&ha, "status", "Standby");
+        expect(&ha, "cycles", "14");
+    }
+
+    #[test]
+    fn ec_pair_a_course_selected_on_the_panel_reaches_ha() {
+        let (ha, _, _) = feed(&[PAIR_COURSE]);
+        expect(&ha, "course", "AI Wash");
+        expect(&ha, "spin", "1400 rpm");
+        expect(&ha, "temp", "40 °C");
+        expect(&ha, "initial_time", "59");
+        expect(&ha, "remaining_time", "59");
+        expect(&ha, "ai_dd", "ON");
+        expect(&ha, "steam", "OFF");
+        expect(&ha, "soil", "Normal");
+    }
+
+    #[test]
+    fn ec_pair_the_replacing_record_wins_not_the_one_being_replaced() {
+        let (ha, _, _) = feed(&[PAIR_STEAM]);
+        expect(&ha, "temp", "60 °C");
+        expect(&ha, "steam", "ON");
+        expect(&ha, "spin", "1400 rpm");
+        expect(&ha, "course", "AI Wash");
+        expect(&ha, "initial_time", "110");
+        expect(&ha, "crease_care", "OFF");
+        expect(&ha, "prewash", "OFF");
+        expect(&ha, "medic_rinse", "OFF");
+        expect(&ha, "steam_softener", "OFF");
+    }
+
+    #[test]
+    fn ec_pair_switching_off_is_reported() {
+        let (ha, _, _) = feed(&[PAIR_STEAM, PAIR_OFF]);
+        expect(&ha, "power", "OFF");
+        expect(&ha, "status", "Off");
+        expect(&ha, "steam", "OFF");
+    }
+
+    #[test]
+    fn ec_pair_an_envelope_whose_payload_is_shorter_than_it_claims_is_ignored() {
+        let (ha, thinq, _) = make();
+        let before = prop(&ha, "power");
+        // 0x00ec announcing 78 bytes, carrying 4
+        thinq.emit_data(&hex_decode("AA13200A001300028B000100EC004E00010203BB"));
+        assert_eq!(prop(&ha, "power"), before);
+    }
+
+    #[test]
+    fn a_downloaded_course_is_reported_separately_from_the_base_course_it_is_built_on() {
+        let (ha, _, _) = feed(&[PAIR_HYGIENE]);
+        expect(&ha, "smart_course", "Hygiene");
+        expect(&ha, "course", "Allergy SpaSteam");
+        expect(&ha, "temp", "60 °C");
+        expect(&ha, "steam", "ON");
+        expect(&ha, "spin", "1400 rpm");
+        expect(&ha, "rinse", "Normal");
+    }
+
+    #[test]
+    fn an_unmapped_course_is_not_published() {
         let mut frame = hex_decode(PAIR_HYGIENE);
+        // Replacing-record offsets 7 (course) and 22 (downloaded course).
         frame[61] = 0x63;
         frame[76] = 0x5a;
-        let (ha, thinq, _) = feed(&[]);
+        let (ha, thinq, _) = make();
         thinq.emit_data(&frame);
-        assert_eq!(prop(&ha, "course").as_deref(), Some("None"));
-        assert_eq!(prop(&ha, "smart_course").as_deref(), Some("None"));
+        expect(&ha, "course", "None");
+        expect(&ha, "smart_course", "None");
     }
 
     #[test]
     fn smart_course_0x86_is_microplastic_care() {
         let mut frame = hex_decode(PAIR_HYGIENE);
         frame[76] = 0x86;
-        let (ha, thinq, _) = feed(&[]);
+        let (ha, thinq, _) = make();
         thinq.emit_data(&frame);
-        assert_eq!(
-            prop(&ha, "smart_course").as_deref(),
-            Some("MicroPlastic Care")
-        );
-        let opts = ha.device(ID).unwrap().config.unwrap().components["smart_course"]["options"]
-            .as_array()
-            .unwrap()
-            .clone();
-        assert!(opts.iter().any(|v| v == "MicroPlastic Care"));
+        expect(&ha, "smart_course", "MicroPlastic Care");
+        let smart = options(&components(&ha)["smart_course"]);
+        assert!(smart.iter().any(|o| o == "MicroPlastic Care"));
     }
 
     #[test]
-    fn commands_and_the_programme_frame_match_the_app() {
-        let (_, thinq, dev) = feed(&[]);
-        DeviceHandler::start(dev.as_ref());
-        assert_eq!(
-            hex_encode(&thinq.outbox()[0]),
-            "AA0EF0ED1121010000001800B5BB"
-        );
+    fn start_sends_the_f0ed_initialisation_packet() {
+        let (_, thinq, dev) = make();
         thinq.reset_recorder();
-        dev.set_property("power", "ON");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA08F02A010098BB");
-        thinq.reset_recorder();
-        dev.set_property("power", "OFF");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA09F0240101009CBB");
-        thinq.reset_recorder();
-        dev.set_property("pause", "");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA09F02404010099BB");
-        thinq.reset_recorder();
-        dev.set_property("start", "");
-        assert_eq!(hex_encode(&thinq.outbox()[0]), "AA09F02405010098BB");
-        thinq.reset_recorder();
-        dev.set_property("does-not-exist", "whatever");
-        assert!(thinq.outbox().is_empty());
+        dev.start();
+        assert_eq!(thinq.outbox().len(), 1);
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_INIT);
+    }
 
-        let (_, thinq, dev) = feed(&[]);
+    #[test]
+    fn ha_write_power_on() {
+        let (_, thinq, dev) = make();
+        dev.set_property("power", "ON");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_POWER_ON);
+    }
+
+    #[test]
+    fn ha_write_power_off() {
+        let (_, thinq, dev) = make();
+        dev.set_property("power", "OFF");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_POWER_OFF);
+    }
+
+    #[test]
+    fn ha_write_pause_button() {
+        let (_, thinq, dev) = make();
+        dev.set_property("pause", "");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_PAUSE);
+    }
+
+    #[test]
+    fn ha_write_start_button() {
+        let (_, thinq, dev) = make();
+        dev.set_property("start", "");
+        assert_eq!(hex_encode(&thinq.outbox()[0]), WRITE_START);
+    }
+
+    #[test]
+    fn programme_the_assembled_command_matches_the_one_the_lg_app_sends() {
+        let (_, thinq, dev) = make();
         dev.set_property("set_course", "Allergy SpaSteam");
         dev.set_property("set_soil", "Normal");
         dev.set_property("set_spin", "Max");
@@ -942,47 +1069,63 @@ mod tests {
         dev.set_property("set_rinse", "Normal");
         dev.set_property("set_steam", "ON");
         dev.set_property("run_programme", "");
-        assert_eq!(
-            hex_encode(thinq.outbox().last().unwrap()),
-            "AA16F0262D03FF06010000000080030000000000DABB"
-        );
+        assert_eq!(last_packet(&thinq), APP_START);
     }
 
     #[test]
-    fn pending_settings_override_the_report_until_the_programme_runs() {
-        let (_ha, thinq, dev) = feed(&[PAIR_HYGIENE]);
-        thinq.reset_recorder();
-        dev.set_property("run_programme", "");
-        let body = inner(thinq.outbox().last().unwrap());
-        assert_eq!(body[2], 0x2d);
-        assert_eq!(body[4], 0x0a);
-        assert_eq!(body[5], 0x06);
-        assert_eq!(body[11], 0x80);
-        assert_eq!(body[12], 0x03);
-
-        let (ha, thinq, dev) = feed(&[PAIR_HYGIENE]);
-        assert_eq!(prop(&ha, "set_temp").as_deref(), Some("60 °C"));
-        dev.set_property("set_temp", "30 °C");
-        assert_eq!(prop(&ha, "set_temp").as_deref(), Some("30 °C"));
-        thinq.reset_recorder();
-        dev.set_property("run_programme", "");
-        assert_eq!(inner(thinq.outbox().last().unwrap())[5], 0x03);
-        thinq.emit_data(&hex_decode(PAIR_HYGIENE));
-        assert_eq!(prop(&ha, "set_temp").as_deref(), Some("60 °C"));
-
+    fn programme_an_untouched_start_runs_what_the_appliance_already_reports() {
         let (_, thinq, dev) = feed(&[PAIR_HYGIENE]);
         thinq.reset_recorder();
+
+        dev.set_property("run_programme", "");
+
+        let inner = last_inner(&thinq);
+        assert_eq!(inner[2], 0x2d, "course as reported");
+        assert_eq!(inner[4], 0x0a, "spin as reported, 1400 rather than Max");
+        assert_eq!(inner[5], 0x06, "temp as reported");
+        assert_eq!(inner[11], 0x80, "steam as reported");
+        assert_eq!(inner[12], 0x03, "initialBit | remoteStart");
+    }
+
+    #[test]
+    fn programme_a_chosen_setting_overrides_the_reported_one_and_is_released_once_it_has_run() {
+        let (ha, thinq, dev) = feed(&[PAIR_HYGIENE]);
+        expect(&ha, "set_temp", "60 °C");
+
+        dev.set_property("set_temp", "30 °C");
+        expect(&ha, "set_temp", "30 °C");
+
+        thinq.reset_recorder();
+        dev.set_property("run_programme", "");
+        assert_eq!(last_inner(&thinq)[5], 0x03, "the chosen 30 °C is sent");
+
+        thinq.emit_data(&hex_decode(PAIR_HYGIENE));
+        expect(&ha, "set_temp", "60 °C");
+    }
+
+    #[test]
+    fn programme_option_switches_set_and_clear_their_own_bit_only() {
+        let (_, thinq, dev) = feed(&[PAIR_HYGIENE]);
+        thinq.reset_recorder();
+
         dev.set_property("set_prewash", "ON");
         dev.set_property("run_programme", "");
-        assert_eq!(inner(thinq.outbox().last().unwrap())[11], 0x80 | 0x40);
+        assert_eq!(
+            last_inner(&thinq)[11],
+            0x80 | 0x40,
+            "steam kept, pre-wash added"
+        );
+
         thinq.emit_data(&hex_decode(PAIR_HYGIENE));
         dev.set_property("set_steam", "OFF");
         dev.set_property("run_programme", "");
-        assert_eq!(inner(thinq.outbox().last().unwrap())[11], 0x00);
+        assert_eq!(last_inner(&thinq)[11], 0x00, "steam cleared");
+    }
 
-        let (ha, _, dev) = feed(&[POWER_OFF]);
-        let info = ha.device(ID).unwrap();
-        let components = &info.config.as_ref().unwrap().components;
+    #[test]
+    fn programme_an_idle_appliance_leaves_every_select_in_a_state_ha_will_accept() {
+        let (ha, _, _) = feed(&[POWER_OFF]);
+        let components = components(&ha);
         for name in [
             "set_course",
             "set_temp",
@@ -990,27 +1133,73 @@ mod tests {
             "set_rinse",
             "set_soil",
         ] {
-            let options = components[name]["options"].as_array().unwrap();
             let published = prop(&ha, name).unwrap();
             assert!(
-                options
-                    .iter()
-                    .any(|v| v.as_str() == Some(published.as_str())),
-                "{name} published {published}"
+                options(&components[name]).contains(&published),
+                "{name} published {published}, which is not one of its options"
             );
-            assert!(options.iter().all(|v| v.as_str() != Some("None")));
         }
-        assert!(components["status"]["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v.as_str() == Some("Washing")));
+    }
+
+    #[test]
+    fn programme_a_delayed_end_outside_the_range_the_appliance_accepts_is_ignored() {
+        let (ha, _, dev) = make();
         dev.set_property("set_delay_end", "5");
-        assert_eq!(prop(&ha, "set_delay_end").as_deref(), Some("5"));
+        expect(&ha, "set_delay_end", "5");
         dev.set_property("set_delay_end", "1");
-        assert_eq!(prop(&ha, "set_delay_end").as_deref(), Some("5"));
+        expect(&ha, "set_delay_end", "5");
         dev.set_property("set_delay_end", "0");
-        assert_eq!(prop(&ha, "set_delay_end").as_deref(), Some("0"));
+        expect(&ha, "set_delay_end", "0");
+    }
+
+    #[test]
+    fn programme_a_delayed_end_parses_like_javascript_number() {
+        let (ha, thinq, dev) = make();
+        for (payload, published) in [
+            ("5.0", "5"),
+            ("", "0"),
+            ("0x5", "5"),
+            (" 7 ", "7"),
+            ("1e1", "10"),
+            ("4.5", "4.5"),
+        ] {
+            dev.set_property("set_delay_end", payload);
+            assert_eq!(
+                prop(&ha, "set_delay_end").as_deref(),
+                Some(published),
+                "{payload:?}"
+            );
+        }
+        for payload in ["abc", "Infinity", "19.5", "2.99", "0x"] {
+            dev.set_property("set_delay_end", payload);
+            assert_eq!(
+                prop(&ha, "set_delay_end").as_deref(),
+                Some("4.5"),
+                "{payload:?}"
+            );
+        }
+        dev.set_property("run_programme", "");
+        assert_eq!(last_inner(&thinq)[8], 4, "4.5 h goes out as hour 4");
+    }
+
+    #[test]
+    fn no_option_list_uses_the_payload_ha_reserves_for_unknown() {
+        let (ha, _, _) = make();
+        for (name, component) in components(&ha) {
+            if component.get("options").is_some() {
+                assert!(
+                    !options(&component).iter().any(|o| o == "None"),
+                    "{name} offers \"None\", which HA treats as unknown"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ha_write_to_unknown_property_emits_no_packet() {
+        let (_, thinq, dev) = make();
+        dev.set_property("does-not-exist", "whatever");
+        assert!(thinq.outbox().is_empty());
     }
 
     #[test]
