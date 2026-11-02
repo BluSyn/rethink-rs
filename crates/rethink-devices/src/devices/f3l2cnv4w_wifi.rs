@@ -1,10 +1,13 @@
-//! F3L2CNV4W_WIFI front-load washer (ThinQ1, deviceType 201).
+//! F3L2CNV4W_WIFI — LG WM3500CW front-load washer (ThinQ1, deviceType 201).
 //!
-//! Port of unmerged upstream PR #146. 24-byte Monitoring.protocol map and
-//! enums come from LG modelJSON (via wideq), not invented offsets. PowerOff /
-//! OperationStop / OperationStart match WTDN3's Control envelope; OperationStart
-//! course bytes (including Option3 InitialBit 0x20) are pinned to a 2026-08-22
-//! Normal-course capture. Remote PowerOn is not implemented (no modelJSON action).
+//! The 24-byte Monitoring.protocol map and enums come from LG's modelJson for this model (one
+//! byte per field), not invented offsets. PowerOff / OperationStop / OperationStart match
+//! WTDN3's Control envelope; there is no PowerOn action. OperationStart course bytes (including
+//! Option3 InitialBit 0x20) are pinned to a Normal-course capture. OperationStart is also how a
+//! paused cycle resumes, so Remote Start stays available while paused, but only with RemoteStart
+//! armed on the washer itself, as in the LG app; course selection is limited to Off/Initial.
+//! Per-cycle energy comes from HTTP diagmon energyMonInfo reports.
+//! Port of upstream PR #146.
 
 use crate::device_trait::DeviceHandler;
 use base64::engine::general_purpose::STANDARD;
@@ -601,7 +604,7 @@ impl Device {
                     "unique_id": "$deviceid-last-cycle-energy",
                     "state_topic": "$this/last_cycle_energy",
                     "device_class": "energy",
-                    "state_class": "measurement",
+                    "state_class": "total_increasing",
                     "unit_of_measurement": "Wh",
                     "name": "Last cycle energy usage",
                     "icon": "mdi:lightning-bolt-outline",
@@ -744,9 +747,10 @@ impl Device {
             }
             .into(),
         );
+        let remote_start_armed = option2 & 0x80 != 0;
         self.publish_property(
             "remote_start_available",
-            if state == 0 || state == 5 || state == 6 {
+            if matches!(state, 0 | 5 | 6) && remote_start_armed {
                 "online"
             } else {
                 "offline"
@@ -773,7 +777,7 @@ impl Device {
         self.publish_on_off("extra_rinse", option1 & 0x40 != 0);
         self.publish_on_off("fresh_care", option2 & 0x01 != 0);
         self.publish_on_off("coldwash", option2 & 0x10 != 0);
-        self.publish_on_off("remote_start", option2 & 0x80 != 0);
+        self.publish_on_off("remote_start", remote_start_armed);
         self.publish_on_off("initial_bit", option3 & INITIAL_BIT != 0);
         self.publish_property("option3_raw", i64::from(option3).into());
         self.publish_property("tub_clean_count", i64::from(tcl_count).into());
@@ -798,11 +802,18 @@ impl Device {
         let Some(info) = decoded.pointer("/lgedmRoot/energyMonInfo") else {
             return;
         };
-        if let Some(power) = info.get("power").and_then(|v| v.as_i64()) {
+        if let Some(power) = info.get("power").and_then(|v| v.as_f64()) {
             self.publish_property("last_cycle_energy", power.into());
         }
-        if let Some(course) = info.get("course").and_then(|v| v.as_u64()) {
-            self.publish_property("last_cycle_course", named(AP_COURSE, course as u8).into());
+        if let Some(course) = info.get("course").and_then(|v| v.as_f64()) {
+            let label = AP_COURSE
+                .iter()
+                .find(|(id, _)| f64::from(*id) == course)
+                .map_or_else(
+                    || PropertyValue::from(course).as_string(),
+                    |(_, n)| (*n).to_string(),
+                );
+            self.publish_property("last_cycle_course", label.into());
         }
         if let Some(date) = info.get("useDate").and_then(|v| v.as_str()) {
             self.publish_property("last_cycle_completed", date.into());
@@ -882,34 +893,414 @@ pub fn create(
 mod tests {
     use super::*;
     use crate::device_trait::DeviceHandler;
-    use crate::test_support::{make_t1, prop, DEVICE_ID};
-    use rethink_core::{hex_decode, Thinq1Device};
+    use crate::test_support::{make_t1, DEVICE_ID};
+    use rethink_core::{hex_decode, MockHaConnection, MockThinq1Device, Thinq1Device};
 
-    fn make() -> (
-        Arc<rethink_core::MockHaConnection>,
-        Arc<rethink_core::MockThinq1Device>,
-        Arc<Device>,
-    ) {
-        make_t1("F3L2CNV4W_WIFI", Device::new)
+    const MODEL_ID: &str = "F3L2CNV4W_WIFI";
+
+    // Built from the modelJson field layout rather than captured, except the last one.
+    // All-zero: power off, idle.
+    const SAMPLE_STATE_OFF: &str =
+        "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+    // Running Normal (id 5): soil Normal, spin Extra high, temp Warm, one extra rinse, steam and
+    // TurboWash on, fresh care and RemoteStart armed, previous state Initial, 1:05 left of 1:10,
+    // 12 cycles since the last tub clean.
+    const SAMPLE_STATE_RUNNING_NORMAL: &str =
+        "17 01 05 01 0a 05 00 03 05 04 10 00 00 00 84 81 00 00 00 05 00 0c 06 00";
+    // Door-open error (DE1, id 17) interrupting a Normal cycle.
+    const SAMPLE_STATE_ERROR_DE1: &str =
+        "07 00 00 00 00 05 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+    // Off with RemoteStart armed (option2 bit 7).
+    const SAMPLE_STATE_OFF_ARMED: &str =
+        "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 00 00 00 00 00 00";
+    const SAMPLE_STATE_PAUSED_ARMED: &str =
+        "06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 00 00 00 00 00 00";
+    const SAMPLE_STATE_PAUSED_UNARMED: &str =
+        "06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+    // Real capture: the courseInfo mirror inside a mid-cycle WasherMonitoring diagmon report.
+    // Detecting, Normal, RemoteStart armed, tub-clean count 48, and an undocumented Option3 = 2.
+    const SAMPLE_STATE_REAL_MIDCYCLE_COURSEINFO: &str =
+        "14 01 11 01 11 05 00 03 05 04 02 00 00 00 00 80 02 00 00 05 6a 30 00 00";
+
+    // A captured Normal-course OperationStart: Data "BQMFBAAAAAAAIAYAAAAAAAAAAAAA".
+    const NORMAL_START: [u8; 21] = [
+        5, 3, 5, 4, 0, 0, 0, 0, 0, 0x20, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    fn make() -> (Arc<MockHaConnection>, Arc<MockThinq1Device>, Arc<Device>) {
+        make_t1(MODEL_ID, Device::new)
     }
 
-    const SAMPLE_STATE_OFF: &str = "000000000000000000000000000000000000000000000000";
-    const SAMPLE_STATE_RUNNING_NORMAL: &str = "170105010a050003050410000000848100000005000c0600";
-    const SAMPLE_STATE_ERROR_DE1: &str = "070000000005110000000000000000000000000000000000";
-    const SAMPLE_STATE_REAL_MIDCYCLE: &str = "14011101110500030504020000000080020000056a300000";
-    const SAMPLE_STATE_PAUSED: &str = "060000000000000000000000000000000000000000000000";
+    fn emit(thinq: &MockThinq1Device, hex: &str) {
+        thinq.emit_data(&hex_decode(hex));
+    }
 
-    fn b64_bytes(sent: &serde_json::Value) -> Vec<u8> {
-        STANDARD
-            .decode(sent["Data"].as_str().unwrap())
-            .unwrap()
+    fn props(ha: &MockHaConnection) -> HashMap<String, PropertyValue> {
+        ha.device(DEVICE_ID).unwrap().properties
+    }
+
+    fn value(ha: &MockHaConnection, name: &str) -> Option<PropertyValue> {
+        props(ha).get(name).cloned()
+    }
+
+    fn components(ha: &MockHaConnection) -> HashMap<String, serde_json::Value> {
+        ha.device(DEVICE_ID).unwrap().config.unwrap().components
+    }
+
+    /// The OperationStart course bytes of the single message sent.
+    fn start_data(thinq: &MockThinq1Device) -> Vec<u8> {
+        let sent = thinq.sent();
+        STANDARD.decode(sent[0]["Data"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn course_selection_and_remote_start_button_use_the_list_form_availability() {
+        // HA rejects a component that mixes availability_topic with the device-level list form.
+        let (ha, _, _) = make();
+        let c = components(&ha);
+        for comp in ["course_selection", "remote_start_button"] {
+            assert!(
+                c[comp].get("availability_topic").is_none(),
+                "{comp} must not use availability_topic"
+            );
+        }
+        assert_eq!(
+            c["course_selection"]["availability"],
+            json!([{ "topic": "$this/controls_available" }])
+        );
+        assert_eq!(
+            c["remote_start_button"]["availability"],
+            json!([{ "topic": "$this/remote_start_available" }])
+        );
+    }
+
+    #[test]
+    fn course_selection_defaults_to_normal_on_construction() {
+        let (ha, _, _) = make();
+        assert_eq!(value(&ha, "course_selection"), Some("Normal".into()));
+    }
+
+    #[test]
+    fn course_selection_stays_at_its_default_while_idle() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_OFF); // APCourse 0 is not a real course
+        assert_eq!(value(&ha, "course_selection"), Some("Normal".into()));
+    }
+
+    #[test]
+    fn controls_available_defaults_to_offline_on_construction() {
+        // Otherwise HA keeps whatever a previous process retained until the washer reports.
+        let (ha, _, _) = make();
+        assert_eq!(value(&ha, "controls_available"), Some("offline".into()));
+        assert_eq!(value(&ha, "remote_start_available"), Some("offline".into()));
+    }
+
+    #[test]
+    fn course_selection_availability_tracks_off_initial_vs_a_running_cycle() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_OFF);
+        assert_eq!(value(&ha, "controls_available"), Some("online".into()));
+        emit(&thinq, SAMPLE_STATE_RUNNING_NORMAL);
+        assert_eq!(value(&ha, "controls_available"), Some("offline".into()));
+        emit(&thinq, SAMPLE_STATE_OFF);
+        assert_eq!(value(&ha, "controls_available"), Some("online".into()));
+    }
+
+    #[test]
+    fn remote_start_button_stays_available_through_paused_too() {
+        // OperationStart is also how a paused cycle resumes; course selection gets no such
+        // exception. RemoteStart is armed throughout, isolating the state-based gating.
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_OFF_ARMED);
+        assert_eq!(value(&ha, "remote_start_available"), Some("online".into()));
+        emit(&thinq, SAMPLE_STATE_RUNNING_NORMAL);
+        assert_eq!(value(&ha, "remote_start_available"), Some("offline".into()));
+        emit(&thinq, SAMPLE_STATE_PAUSED_ARMED);
+        assert_eq!(value(&ha, "controls_available"), Some("offline".into()));
+        assert_eq!(value(&ha, "remote_start_available"), Some("online".into()));
+    }
+
+    #[test]
+    fn remote_start_button_also_requires_remote_start_armed_on_the_washer() {
+        // As in the LG app. Course selection is not gated on it: it sends nothing by itself.
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_OFF);
+        assert_eq!(value(&ha, "controls_available"), Some("online".into()));
+        assert_eq!(value(&ha, "remote_start_available"), Some("offline".into()));
+        emit(&thinq, SAMPLE_STATE_OFF_ARMED);
+        assert_eq!(value(&ha, "remote_start_available"), Some("online".into()));
+        emit(&thinq, SAMPLE_STATE_PAUSED_UNARMED);
+        assert_eq!(value(&ha, "remote_start_available"), Some("offline".into()));
+        emit(&thinq, SAMPLE_STATE_PAUSED_ARMED);
+        assert_eq!(value(&ha, "remote_start_available"), Some("online".into()));
+    }
+
+    #[test]
+    fn off_state_publishes_power_off_and_idle_defaults() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_OFF);
+        for (name, expected) in [
+            ("power", "OFF"),
+            ("status", "Off"),
+            ("error", "OFF"),
+            ("error_message", "OK"),
+            ("soil", "-"),
+            ("spin", "-"),
+            ("temp", "-"),
+        ] {
+            assert_eq!(value(&ha, name), Some(expected.into()), "{name}");
+        }
+        for name in ["remaining_time", "initial_time", "tub_clean_count"] {
+            assert_eq!(value(&ha, name), Some(PropertyValue::Int(0)), "{name}");
+        }
+    }
+
+    #[test]
+    fn running_normal_course_decodes_course_soil_spin_temp_options_and_time() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_RUNNING_NORMAL);
+        for (name, expected) in [
+            ("power", "ON"),
+            ("status", "Running"),
+            ("pre_state", "Initial"),
+            ("course", "Normal"),
+            ("soil", "Normal"),
+            ("spin", "Extra high"),
+            ("temp", "Warm"),
+            ("rinse_count", "0"),
+            ("extra_rinse_count", "1"),
+            ("steam", "ON"),
+            ("turbowash", "ON"),
+            ("prewash", "OFF"),
+            ("child_lock", "OFF"),
+            ("fresh_care", "ON"),
+            ("coldwash", "OFF"),
+            ("remote_start", "ON"),
+            ("error", "OFF"),
+            ("op_course", "Normal"),
+            ("smart_course", "0"),
+            ("initial_bit", "OFF"),
+            ("extra_rinse", "OFF"),
+        ] {
+            assert_eq!(value(&ha, name), Some(expected.into()), "{name}");
+        }
+        for (name, expected) in [
+            ("tub_clean_count", 12),
+            ("initial_time", 70),
+            ("remaining_time", 65),
+            ("option3_raw", 0),
+            ("load_level", 0),
+        ] {
+            assert_eq!(
+                value(&ha, name),
+                Some(PropertyValue::Int(expected)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_midcycle_capture_decodes_including_an_undocumented_option3_bit() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_REAL_MIDCYCLE_COURSEINFO);
+        assert_eq!(value(&ha, "status"), Some("Detecting".into()));
+        assert_eq!(value(&ha, "course"), Some("Normal".into()));
+        assert_eq!(value(&ha, "remote_start"), Some("ON".into()));
+        assert_eq!(value(&ha, "tub_clean_count"), Some(PropertyValue::Int(48)));
+        assert_eq!(value(&ha, "smart_course"), Some("Econo Wash".into()));
+        // Option3 = 2 is not InitialBit (0x20), but the raw byte still surfaces it.
+        assert_eq!(value(&ha, "initial_bit"), Some("OFF".into()));
+        assert_eq!(value(&ha, "option3_raw"), Some(PropertyValue::Int(2)));
+    }
+
+    #[test]
+    fn door_open_error_publishes_error_binary_and_descriptive_message() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, SAMPLE_STATE_ERROR_DE1);
+        assert_eq!(value(&ha, "status"), Some("Error auto-off".into()));
+        assert_eq!(value(&ha, "error"), Some("ON".into()));
+        assert_eq!(
+            value(&ha, "error_message"),
+            Some("Door open error (DE1)".into())
+        );
+        assert_eq!(value(&ha, "course"), Some("Normal".into()));
+    }
+
+    #[test]
+    fn frames_shorter_than_the_24_byte_layout_are_ignored() {
+        let (ha, thinq, _) = make();
+        emit(&thinq, "AABBCC");
+        // Only what the constructor publishes, independent of any frame.
+        let expected: HashMap<String, PropertyValue> = [
+            ("course_selection", "Normal"),
+            ("controls_available", "offline"),
+            ("remote_start_available", "offline"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.into()))
+        .collect();
+        assert_eq!(props(&ha), expected);
+    }
+
+    #[test]
+    fn power_off_sends_the_model_json_power_off_envelope() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("power", "OFF");
+        assert_eq!(
+            thinq.sent(),
+            [
+                json!({"Cmd": "Control", "CmdOpt": "Power", "Value": "Off", "Format": "B64", "Data": ""})
+            ]
+        );
+    }
+
+    #[test]
+    fn power_on_sends_nothing() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("power", "ON");
+        assert!(
+            thinq.sent().is_empty(),
+            "no PowerOn action in the modelJson"
+        );
+    }
+
+    #[test]
+    fn pause_sends_the_model_json_operation_stop_envelope() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("pause", "");
+        assert_eq!(
+            thinq.sent(),
+            [
+                json!({"Cmd": "Control", "CmdOpt": "Operation", "Value": "Stop", "Format": "B64", "Data": ""})
+            ]
+        );
+    }
+
+    #[test]
+    fn start_sends_a_mon_start_subscription() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        DeviceHandler::start(dev.as_ref());
+        assert_eq!(thinq.sent(), [json!({"Cmd": "Mon", "CmdOpt": "Start"})]);
+    }
+
+    #[test]
+    fn remote_start_button_sends_operation_start_with_the_default_normal_course() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("remote_start_button", "");
+        let sent = thinq.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["Cmd"], "Control");
+        assert_eq!(sent[0]["CmdOpt"], "Operation");
+        assert_eq!(sent[0]["Value"], "Start");
+        assert_eq!(sent[0]["Format"], "B64");
+        assert_eq!(start_data(&thinq), NORMAL_START);
+    }
+
+    #[test]
+    fn selecting_a_smart_course_by_name_is_a_no_op() {
+        // Only the 9 dial courses are selectable: OperationStart's SmartCourse field does not
+        // pick what runs.
+        let (ha, thinq, dev) = make();
+        dev.set_property("course_selection", "Small Load");
+        assert_eq!(value(&ha, "course_selection"), Some("Normal".into()));
+        thinq.reset_recorder();
+        dev.set_property("remote_start_button", "");
+        assert_eq!(start_data(&thinq), NORMAL_START);
+    }
+
+    #[test]
+    fn course_selection_tracks_the_live_course_until_the_user_picks_one() {
+        let (ha, thinq, dev) = make();
+        emit(&thinq, SAMPLE_STATE_RUNNING_NORMAL);
+        assert_eq!(value(&ha, "course_selection"), Some("Normal".into()));
+        dev.set_property("course_selection", "Heavy Duty");
+        assert_eq!(value(&ha, "course_selection"), Some("Heavy Duty".into()));
+        // A later frame still reporting Normal does not override the user's pick.
+        emit(&thinq, SAMPLE_STATE_RUNNING_NORMAL);
+        assert_eq!(value(&ha, "course_selection"), Some("Heavy Duty".into()));
+        thinq.reset_recorder();
+        dev.set_property("remote_start_button", "");
+        // Heavy Duty (id 4): soil 5, spin 5, water temp 4, OPCourse 7.
+        assert_eq!(
+            start_data(&thinq),
+            [4, 5, 5, 4, 0, 0, 0, 0, 0, 0x20, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn diagmon_energy_mon_info_publishes_last_cycle_energy_course_and_completion_time() {
+        let (ha, thinq, _) = make();
+        // A real report from a completing Normal cycle, as the XML parser decodes it.
+        thinq.emit_diagmon(
+            "WasherMonitoring",
+            json!({
+                "lgedmRoot": {
+                    "energyMonInfo": {
+                        "event": 2,
+                        "course": 5,
+                        "power": 154,
+                        "option": "FAERAREFAAMFBAIAAAAAgAIAAAVqMAAA",
+                        "dlCourse": 106,
+                        "useDate": "20260822 23:48:24"
+                    }
+                }
+            }),
+        );
+        assert_eq!(
+            value(&ha, "last_cycle_energy"),
+            Some(PropertyValue::Int(154))
+        );
+        assert_eq!(value(&ha, "last_cycle_course"), Some("Normal".into()));
+        assert_eq!(
+            value(&ha, "last_cycle_completed"),
+            Some("20260822 23:48:24".into())
+        );
+    }
+
+    #[test]
+    fn diagmon_tub_info_and_course_info_are_ignored() {
+        let (ha, thinq, _) = make();
+        thinq.emit_diagmon(
+            "WasherMonitoring",
+            json!({ "lgedmRoot": { "tubInfo": { "event": 2, "count": 49, "maxCount": 30 } } }),
+        );
+        assert!(value(&ha, "last_cycle_energy").is_none());
+    }
+
+    #[test]
+    fn diagmon_fields_follow_the_upstream_type_checks() {
+        let (ha, thinq, _) = make();
+        thinq.emit_diagmon(
+            "WasherMonitoring",
+            json!({ "lgedmRoot": { "energyMonInfo": { "course": 300, "power": "154" } } }),
+        );
+        assert_eq!(value(&ha, "last_cycle_course"), Some("300".into()));
+        assert!(
+            value(&ha, "last_cycle_energy").is_none(),
+            "a string is not a number"
+        );
+        thinq.emit_diagmon(
+            "WasherMonitoring",
+            json!({ "lgedmRoot": { "energyMonInfo": { "course": 4.0, "power": 154.5 } } }),
+        );
+        assert_eq!(value(&ha, "last_cycle_course"), Some("Heavy Duty".into()));
+        assert_eq!(
+            value(&ha, "last_cycle_energy"),
+            Some(PropertyValue::Num(154.5))
+        );
+        thinq.emit_diagmon("ScomoCourse", json!("106"));
+        assert_eq!(value(&ha, "last_cycle_course"), Some("Heavy Duty".into()));
     }
 
     #[test]
     fn config_exposes_expected_components() {
         let (ha, _, _) = make();
-        let device = ha.device(DEVICE_ID).unwrap();
-        let comps = &device.config.as_ref().unwrap().components;
+        let comps = components(&ha);
         for c in [
             "power",
             "pause",
@@ -943,9 +1334,13 @@ mod tests {
             "reserve_time",
             "initial_time",
             "remaining_time",
+            "last_cycle_energy",
+            "last_cycle_course",
+            "last_cycle_completed",
         ] {
             assert!(comps.contains_key(c), "component {c}");
         }
+        assert_eq!(comps.len(), 35);
         let opts = comps["status"]["options"].as_array().unwrap();
         assert!(opts.iter().any(|v| v == "Running"));
         assert!(opts.iter().any(|v| v == "Error auto-off"));
@@ -953,222 +1348,12 @@ mod tests {
             comps["course_selection"]["options"],
             json!(SELECTABLE_COURSE_NAMES)
         );
-        assert!(comps["course_selection"].get("availability_topic").is_none());
+        // HA rejects device_class energy with state_class measurement.
+        assert_eq!(comps["last_cycle_energy"]["device_class"], "energy");
         assert_eq!(
-            comps["course_selection"]["availability"],
-            json!([{ "topic": "$this/controls_available" }])
+            comps["last_cycle_energy"]["state_class"],
+            "total_increasing"
         );
-        assert_eq!(
-            comps["remote_start_button"]["availability"],
-            json!([{ "topic": "$this/remote_start_available" }])
-        );
-    }
-
-    #[test]
-    fn course_selection_defaults_and_idle_apcourse_zero() {
-        let (ha, thinq, _) = make();
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Normal"));
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_OFF));
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Normal"));
-    }
-
-    #[test]
-    fn controls_default_offline_then_track_state() {
-        let (ha, thinq, _) = make();
-        assert_eq!(prop(&ha, "controls_available").as_deref(), Some("offline"));
-        assert_eq!(prop(&ha, "remote_start_available").as_deref(), Some("offline"));
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_OFF));
-        assert_eq!(prop(&ha, "controls_available").as_deref(), Some("online"));
-        assert_eq!(prop(&ha, "remote_start_available").as_deref(), Some("online"));
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_RUNNING_NORMAL));
-        assert_eq!(prop(&ha, "controls_available").as_deref(), Some("offline"));
-        assert_eq!(prop(&ha, "remote_start_available").as_deref(), Some("offline"));
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_OFF));
-        assert_eq!(prop(&ha, "controls_available").as_deref(), Some("online"));
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_PAUSED));
-        assert_eq!(prop(&ha, "controls_available").as_deref(), Some("offline"));
-        assert_eq!(prop(&ha, "remote_start_available").as_deref(), Some("online"));
-    }
-
-    #[test]
-    fn off_state() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_OFF));
-        assert_eq!(prop(&ha, "power").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Off"));
-        assert_eq!(prop(&ha, "error").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "error_message").as_deref(), Some("OK"));
-        assert_eq!(prop(&ha, "soil").as_deref(), Some("-"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("-"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("-"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "tub_clean_count").as_deref(), Some("0"));
-    }
-
-    #[test]
-    fn running_normal() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_RUNNING_NORMAL));
-        assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Running"));
-        assert_eq!(prop(&ha, "pre_state").as_deref(), Some("Initial"));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "soil").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "spin").as_deref(), Some("Extra high"));
-        assert_eq!(prop(&ha, "temp").as_deref(), Some("Warm"));
-        assert_eq!(prop(&ha, "rinse_count").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "extra_rinse_count").as_deref(), Some("1"));
-        assert_eq!(prop(&ha, "steam").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "turbowash").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "prewash").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "child_lock").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "fresh_care").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "coldwash").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "tub_clean_count").as_deref(), Some("12"));
-        assert_eq!(prop(&ha, "initial_time").as_deref(), Some("70"));
-        assert_eq!(prop(&ha, "remaining_time").as_deref(), Some("65"));
-        assert_eq!(prop(&ha, "error").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "op_course").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "smart_course").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "initial_bit").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "option3_raw").as_deref(), Some("0"));
-        assert_eq!(prop(&ha, "extra_rinse").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "load_level").as_deref(), Some("0"));
-    }
-
-    #[test]
-    fn real_midcycle_capture() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_REAL_MIDCYCLE));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Detecting"));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "remote_start").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "tub_clean_count").as_deref(), Some("48"));
-        assert_eq!(prop(&ha, "smart_course").as_deref(), Some("Econo Wash"));
-        assert_eq!(prop(&ha, "initial_bit").as_deref(), Some("OFF"));
-        assert_eq!(prop(&ha, "option3_raw").as_deref(), Some("2"));
-    }
-
-    #[test]
-    fn door_open_error() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_ERROR_DE1));
-        assert_eq!(prop(&ha, "status").as_deref(), Some("Error auto-off"));
-        assert_eq!(prop(&ha, "error").as_deref(), Some("ON"));
-        assert_eq!(prop(&ha, "error_message").as_deref(), Some("Door open error (DE1)"));
-        assert_eq!(prop(&ha, "course").as_deref(), Some("Normal"));
-    }
-
-    #[test]
-    fn short_frames_ignored() {
-        let (ha, thinq, _) = make();
-        thinq.emit_data(&hex_decode("AABBCC"));
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Normal"));
-        assert_eq!(prop(&ha, "controls_available").as_deref(), Some("offline"));
-        assert_eq!(prop(&ha, "remote_start_available").as_deref(), Some("offline"));
-        assert!(prop(&ha, "status").is_none());
-        assert!(prop(&ha, "power").is_none());
-    }
-
-    #[test]
-    fn writes_and_start() {
-        let (_, thinq, dev) = make();
-        thinq.reset_recorder();
-        dev.set_property("power", "OFF");
-        assert_eq!(thinq.sent()[0]["CmdOpt"], "Power");
-        assert_eq!(thinq.sent()[0]["Value"], "Off");
-        thinq.reset_recorder();
-        dev.set_property("power", "ON");
-        assert!(thinq.sent().is_empty());
-        thinq.reset_recorder();
-        dev.set_property("pause", "");
-        assert_eq!(thinq.sent()[0]["CmdOpt"], "Operation");
-        assert_eq!(thinq.sent()[0]["Value"], "Stop");
-        thinq.reset_recorder();
-        DeviceHandler::start(dev.as_ref());
-        assert_eq!(thinq.sent()[0]["Cmd"], "Mon");
-        assert_eq!(thinq.sent()[0]["CmdOpt"], "Start");
-    }
-
-    #[test]
-    fn remote_start_default_normal_matches_capture() {
-        let (_, thinq, dev) = make();
-        thinq.reset_recorder();
-        dev.set_property("remote_start_button", "");
-        assert_eq!(thinq.sent().len(), 1);
-        assert_eq!(thinq.sent()[0]["Value"], "Start");
-        assert_eq!(
-            b64_bytes(&thinq.sent()[0]),
-            vec![5, 3, 5, 4, 0, 0, 0, 0, 0, 0x20, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        );
-    }
-
-    #[test]
-    fn smart_course_name_is_noop() {
-        let (ha, thinq, dev) = make();
-        dev.set_property("course_selection", "Small Load");
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Normal"));
-        thinq.reset_recorder();
-        dev.set_property("remote_start_button", "");
-        assert_eq!(
-            b64_bytes(&thinq.sent()[0]),
-            vec![5, 3, 5, 4, 0, 0, 0, 0, 0, 0x20, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        );
-    }
-
-    #[test]
-    fn user_course_pick_sticks_and_encodes_heavy_duty() {
-        let (ha, thinq, dev) = make();
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_RUNNING_NORMAL));
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Normal"));
-        dev.set_property("course_selection", "Heavy Duty");
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Heavy Duty"));
-        thinq.emit_data(&hex_decode(SAMPLE_STATE_RUNNING_NORMAL));
-        assert_eq!(prop(&ha, "course_selection").as_deref(), Some("Heavy Duty"));
-        thinq.reset_recorder();
-        dev.set_property("remote_start_button", "");
-        assert_eq!(
-            b64_bytes(&thinq.sent()[0]),
-            vec![4, 5, 5, 4, 0, 0, 0, 0, 0, 0x20, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        );
-    }
-
-    #[test]
-    fn diagmon_energy_mon_info() {
-        let (ha, thinq, _) = make();
-        thinq.emit_diagmon(
-            "WasherMonitoring",
-            json!({
-                "lgedmRoot": {
-                    "energyMonInfo": {
-                        "event": 2,
-                        "course": 5,
-                        "power": 154,
-                        "option": "FAERAREFAAMFBAIAAAAAgAIAAAVqMAAA",
-                        "dlCourse": 106,
-                        "useDate": "20260822 23:48:24"
-                    }
-                }
-            }),
-        );
-        assert_eq!(prop(&ha, "last_cycle_energy").as_deref(), Some("154"));
-        assert_eq!(prop(&ha, "last_cycle_course").as_deref(), Some("Normal"));
-        assert_eq!(
-            prop(&ha, "last_cycle_completed").as_deref(),
-            Some("20260822 23:48:24")
-        );
-    }
-
-    #[test]
-    fn diagmon_tubinfo_ignored() {
-        let (ha, thinq, _) = make();
-        thinq.emit_diagmon(
-            "WasherMonitoring",
-            json!({ "lgedmRoot": { "tubInfo": { "event": 2, "count": 49, "maxCount": 30 } } }),
-        );
-        assert!(prop(&ha, "last_cycle_energy").is_none());
     }
 
     #[test]
@@ -1183,5 +1368,10 @@ mod tests {
         let info = ha.device(DEVICE_ID).unwrap();
         assert_eq!(info.availability.as_deref(), Some("online"));
         assert!(info.config.is_some());
+    }
+
+    #[test]
+    fn registry_selects_this_handler_for_the_exact_model_id() {
+        assert!(crate::registry::t1_factory(MODEL_ID).is_some());
     }
 }

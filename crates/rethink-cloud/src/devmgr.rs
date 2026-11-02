@@ -12,6 +12,8 @@ pub enum Platform {
     Thinq2,
 }
 
+pub type DiagmonHandler = Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
+
 /// Handle to a connected appliance (platform-agnostic view for management/HA).
 pub struct ConnectedDevice {
     pub id: String,
@@ -26,6 +28,8 @@ pub struct ConnectedDevice {
     pub on_send: Mutex<Vec<Box<dyn Fn(SendToDevice) + Send + Sync>>>,
     /// Wi-Fi signal in dBm, carried in the envelope of every ThinQ2 message.
     pub on_rssi: Mutex<Vec<Box<dyn Fn(f64) + Send + Sync>>>,
+    /// ThinQ1 HTTP diagmon reports: `diagMonType` and the decoded `diagMonData`.
+    pub on_diagmon: Mutex<Vec<DiagmonHandler>>,
     /// The deploy/preDeploy message that registered this appliance.
     pub deploy: Mutex<Option<serde_json::Value>>,
     /// A rethink handler is assigned. Never cleared; the connection does not outlive the handler.
@@ -65,6 +69,7 @@ impl ConnectedDevice {
             on_data: Mutex::new(Vec::new()),
             on_send: Mutex::new(Vec::new()),
             on_rssi: Mutex::new(Vec::new()),
+            on_diagmon: Mutex::new(Vec::new()),
             deploy: Mutex::new(None),
             managed: AtomicBool::new(false),
         })
@@ -100,6 +105,12 @@ impl ConnectedDevice {
 
     pub fn add_rssi_handler<F: Fn(f64) + Send + Sync + 'static>(&self, f: F) {
         self.on_rssi.lock().push(Box::new(f));
+    }
+
+    pub fn notify_diagmon(&self, diag_mon_type: &str, decoded: &serde_json::Value) {
+        for h in self.on_diagmon.lock().iter() {
+            h(diag_mon_type, decoded);
+        }
     }
 
     /// The SSID the appliance reported joining, from its deploy message.

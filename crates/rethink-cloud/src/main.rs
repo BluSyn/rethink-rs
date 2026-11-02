@@ -329,7 +329,17 @@ async fn main() -> Result<()> {
     {
         let cfg = Arc::new(config.clone());
         let meta = thinq1::http::device_metadata_store();
-        let router = thinq1::http::routes(cfg, meta.clone());
+        let diagmon_manager = manager.clone();
+        let on_diagmon: thinq1::http::DiagmonSink = Arc::new(
+            move |id: &str, diag_mon_type: &str, decoded: &serde_json::Value| {
+                if let Some(dev) = diagmon_manager.get(id) {
+                    if dev.platform == devmgr::Platform::Thinq1 {
+                        dev.notify_diagmon(diag_mon_type, decoded);
+                    }
+                }
+            },
+        );
+        let router = thinq1::http::routes(cfg, meta.clone(), on_diagmon);
         let acceptor = thinq1::device::DeviceAcceptor::new(meta, manager.clone());
         if let Some(addr) = config.thinq1_http_port.bind_socket() {
             let router = router.clone();

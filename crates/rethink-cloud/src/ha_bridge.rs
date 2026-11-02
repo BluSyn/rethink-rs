@@ -138,6 +138,12 @@ impl Thinq1Device for T1Adapter {
         }
         self.dev.notify_data(buf);
     }
+    fn on_diagmon(&self, handler: crate::devmgr::DiagmonHandler) {
+        self.dev.on_diagmon.lock().push(handler);
+    }
+    fn emit_diagmon(&self, diag_mon_type: &str, decoded: serde_json::Value) {
+        self.dev.notify_diagmon(diag_mon_type, &decoded);
+    }
 }
 
 pub struct HaBridge {
@@ -571,6 +577,27 @@ mod tests {
         bridge.new_device(washer("w"));
         assert_eq!(wifi_components(&ha), ["wifirssi"]);
         assert!(ha.device("w").unwrap().properties.get("wifissid").is_none());
+    }
+
+    #[test]
+    fn thinq1_diagmon_reports_reach_the_device_handler() {
+        let ha = rethink_core::MockHaConnection::new();
+        let bridge = HaBridge::new(ha.clone());
+        let dev = ConnectedDevice::new(
+            "w".into(),
+            Platform::Thinq1,
+            Metadata::new("F3L2CNV4W_WIFI", "F3L2CNV4W_WIFI", "1.0"),
+            Arc::new(|_: Vec<u8>| {}),
+            Arc::new(|_: SendToDevice| {}),
+        );
+        bridge.new_device(dev.clone());
+        dev.notify_diagmon(
+            "WasherMonitoring",
+            &serde_json::json!({"lgedmRoot": {"energyMonInfo": {"course": 5, "power": 154}}}),
+        );
+        let prop = |name: &str| ha.device("w").unwrap().properties.get(name).cloned();
+        assert_eq!(prop("last_cycle_energy"), Some(PropertyValue::Int(154)));
+        assert_eq!(prop("last_cycle_course"), Some("Normal".into()));
     }
 
     #[test]
