@@ -37,7 +37,7 @@ Supported in this tree (model IDs in `crates/rethink-devices`):
 - **Air conditioners:** RAC / CST DualCool family, WIN window AC, POT portable, PAC floor-standing (`PAC_910604_WW`), DUCT ducted (`DUCT_626301_WW`)
 - **Air & water:** DHUM dehumidifiers, HUM air-purifying humidifier, `AIR_910604_WW` air purifier, `VENT_725601_WW` ventilator, `WHT_056905_WW` heat-pump water heater, `1WPU4CIGCR__2` / `1WPD6CMIDR__3` water purifiers
 - **Fridges:** several `2REF*` / `2RES*` / `2REB*` AABB models, including the GLUB bottom freezers
-- **Washers:** F_ / Y_ / G2 UK / EU / AU front-loaders, VCDWL2QEUK, US front-loaders (F3L2 / F3L7 / F3M2 / F3P2 / F3P3, F24VDD, FAFXU25006), top-loaders (T1789 / T17A1, TLVE5BB), ThinQ1 washers (WTDN3, WTWN3, F3L2CNV4W_WIFI, F3L2CYV5W_WIFI)
+- **Washers:** F_ / Y_ / G2 UK / EU / AU front-loaders, VCDWL2QEUK, US front-loaders (F3L2 / F3L7 / F3M2 / F3P2 / F3P3, F24VDD, FAFXU25006), top-loaders (T1789 / T17A1, TLVE5BB), the MI2U7B SideKick pedestal washer, ThinQ1 washers (WTDN3, WTWN3, F3L2CNV4W_WIFI, F3L2CYV5W_WIFI)
 - **Dryers & combos:** RV13 US dryers, BDH_D30007_US, heat-pump dryers (RH10, RH16, RC90U2 on ThinQ2 and ThinQ1 incl. RC90V9 / RH90V9, SDH_GVX5_6211), washer/dryers (F_V__F___W.B__ECON, Y_V8_F, V_V__F)
 - **WashTower:** WTL_FXU_BDV_NA_01, WKEX200HBA (F3S1CWKB__ + RV13S1AMJW_US)
 - **Stylers:** S5MPC, ST_B_E4H01Y_APL
