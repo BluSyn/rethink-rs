@@ -121,6 +121,7 @@ register_devices! {
         wmvel2137 => { "WMVEL2137" },
         fafxu25006 => { "FAFXU25006" },
         bdh_d30007_us => { "BDH_D30007_US" },
+        mi2u7b => { "MI2U7B" },
         wlsi_633_ => { "WLSI_633_" },
         wlrel6323s => { "WLREL6323S" },
         y_vb_y___w_b32qeuk => { "Y_VB_Y___W.B32QEUK" },
