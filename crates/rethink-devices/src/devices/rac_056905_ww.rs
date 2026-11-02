@@ -39,6 +39,17 @@ const SLEEP_TIMER_12H: u32 = 0x4000;
 const MOMENTARY_INOUTDOOR: u32 = 0x2;
 const MOMENTARY_OUTDOOR: u32 = 0x4;
 
+/// How a mode-gated switch maps onto its tag.
+#[derive(Clone, Copy)]
+enum SwitchBits {
+    /// Any non-zero value is on; on writes 1.
+    OnOff,
+    /// Only these bits; writes keep the others.
+    Masked(u32),
+    /// Only this value is on; off writes 0.
+    Value(u32),
+}
+
 #[derive(Clone)]
 struct Feature {
     name: String,
@@ -68,6 +79,8 @@ struct Inner {
     filter_needs_change: bool,
     features: Vec<Feature>,
     remembered: std::collections::HashMap<String, String>,
+    /// A second field reading a tag (Viraat shares 0x323 with Jet); fields_by_id holds one per tag.
+    shared_tag_fields: std::collections::HashMap<u16, Arc<FieldDefinition>>,
 }
 
 pub struct Device {
@@ -97,6 +110,7 @@ impl Device {
                 filter_needs_change: false,
                 features: Vec::new(),
                 remembered: std::collections::HashMap::new(),
+                shared_tag_fields: std::collections::HashMap::new(),
             }),
         });
 
@@ -107,6 +121,9 @@ impl Device {
 
         let t_vals = this.clone();
         *core.on_values.lock() = Some(Box::new(move || t_vals.values_received()));
+
+        let t_kv = this.clone();
+        *core.key_value_intercept.lock() = Some(Box::new(move |k, v| t_kv.process_shared_tag(k, v)));
 
         let t_priv = this.clone();
         *core.on_priv_data.lock() = Some(Box::new(move |cmd, buf9, data| {
@@ -150,6 +167,20 @@ impl Device {
     fn has_cap_or_tag(&self, cap_word: u16, cap_bit: u32, state_tag: u16) -> bool {
         let cap = self.core.get_raw(cap_word).unwrap_or(0);
         (cap & cap_bit) != 0 || self.has_tag(state_tag)
+    }
+
+    /// Runs a tag with a shared field through the tag's own field first, then the shared one.
+    fn process_shared_tag(&self, k: u16, v: u32) -> bool {
+        let Some(shared) = self.inner.lock().shared_tag_fields.get(&k).cloned() else {
+            return false;
+        };
+        self.core.set_raw(k, v);
+        let main = self.core.fields_by_id.lock()[usize::from(k)].clone();
+        if let Some(main) = main {
+            self.core.process_field(&main, v);
+        }
+        self.core.process_field(&shared, v);
+        true
     }
 
     fn values_received(self: &Arc<Self>) {
@@ -1411,6 +1442,25 @@ impl Device {
                 Some(("AC on, in Cooling or Heating".into(), Some(modes))),
             );
         }
+        // racSubMode JET_INDI: wMode.jet HIMALAYAS_COOL, sold as "Viraat" in India. 0x323 = 4, the Jet tag.
+        if caps(0x2cd, 0x800000) {
+            let modes = vec![0];
+            let jet = self.core.fields_by_id.lock()[0x323].clone();
+            self.add_gated_field(config, 0x323, "viraat", "Viraat", "mdi:snowflake", modes.clone(), false, SwitchBits::Value(4));
+            if let Some(jet) = jet {
+                let viraat = self.core.fields_by_id.lock()[0x323].replace(jet);
+                if let Some(viraat) = viraat {
+                    self.inner.lock().shared_tag_fields.insert(0x323, viraat);
+                }
+            }
+            self.describe_feature(
+                config,
+                "viraat",
+                "Viraat: maximum cooling. Starting it sets 18 °C and a high fan speed and turns the energy limit \
+                 off; ending it restores none of them. Changing the temperature or starting Jet ends it.",
+                Some(("AC on, in Cooling".into(), Some(modes))),
+            );
+        }
         if caps(0x34f, 0x100000) && self.has_tag(0x3c9) {
             self.add_masked_switch(config, 0x3c9, "windowdetection", "Window detection", "mdi:window-open-variant", 1);
             self.describe_feature(
@@ -1577,7 +1627,7 @@ impl Device {
         modes: Vec<u32>,
         remember: bool,
     ) {
-        self.add_gated_field(config, id, name, desc, icon, modes, remember, false, 0, None);
+        self.add_gated_field(config, id, name, desc, icon, modes, remember, SwitchBits::OnOff);
     }
 
     fn add_masked_running_switch(
@@ -1590,7 +1640,7 @@ impl Device {
         mask: u32,
         modes: Vec<u32>,
     ) {
-        self.add_gated_field(config, id, name, desc, icon, modes, false, true, mask, None);
+        self.add_gated_field(config, id, name, desc, icon, modes, false, SwitchBits::Masked(mask));
     }
 
     fn add_masked_switch(
@@ -1693,9 +1743,7 @@ impl Device {
         icon: &str,
         modes: Vec<u32>,
         remember: bool,
-        masked: bool,
-        mask: u32,
-        _select: Option<()>,
+        bits: SwitchBits,
     ) {
         config.components.insert(
             name.into(),
@@ -1715,16 +1763,23 @@ impl Device {
             if remember {
                 this_w.inner.lock().remembered.insert(name_w.clone(), val.into());
             }
-            if masked {
-                let current = this_w.core.get_raw(id).unwrap_or(0);
-                let next = if val == "ON" { current | mask } else { current & !mask };
-                Some(i64::from(next).into())
-            } else {
-                Some(if val == "ON" { 1i64.into() } else { 0i64.into() })
-            }
+            let on = val == "ON";
+            let raw = match bits {
+                SwitchBits::OnOff => u32::from(on),
+                SwitchBits::Masked(mask) => {
+                    let current = this_w.core.get_raw(id).unwrap_or(0);
+                    if on { current | mask } else { current & !mask }
+                }
+                SwitchBits::Value(value) => if on { value } else { 0 },
+            };
+            Some(i64::from(raw).into())
         }));
         f.read_xform = Some(Box::new(move |raw| {
-            let on = if masked { raw & mask != 0 } else { raw != 0 };
+            let on = match bits {
+                SwitchBits::OnOff => raw != 0,
+                SwitchBits::Masked(mask) => raw & mask != 0,
+                SwitchBits::Value(value) => raw == value,
+            };
             Some(if on { "ON".into() } else { "OFF".into() })
         }));
         let this_gate = self.clone();
@@ -2686,5 +2741,56 @@ mod tests {
 
         thinq.emit_data(&notify(&[(0x23e, 1)]));
         assert_eq!(ha.get_property(DEVICE_ID, "aiair", "state"), Some("ON".into()));
+    }
+
+    #[test]
+    fn us_q19mwze_exposes_viraat_next_to_jet() {
+        // 0x2cd = 0x80000d: Jet cool and JET_INDI (Viraat)
+        let (ha, _thinq, _dev) = us_q19mwze_ready();
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(c["viraat"]["platform"], "switch");
+        assert_eq!(c["jet"]["platform"], "switch");
+    }
+
+    #[test]
+    fn us_q19mwze_viraat_is_written_only_while_cooling() {
+        // writes accepted by the unit
+        const WRITE_VIRAAT_ON_HEX: &str = "0101040000006502010102C8C4A40A"; // 0x323=4: 18 °C, fan 6, vertical swing on
+        const WRITE_VIRAAT_OFF_HEX: &str = "0101040000006502010102C8C0E48E"; // 0x323=0
+        let (ha, thinq, _dev) = us_q19mwze_ready();
+        let sent = || thinq.outbox().iter().map(|p| hex_encode(p)).collect::<Vec<_>>();
+
+        ha.set_property(DEVICE_ID, "viraat", "command", "ON");
+        assert!(sent().is_empty());
+
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 1)])); // dry
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "viraat", "command", "ON");
+        assert!(sent().is_empty());
+
+        thinq.emit_data(&notify(&[(0x1f9, 0)]));
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "viraat", "command", "ON");
+        assert_eq!(sent(), [WRITE_VIRAAT_ON_HEX]);
+        ha.set_property(DEVICE_ID, "viraat", "command", "OFF");
+        assert_eq!(sent(), [WRITE_VIRAAT_ON_HEX, WRITE_VIRAAT_OFF_HEX]);
+    }
+
+    #[test]
+    fn us_q19mwze_0x323_reads_update_both_jet_and_viraat() {
+        let (ha, thinq, _dev) = us_q19mwze_ready();
+        let get = |comp: &str| ha.get_property(DEVICE_ID, comp, "state");
+
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0), (0x323, 4)]));
+        assert_eq!(get("viraat"), Some("ON".into()));
+        assert_eq!(get("jet"), Some("OFF".into()));
+
+        thinq.emit_data(&notify(&[(0x323, 1)]));
+        assert_eq!(get("viraat"), Some("OFF".into()));
+        assert_eq!(get("jet"), Some("ON".into()));
+
+        thinq.emit_data(&notify(&[(0x323, 0)]));
+        assert_eq!(get("viraat"), Some("OFF".into()));
+        assert_eq!(get("jet"), Some("OFF".into()));
     }
 }

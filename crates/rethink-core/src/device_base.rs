@@ -520,8 +520,14 @@ impl TlvDeviceCore {
             h(k, v);
         }
         let def = tlv_slot(k).and_then(|i| self.fields_by_id.lock()[i].clone());
-        let Some(def) = def else { return };
+        if let Some(def) = def {
+            self.process_field(&def, v);
+        }
+    }
 
+    /// The read side of one field for a raw value: `read_xform`, `read_callback`, then the
+    /// publish (skipped when unchanged).
+    pub fn process_field(&self, def: &FieldDefinition, v: u32) {
         let mut processed = PropertyValue::Int(v as i64);
         if let Some(ref xform) = def.read_xform {
             match xform(v) {
