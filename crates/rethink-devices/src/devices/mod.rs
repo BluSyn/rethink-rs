@@ -115,6 +115,7 @@ register_devices! {
         f24vdd => { "F24VDD" },
         s5mpc => { "S5MPC" },
         rc90u2_ww => { "RC90U2_WW" | "RC90V9_WW" | "RC90V9_AUS" | "RH90V9_WW" },
+        rh16_t_kr => { "RH16_T_KR" },
         wfv474pgv => { "WFV474PGV" },
         wmvem1825 => { "WMVEM1825" },
         wmvel2137 => { "WMVEL2137" },

@@ -1,6 +1,7 @@
 //! Device handlers and modelId registry for rethink.
 
 pub mod ac_tables;
+pub mod course_memory;
 pub mod device_trait;
 pub mod devices;
 pub mod fridge_common;
