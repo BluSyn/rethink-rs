@@ -35,6 +35,25 @@ fn display_light_supported(cap_2d6: u32, eeprom_checksum: u32) -> bool {
 
 /// HA climate mode per 0x1f9 code, in HA's list order.
 const MODES: [(&str, u32); 5] = [("cool", 0), ("dry", 1), ("fan_only", 2), ("heat", 4), ("auto", 6)];
+
+type SwingModes = &'static [(&'static str, u32)];
+/// 0x321 vane positions, in HA's list order.
+const SWING_MODES: SwingModes =
+    &[("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5), ("6", 6), ("on", 100), ("off", 0)];
+/// 0x322 vane positions, in HA's list order.
+const SWING_H_MODES: SwingModes = &[
+    ("1", 1),
+    ("2", 2),
+    ("3", 3),
+    ("4", 4),
+    ("5", 5),
+    ("1-3", 13),
+    ("3-5", 35),
+    ("on", 100),
+    ("off", 0),
+];
+/// Swing without vane positions: such units reject the step values.
+const SWING_ON_OFF_MODES: SwingModes = &[("on", 100), ("off", 0)];
 const MODE_PURIFY_ONLY: u32 = 46;
 /// 0x2d3 (support.reserve): the remote's sleep timer goes up to 12 h instead of 7 h.
 const SLEEP_TIMER_12H: u32 = 0x4000;
@@ -116,7 +135,9 @@ impl Device {
             }),
         });
 
-        *core.is_caps_response.lock() = Some(Box::new(|tlv| tlv.iter().any(|e| e.t == 0x2da)));
+        // EEPROM checksum, or the firmware version: the S3NW18TZXBA does not report the checksum
+        *core.is_caps_response.lock() =
+            Some(Box::new(|tlv| tlv.iter().any(|e| e.t == 0x2da || e.t == 0x2db)));
         *core.is_values_response.lock() = Some(Box::new(|tlv| {
             tlv.len() >= 10 && tlv.iter().any(|e| e.t == 0x1f7)
         }));
@@ -674,76 +695,28 @@ impl Device {
             self.core.add_field(&mut config, f, true);
         }
 
-        // vertical swing
-        if self.has_cap_or_tag(0x2cd, 4, 0x321) {
-            if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
-                climate.insert(
-                    "swing_modes".into(),
-                    json!(["1", "2", "3", "4", "5", "6", "on", "off"]),
-                );
-            }
-            let mut f = FieldDefinition::new("climate", "swing_mode").with_id(0x321);
-            f.read_xform = Some(Box::new(|raw| {
-                if raw == 100 {
-                    return Some("on".into());
-                }
-                let modes = ["off", "1", "2", "3", "4", "5", "6"];
-                modes.get(raw as usize).map(|s| (*s).into())
-            }));
-            f.write_xform = Some(Box::new(|val| {
-                match val {
-                    "off" => Some(0i64.into()),
-                    "1" => Some(1i64.into()),
-                    "2" => Some(2i64.into()),
-                    "3" => Some(3i64.into()),
-                    "4" => Some(4i64.into()),
-                    "5" => Some(5i64.into()),
-                    "6" => Some(6i64.into()),
-                    "on" => Some(100i64.into()),
-                    _ => None,
-                }
-            }));
-            self.core.add_field(&mut config, f, true);
+        // 0x2cd bits 0x10/0x20 instead of 0x4/0x8: swing without vane positions (S3NW18TZXBA).
+        // Units advertising neither still get the full list when they report the tag.
+        let swing = self.core.get_raw(0x2cd).unwrap_or(0);
+        let swing_v = if swing & 0x4 != 0 {
+            Some(SWING_MODES)
+        } else if swing & 0x10 != 0 {
+            Some(SWING_ON_OFF_MODES)
+        } else {
+            self.has_tag(0x321).then_some(SWING_MODES)
+        };
+        if let Some(modes) = swing_v {
+            self.add_swing_field(&mut config, 0x321, "swing_mode", "swing_modes", modes);
         }
-
-        // horizontal swing
-        if self.has_cap_or_tag(0x2cd, 8, 0x322) {
-            if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
-                climate.insert(
-                    "swing_horizontal_modes".into(),
-                    json!(["1", "2", "3", "4", "5", "1-3", "3-5", "on", "off"]),
-                );
-            }
-            let mut f = FieldDefinition::new("climate", "swing_horizontal_mode").with_id(0x322);
-            f.read_xform = Some(Box::new(|raw| {
-                match raw {
-                    0 => Some("off".into()),
-                    1 => Some("1".into()),
-                    2 => Some("2".into()),
-                    3 => Some("3".into()),
-                    4 => Some("4".into()),
-                    5 => Some("5".into()),
-                    13 => Some("1-3".into()),
-                    35 => Some("3-5".into()),
-                    100 => Some("on".into()),
-                    _ => None,
-                }
-            }));
-            f.write_xform = Some(Box::new(|val| {
-                match val {
-                    "off" => Some(0i64.into()),
-                    "1" => Some(1i64.into()),
-                    "2" => Some(2i64.into()),
-                    "3" => Some(3i64.into()),
-                    "4" => Some(4i64.into()),
-                    "5" => Some(5i64.into()),
-                    "1-3" => Some(13i64.into()),
-                    "3-5" => Some(35i64.into()),
-                    "on" => Some(100i64.into()),
-                    _ => None,
-                }
-            }));
-            self.core.add_field(&mut config, f, true);
+        let swing_h = if swing & 0x8 != 0 {
+            Some(SWING_H_MODES)
+        } else if swing & 0x20 != 0 {
+            Some(SWING_ON_OFF_MODES)
+        } else {
+            self.has_tag(0x322).then_some(SWING_H_MODES)
+        };
+        if let Some(modes) = swing_h {
+            self.add_swing_field(&mut config, 0x322, "swing_horizontal_mode", "swing_horizontal_modes", modes);
         }
 
         self.add_optional_sensor_field(
@@ -1061,6 +1034,34 @@ impl Device {
         }
 
         self.core.query();
+    }
+
+    fn add_swing_field(
+        &self,
+        config: &mut DeviceDiscovery,
+        id: u16,
+        name: &str,
+        list_key: &str,
+        modes: SwingModes,
+    ) {
+        let labels: Vec<&str> = modes.iter().map(|(label, _)| *label).collect();
+        if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
+            climate.insert(list_key.into(), json!(labels));
+        }
+        let mut f = FieldDefinition::new("climate", name).with_id(id);
+        f.read_xform = Some(Box::new(move |raw| {
+            modes
+                .iter()
+                .find(|(_, code)| *code == raw)
+                .map(|(label, _)| (*label).into())
+        }));
+        f.write_xform = Some(Box::new(move |val| {
+            modes
+                .iter()
+                .find(|(label, _)| *label == val)
+                .map(|(_, code)| i64::from(*code).into())
+        }));
+        self.core.add_field(config, f, true);
     }
 
     fn add_timer_field(
@@ -2808,6 +2809,55 @@ mod tests {
         thinq.emit_data(&notify(&[(0x323, 0)]));
         assert_eq!(get("viraat"), Some("OFF".into()));
         assert_eq!(get("jet"), Some("OFF".into()));
+    }
+
+    // WZ18AWN SNU1 (S3NW18TZXBA, firmware 0x917be), running in heat. Its caps carry no EEPROM
+    // checksum (0x2da) and advertise swing as 0x2cd = 0x30.
+    const S3NW18TZXBA_CAPS_HEX: &str = "000004000000A702010167B001B05057B0A001FEB0C0B100B2103DB280B2C4B300B4C4B5A08000B500B540B35030D402B85020B8903EB8D020B9103EBAD020BB103EBC6002014281B5C0B61032B648B5C1B61032B648B5C2B61032B648B5C6B61032B648B5C4B61032B648B6F00917BEBD4151C5";
+    const S3NW18TZXBA_QUERY_HEX: &str = "000004000000A7020401417E447DC17E887F50327F9032820081408180824082C083008340838083C086A0000086E000008720000087C08850008E80C8C0D5600000D5A002D0C85000C89000B257";
+
+    #[test]
+    fn s3nw18tzxba_initialises_from_caps_without_an_eeprom_checksum() {
+        let (ha, thinq, dev) = make_device();
+        thinq.reset_recorder();
+        thinq.emit_data(&hex_decode(S3NW18TZXBA_CAPS_HEX));
+        // the caps query is done, and the values query (0x1f5=2) follows
+        assert!(!dev.core.waiting_caps.load(std::sync::atomic::Ordering::Relaxed));
+        let sent: Vec<String> = thinq.outbox().iter().map(|p| hex_encode(p)).collect();
+        assert_eq!(sent, ["01010400000065020201027D425A6E"]);
+        thinq.emit_data(&hex_decode(S3NW18TZXBA_QUERY_HEX));
+        assert!(ha.device(DEVICE_ID).unwrap().config.unwrap().components.contains_key("climate"));
+    }
+
+    #[test]
+    fn s3nw18tzxba_exposes_on_off_only_swing() {
+        // writes sent from HA and accepted by the unit (its remote sends the same values)
+        const WRITE_SWING_ON_HEX: &str = "0101040000006502010103C8506471D7"; // 0x321=100
+        const WRITE_SWING_H_OFF_HEX: &str = "0101040000006502010102C880AC4A"; // 0x322=0
+        let (ha, thinq, _dev) = make_device();
+        thinq.emit_data(&hex_decode(S3NW18TZXBA_CAPS_HEX));
+        thinq.emit_data(&hex_decode(S3NW18TZXBA_QUERY_HEX));
+        thinq.emit_data(&hex_decode(S3NW18TZXBA_QUERY_HEX));
+        let write = |prop: &str, value: &str| {
+            thinq.reset_recorder();
+            ha.set_property(DEVICE_ID, "climate", prop, value);
+            thinq.outbox().iter().map(|p| hex_encode(p)).collect::<Vec<_>>()
+        };
+
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(c["climate"]["swing_modes"], json!(["on", "off"]));
+        assert_eq!(c["climate"]["swing_horizontal_modes"], json!(["on", "off"]));
+        assert_eq!(ha.get_property(DEVICE_ID, "climate", "swing_mode_state"), Some("off".into()));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "swing_horizontal_mode_state"),
+            Some("off".into())
+        );
+
+        assert_eq!(write("swing_mode_command", "on"), [WRITE_SWING_ON_HEX]);
+        assert_eq!(write("swing_horizontal_mode_command", "off"), [WRITE_SWING_H_OFF_HEX]);
+        // vane positions aren't sent: the unit rejects them
+        assert!(write("swing_mode_command", "3").is_empty());
+        assert!(write("swing_horizontal_mode_command", "1-3").is_empty());
     }
 
     /// The captured caps response with one tag left out (the CRC is not checked).
