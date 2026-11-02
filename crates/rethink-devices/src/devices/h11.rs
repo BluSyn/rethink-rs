@@ -8,6 +8,7 @@
 //! `auto_ack` stays off: this handler acks itself only if a future device opts in.
 
 use crate::device_trait::DeviceHandler;
+use crate::js::number;
 use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use rethink_util::sync::Mutex;
@@ -531,7 +532,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
         json!({
             "platform": "sensor",
             "device_class": "enum",
-            "icon": "mdi:state-machine",
+            "icon": "mdi:dishwasher",
             "unique_id": "$deviceid-status",
             "state_topic": "$this/status",
             "name": "Status",
@@ -557,7 +558,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
         json!({
             "platform": "sensor",
             "device_class": "enum",
-            "icon": "mdi:pin-outline",
+            "icon": "mdi:playlist-play",
             "unique_id": "$deviceid-course",
             "state_topic": "$this/course",
             "name": "Course",
@@ -585,7 +586,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "icon": "mdi:timer",
             "unique_id": "$deviceid-initial_time",
             "state_topic": "$this/initial_time",
-            "name": "Initial cycle duration",
+            "name": "Initial time",
             "device_class": "duration",
             "unit_of_measurement": "min"
         }),
@@ -610,7 +611,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "state_class": "total_increasing",
             "unique_id": "$deviceid-energy",
             "state_topic": "$this/energy",
-            "name": "Cycle energy consumption",
+            "name": "Energy",
             "unit_of_measurement": "Wh",
             "icon": "mdi:lightning-bolt"
         }),
@@ -623,7 +624,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "icon": "mdi:weather-sunny",
             "unique_id": "$deviceid-extra_dry",
             "state_topic": "$this/extra_dry",
-            "name": "High heat drying active"
+            "name": "Extra dry"
         }),
     );
     add(
@@ -634,7 +635,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "icon": "mdi:thermometer-high",
             "unique_id": "$deviceid-high_temp",
             "state_topic": "$this/high_temp",
-            "name": "Sanitizing wash active"
+            "name": "High temp"
         }),
     );
     add(
@@ -657,7 +658,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "unique_id": "$deviceid-rinse_level",
             "state_topic": "$this/rinse_level",
             "command_topic": "$this/rinse_level/set",
-            "name": "Rinse aid level",
+            "name": "Rinse aid dispenser level",
             "min": 0, "max": 4, "step": 1
         }),
     );
@@ -670,7 +671,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "unique_id": "$deviceid-salt_level",
             "state_topic": "$this/salt_level",
             "command_topic": "$this/salt_level/set",
-            "name": "Salt dispensing level",
+            "name": "Salt dispenser level",
             "min": 0, "max": 4, "step": 1
         }),
     );
@@ -771,7 +772,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "icon": "mdi:remote",
             "unique_id": "$deviceid-remote_start",
             "state_topic": "$this/remote_start",
-            "name": "Remote start enabled"
+            "name": "Remote start"
         }),
     );
     add(
@@ -779,7 +780,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
         "pause",
         json!({
             "platform": "button",
-            "icon": "mdi:pause",
+            "icon": "mdi:pause-circle",
             "unique_id": "$deviceid-pause",
             "command_topic": "$this/pause/set",
             "name": "Pause",
@@ -791,7 +792,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
         "resume",
         json!({
             "platform": "button",
-            "icon": "mdi:play",
+            "icon": "mdi:play-pause",
             "unique_id": "$deviceid-resume",
             "command_topic": "$this/resume/set",
             "name": "Resume",
@@ -803,10 +804,10 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
         "cancel",
         json!({
             "platform": "button",
-            "icon": "mdi:stop",
+            "icon": "mdi:stop-circle",
             "unique_id": "$deviceid-cancel",
             "command_topic": "$this/cancel/set",
-            "name": "Cancel / drain",
+            "name": "Cancel cycle",
             "payload_press": "PRESS"
         }),
     );
@@ -832,7 +833,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "unique_id": "$deviceid-target_delay",
             "state_topic": "$this/target_delay",
             "command_topic": "$this/target_delay/set",
-            "name": "Start delay setting",
+            "name": "Target delay start",
             "device_class": "duration",
             "unit_of_measurement": "h",
             "min": 0, "max": 12, "step": 1
@@ -847,7 +848,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "unique_id": "$deviceid-target_high_temp",
             "state_topic": "$this/target_high_temp",
             "command_topic": "$this/target_high_temp/set",
-            "name": "Target sanitizing wash"
+            "name": "Target high temp"
         }),
     );
     add(
@@ -859,7 +860,7 @@ fn discovery(meta: &Metadata) -> rethink_core::DeviceDiscovery {
             "unique_id": "$deviceid-target_extra_dry",
             "state_topic": "$this/target_extra_dry",
             "command_topic": "$this/target_extra_dry/set",
-            "name": "Target high heat drying"
+            "name": "Target extra dry"
         }),
     );
     add(
@@ -1030,22 +1031,15 @@ fn on_off(bit: u8) -> &'static str {
     }
 }
 
-/// `Number(value)` plus `Number.isInteger` in `[min, max]`. Blank input is rejected.
+/// `Number(value)` plus `Number.isInteger` in `[min, max]`. Blank input, which `Number()` reads
+/// as 0, is rejected.
 fn parse_integer_in_range(value: &str, min: i64, max: i64) -> Option<u8> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if value.chars().all(|c| c.is_whitespace() || c == '\u{feff}') {
         return None;
     }
-    let parsed: f64 = trimmed.parse().ok()?;
-    if !parsed.is_finite() || parsed.fract() != 0.0 {
-        return None;
-    }
-    let n = parsed as i64;
-    if (min..=max).contains(&n) {
-        Some(n as u8)
-    } else {
-        None
-    }
+    let parsed = number(value)?;
+    let in_range = parsed.fract() == 0.0 && parsed >= min as f64 && parsed <= max as f64;
+    in_range.then_some(parsed as u8)
 }
 
 #[cfg(test)]
@@ -1317,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unobserved_lengths_and_malformed_fixed_record_headers() {
+    fn rejects_unobserved_lengths() {
         let (ha, thinq, _) = make();
         let full = hex_decode(EXPRESS_STARTS_RUNNING);
         let mut wrong_length = full[..full.len() - 3].to_vec();
@@ -1494,6 +1488,31 @@ mod tests {
         dev.set_property("target_course", "Download cycle");
         dev.set_property("start_course", "PRESS");
         assert_outbox(&thinq, &["aa0df026100b00000040007dbb"]);
+    }
+
+    #[test]
+    fn numeric_inputs_are_parsed_like_javascript_number() {
+        let (ha, thinq, dev) = make();
+        for (value, hours) in [
+            ("0x3", "3"),
+            (" 2 ", "2"),
+            ("1e1", "10"),
+            ("+4", "4"),
+            ("5.0", "5"),
+        ] {
+            dev.set_property("target_delay", value);
+            assert_eq!(
+                prop(&ha, "target_delay").as_deref(),
+                Some(hours),
+                "{value:?}"
+            );
+        }
+        for value in ["", "  ", "\u{feff}", "1.5", "3abc", "Infinity", "13", "-1"] {
+            dev.set_property("target_delay", value);
+            assert_eq!(prop(&ha, "target_delay").as_deref(), Some("5"), "{value:?}");
+        }
+        dev.set_property("start_course", "PRESS");
+        assert_outbox(&thinq, &["aa0df02610010500000000b6bb"]);
     }
 
     #[test]
