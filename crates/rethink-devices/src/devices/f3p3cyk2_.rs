@@ -4,20 +4,14 @@
 //! `auto_ack` stays off. Only power-off is writable.
 
 use crate::device_trait::DeviceHandler;
-use rethink_core::device_base::{default_config, AabbDeviceCore};
+use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
 use rethink_core::{HaConnection, Metadata, PropertyValue, Thinq2Device};
 use serde_json::json;
 use std::sync::Arc;
 
 const CLASS_BYTE: u8 = 0x20;
-const STATUS_FRAME_TYPE: u8 = 0xec;
-const STATUS_FRAME_LEN: usize = 92;
-const STATUS_RECORD_OFFSET: usize = 48;
-const SINGLE_STATUS_FRAME_TYPE: u8 = 0xeb;
-const SINGLE_STATUS_FRAME_LEN: usize = 47;
-const SINGLE_RECORD_OFFSET: usize = 3;
-const RECORD_LEN: usize = 44;
-const RECORD_MARKER: u8 = 0x2b;
+/// One 0xEB/0xEC status block: a leading byte, then the 44-byte record.
+const RECORD_LEN: usize = 45;
 
 const STATUS_REQUEST: &[u8] = &[
     0xf0, 0xed, 0x11, 0x21, 0x01, 0x00, 0x00, 0x00, 0x18, 0x04, 0x13, 0x14, 0x00, 0x00,
@@ -109,7 +103,8 @@ const SPIN: &[(u8, &str)] = &[
     (16, "Extra High"),
 ];
 
-const BUZZER: &[(u8, &str)] = &[(0, "Off"), (1, "1"), (2, "2"), (3, "3"), (4, "4")];
+// Options order as upstream publishes it: JavaScript lists integer-like keys first.
+const BUZZER: &[(u8, &str)] = &[(1, "1"), (2, "2"), (3, "3"), (4, "4"), (0, "Off")];
 
 const ERRORS: &[(u8, &str)] = &[
     (2, "IE"),
@@ -164,26 +159,14 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
-        if buf.len() < 2 || buf[0] != CLASS_BYTE {
-            return;
-        }
-        if buf[1] == STATUS_FRAME_TYPE {
-            self.process_status(buf, STATUS_RECORD_OFFSET, STATUS_FRAME_LEN);
-        } else if buf[1] == SINGLE_STATUS_FRAME_TYPE {
-            self.process_status(buf, SINGLE_RECORD_OFFSET, SINGLE_STATUS_FRAME_LEN);
+        // 0xBD/0xCD dumps use another layout and 0xE2 is a stale post-cycle replay: both ignored.
+        if let Some(status) = process_common_status(buf, CLASS_BYTE, RECORD_LEN) {
+            self.process_status(status);
         }
     }
 
-    fn process_status(&self, buf: &[u8], record_offset: usize, expected_len: usize) {
-        if buf.len() != expected_len {
-            return;
-        }
-        let Some(rec) = buf.get(record_offset..record_offset + RECORD_LEN) else {
-            return;
-        };
-        if rec[0] != RECORD_MARKER {
-            return;
-        }
+    fn process_status(&self, status: &[u8]) {
+        let rec = &status[1..];
         let state = rec[STATE_OFFSET];
         let is_off = state == STATE_OFF;
         let is_end = state == STATE_END;
@@ -269,8 +252,15 @@ fn named(table: &'static [(u8, &'static str)], code: u8) -> Option<&'static str>
         .map(|(_, name)| *name)
 }
 
+/// Each label once, in first-seen order.
 fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
-    table.iter().map(|(_, name)| *name).collect()
+    let mut out: Vec<&'static str> = Vec::new();
+    for (_, name) in table {
+        if !out.contains(name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 fn components() -> std::collections::HashMap<String, serde_json::Value> {
@@ -310,6 +300,8 @@ fn components() -> std::collections::HashMap<String, serde_json::Value> {
                 "state_topic": "$this/status",
                 "name": "Status",
                 "icon": "mdi:state-machine",
+                "device_class": "enum",
+                "options": labels(STATES),
             }),
         ),
         (
@@ -592,6 +584,48 @@ mod tests {
     }
 
     #[test]
+    fn status_and_buzzer_options_follow_upstream() {
+        let (ha, _thinq, _dev) = make();
+        let cfg = ha.device(DEVICE_ID).unwrap().config.unwrap();
+        assert_eq!(cfg.components["status"]["device_class"], "enum");
+        assert_eq!(
+            cfg.components["status"]["options"],
+            json!([
+                "Off",
+                "Standby",
+                "Paused",
+                "Detecting",
+                "Filling",
+                "Detergent amount",
+                "Delayed",
+                "Pre-wash",
+                "Washing",
+                "Rinsing",
+                "Rinse hold",
+                "Spinning",
+                "Drying",
+                "End",
+                "Refreshing",
+                "Error",
+            ])
+        );
+        assert_eq!(
+            cfg.components["buzzer"]["options"],
+            json!(["1", "2", "3", "4", "Off"])
+        );
+    }
+
+    #[test]
+    fn record_marker_byte_is_not_required() {
+        let mut frame = hex_decode(DIAL_NORMAL);
+        frame[50] = 0x00; // the current record's 0x2B marker
+        let (ha, thinq, _dev) = make();
+        thinq.emit_data(&frame);
+        assert_eq!(prop(&ha, "status"), "Standby".into());
+        assert_eq!(prop(&ha, "course"), "Normal".into());
+    }
+
+    #[test]
     fn power_off_sends_the_captured_command() {
         let (_ha, thinq, dev) = make();
         thinq.reset_recorder();
@@ -619,10 +653,8 @@ mod tests {
         let (_ha, thinq, dev) = make();
         thinq.reset_recorder();
         DeviceHandler::start(dev.as_ref());
-        assert_eq!(
-            hex_encode(&thinq.outbox()[0]),
-            "AA12F0ED1121010000001804131400005ABB"
-        );
+        let sent: Vec<String> = thinq.outbox().iter().map(|b| hex_encode(b)).collect();
+        assert_eq!(sent, ["AA12F0ED1121010000001804131400005ABB"]);
     }
 
     #[test]
