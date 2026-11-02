@@ -1,8 +1,14 @@
 //! JavaScript string-to-number conversions, for handlers that must accept exactly the MQTT
 //! payloads their upstream TypeScript counterparts accept. `None` stands for `NaN`.
 
+/// ECMAScript WhiteSpace + LineTerminator: Unicode White_Space without NEL (U+0085), plus BOM.
 fn is_js_space(c: char) -> bool {
-    c.is_whitespace() || c == '\u{feff}'
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+}
+
+/// `s.trim() === ''`.
+pub fn is_blank(s: &str) -> bool {
+    s.chars().all(is_js_space)
 }
 
 /// `^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$` — the decimal literals `Number()` accepts.
@@ -114,9 +120,20 @@ mod tests {
             ("1e", None),
             (".", None),
             ("1_000", None),
+            ("\u{feff}3", Some(3.0)),
+            ("\u{a0}3\u{3000}", Some(3.0)),
+            ("\u{85}3", None),
         ] {
             assert_eq!(number(input), expected, "{input:?}");
         }
+    }
+
+    #[test]
+    fn is_blank_matches_javascript_trim() {
+        assert!(is_blank(""));
+        assert!(is_blank(" \t\u{a0}\u{feff}\u{2028}"));
+        assert!(!is_blank("\u{85}"));
+        assert!(!is_blank(" 0 "));
     }
 
     #[test]
@@ -132,6 +149,8 @@ mod tests {
             ("abc", None),
             ("-", None),
             ("0x10", Some(0)),
+            ("\u{feff}3", Some(3)),
+            ("\u{85}3", None),
         ] {
             assert_eq!(parse_int(input), expected, "{input:?}");
         }

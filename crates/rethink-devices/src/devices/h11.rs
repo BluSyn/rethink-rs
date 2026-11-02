@@ -1034,7 +1034,7 @@ fn on_off(bit: u8) -> &'static str {
 /// `Number(value)` plus `Number.isInteger` in `[min, max]`. Blank input, which `Number()` reads
 /// as 0, is rejected.
 fn parse_integer_in_range(value: &str, min: i64, max: i64) -> Option<u8> {
-    if value.chars().all(|c| c.is_whitespace() || c == '\u{feff}') {
+    if crate::js::is_blank(value) {
         return None;
     }
     let parsed = number(value)?;
