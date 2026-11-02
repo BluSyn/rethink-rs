@@ -4,18 +4,78 @@
 //! amounts, the download slot, the drawer and the two tank-low alerts are
 //! this model's fields. A programme start repeats the last reported dose
 //! levels. `delay_end` is withdrawn; reserve time already carries the minutes.
+//!
+//! The door comes as its own 6-byte `03` record in the same `20 0a` envelope.
+//! `F0 25 03 15` loads a downloadable programme into the slot. It carries only
+//! the base course and settings, so it works without the cloud, and Set
+//! course's Downloaded program position runs whatever the slot holds.
 
 use crate::device_trait::DeviceHandler;
-use crate::devices::y_v8_y___w_b32qeuk::{smart_course_name, Device as V8, Extension};
+use crate::devices::y_v8_y___w_b32qeuk::{
+    smart_course_name, smart_courses, Device as V8, Extension,
+};
 use crate::js::number;
 use crate::washer_common::DOSES;
-use rethink_core::device_base::AabbDeviceCore;
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use rethink_util::sync::Mutex;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 const EXTRA_COURSES: &[(u8, &str)] = &[(0x37, "Dispenser Clean")];
+
+/// The Set course position that runs the programme in the download slot.
+const DOWNLOADED_PROGRAM: &str = "Downloaded program";
+
+/// The LG app's `F0 25` load per downloadable programme: catalogue id; course, soil, spin,
+/// temp, rinse and options; then the detergent and softener levels it sends instead of the
+/// reported doses.
+type Download = (u8, [u8; 6], Option<u8>, Option<u8>);
+
+const DOWNLOADS: &[Download] = &[
+    (0x47, [0x01, 0x03, 0x07, 0x06, 0x02, 0x50], None, None), // Baby Care
+    (0x3a, [0x05, 0x03, 0x02, 0x01, 0x01, 0x00], None, None), // Blanket
+    (0x4d, [0x01, 0x03, 0xff, 0x01, 0x01, 0x00], None, None), // Cold Wash
+    (0x3f, [0x20, 0x03, 0x05, 0x02, 0x01, 0x00], None, None), // Colour Protection
+    (0x79, [0x17, 0x00, 0x01, 0x00, 0x00, 0x00], Some(0), Some(0)), // Drain
+    (0x38, [0x08, 0x03, 0x05, 0x01, 0x01, 0x00], None, None), // Gym Clothes
+    (0x48, [0x2d, 0x03, 0xff, 0x06, 0x01, 0x80], None, None), // Hygiene
+    (0x39, [0x20, 0x03, 0xff, 0x02, 0x01, 0x00], None, None), // Jeans
+    (0x6c, [0x01, 0x03, 0x07, 0x04, 0x01, 0x40], None, None), // Juice and Food Stains
+    (0x34, [0x01, 0x03, 0x09, 0x06, 0x01, 0x40], None, None), // Kids Wear
+    (0x65, [0x1b, 0x03, 0x02, 0x02, 0x01, 0x00], None, None), // Lightly Soiled Items
+    (0x4a, [0x20, 0x03, 0x05, 0x02, 0x01, 0x00], None, None), // Lingerie
+    (0x86, [0x3b, 0x03, 0x07, 0x04, 0x01, 0x00], None, None), // MicroPlastic Care
+    (0x66, [0x01, 0x03, 0xff, 0x04, 0x02, 0x00], None, None), // Minimize Detergent Residue
+    (0x6f, [0x01, 0x03, 0xff, 0x04, 0x01, 0x00], None, None), // Minimize Wrinkles
+    (0x71, [0x30, 0x03, 0x02, 0x01, 0x00, 0x00], Some(0), Some(0)), // Quick Tub Clean
+    (0x37, [0x01, 0x03, 0xff, 0x04, 0x01, 0x00], None, None), // Rainy Season
+    (0x64, [0x0e, 0x03, 0xff, 0x00, 0x01, 0x00], Some(0), None), // Rinse + Spin
+    (0x84, [0x09, 0x03, 0x07, 0x04, 0x01, 0x00], None, None), // Silent Wash
+    (0x3e, [0x0c, 0x03, 0x02, 0x02, 0x01, 0x01], None, None), // Single Garment
+    (0x4c, [0x01, 0x03, 0xff, 0x04, 0x02, 0x10], None, None), // Skin Care
+    (0x6b, [0x01, 0x03, 0x07, 0x06, 0x01, 0x40], None, None), // Sleeve Hems and Collars
+    (0x49, [0x0c, 0x03, 0x02, 0x02, 0x01, 0x01], None, None), // Small Load
+    (0x7a, [0x17, 0x00, 0xff, 0x00, 0x00, 0x00], Some(0), Some(0)), // Spin
+    (0x3b, [0x01, 0x03, 0xff, 0x04, 0x01, 0x00], None, None), // Sweat Stain
+    (0x36, [0x1b, 0x03, 0x02, 0x02, 0x01, 0x00], None, None), // Swimming Wear
+];
+
+fn download(id: u8) -> Option<&'static Download> {
+    DOWNLOADS.iter().find(|d| d.0 == id)
+}
+
+/// The programmes the slot can be loaded with, in the download catalogue's order.
+fn slot_programmes() -> impl Iterator<Item = &'static (u8, &'static str)> {
+    smart_courses()
+        .iter()
+        .filter(|(id, _)| download(*id).is_some())
+}
+
+fn slot_name(id: u8) -> &'static str {
+    slot_programmes()
+        .find(|(c, _)| *c == id)
+        .map_or("None", |(_, n)| *n)
+}
 
 fn dose_name(code: u8) -> &'static str {
     DOSES.get(code as usize).copied().unwrap_or("None")
@@ -27,81 +87,231 @@ fn parse_ez(value: &str) -> Option<u8> {
     (ml.fract() == 0.0 && (9.0..=150.0).contains(&ml)).then_some(ml as u8)
 }
 
-fn extension(_core: Arc<AabbDeviceCore>) -> Extension {
-    let dose = Arc::new(Mutex::new([0u8; 3]));
-    let dose_state = dose.clone();
-    let dose_cmd = dose.clone();
-    Extension {
-        courses: crate::devices::y_v8_y___w_b32qeuk::dial_courses(),
-        extra_courses: EXTRA_COURSES,
-        extra_components: vec![
+#[derive(Clone, Copy, Default)]
+struct State {
+    /// The dispenser settings last reported, which a programme start has to repeat.
+    detergent: u8,
+    softener: u8,
+    dispense_type: u8,
+    /// The programme in the download slot, and whether Set course points at it.
+    slot: u8,
+    run_slot: bool,
+}
+
+#[derive(Default)]
+struct Ezdispense {
+    state: Mutex<State>,
+}
+
+impl Ezdispense {
+    fn state(&self) -> State {
+        *self.state.lock()
+    }
+
+    /// `F0 25 03 15`, then the `F0 26` body with its flags byte left at 00.
+    fn download_command(&self, dl: &Download) -> [u8; 20] {
+        let (id, [course, soil, spin, temp, rinse, options], detergent, softener) = *dl;
+        let state = self.state();
+        [
+            0xf0,
+            0x25,
+            0x03,
+            0x15,
+            course,
+            soil,
+            spin,
+            temp,
+            rinse,
+            0,
+            0,
+            0,
+            0,
+            options,
+            0,
+            0,
+            id,
+            detergent.unwrap_or(state.detergent),
+            softener.unwrap_or(state.softener),
+            0,
+        ]
+    }
+}
+
+impl Extension for Ezdispense {
+    fn extra_courses(&self) -> &'static [(u8, &'static str)] {
+        EXTRA_COURSES
+    }
+
+    fn components(&self, components: &mut Map<String, Value>) {
+        if let Some(Value::Array(options)) = components
+            .get_mut("set_course")
+            .and_then(|c| c.get_mut("options"))
+        {
+            options.push(DOWNLOADED_PROGRAM.into());
+        }
+        let slot: Vec<&str> = slot_programmes().map(|(_, n)| *n).collect();
+        for (key, value) in [
             (
-                "downloaded_program".into(),
+                "downloaded_program",
                 json!({"platform":"sensor","unique_id":"$deviceid-downloaded_program","state_topic":"$this/downloaded_program","name":"Downloaded program","icon":"mdi:download"}),
             ),
             (
-                "detergent".into(),
+                "set_downloaded_program",
+                json!({"platform":"select","unique_id":"$deviceid-set_downloaded_program","state_topic":"$this/set_downloaded_program","command_topic":"$this/set_downloaded_program/set","name":"Set downloaded program","icon":"mdi:download","options":slot,"entity_category":"config"}),
+            ),
+            (
+                "detergent",
                 json!({"platform":"sensor","unique_id":"$deviceid-detergent","state_topic":"$this/detergent","name":"Detergent dose","icon":"mdi:cup","device_class":"enum","options":DOSES}),
             ),
             (
-                "softener".into(),
+                "softener",
                 json!({"platform":"sensor","unique_id":"$deviceid-softener","state_topic":"$this/softener","name":"Softener dose","icon":"mdi:cup-outline","device_class":"enum","options":DOSES}),
             ),
             (
-                "ezdispense_detergent".into(),
+                "ezdispense_detergent",
                 json!({"platform":"number","unique_id":"$deviceid-ezdispense_detergent","state_topic":"$this/ezdispense_detergent","command_topic":"$this/ezdispense_detergent/set","name":"ezDispense detergent amount","icon":"mdi:cup","unit_of_measurement":"mL","min":9,"max":150,"step":1,"mode":"box","entity_category":"config"}),
             ),
             (
-                "ezdispense_softener".into(),
+                "ezdispense_softener",
                 json!({"platform":"number","unique_id":"$deviceid-ezdispense_softener","state_topic":"$this/ezdispense_softener","command_topic":"$this/ezdispense_softener/set","name":"ezDispense softener amount","icon":"mdi:cup-outline","unit_of_measurement":"mL","min":9,"max":150,"step":1,"mode":"box","entity_category":"config"}),
             ),
             (
-                "dispenser_drawer".into(),
+                "door",
+                json!({"platform":"binary_sensor","unique_id":"$deviceid-door","state_topic":"$this/door","name":"Door","device_class":"door"}),
+            ),
+            (
+                "dispenser_drawer",
                 json!({"platform":"binary_sensor","unique_id":"$deviceid-dispenser_drawer","state_topic":"$this/dispenser_drawer","name":"Dispenser drawer","device_class":"opening"}),
             ),
             (
-                "detergent_refill".into(),
+                "detergent_refill",
                 json!({"platform":"binary_sensor","unique_id":"$deviceid-detergent_refill","state_topic":"$this/detergent_refill","name":"Detergent refill","icon":"mdi:cup","device_class":"problem"}),
             ),
             (
-                "softener_refill".into(),
+                "softener_refill",
                 json!({"platform":"binary_sensor","unique_id":"$deviceid-softener_refill","state_topic":"$this/softener_refill","name":"Softener refill","icon":"mdi:cup-outline","device_class":"problem"}),
             ),
-            ("delay_end".into(), json!({"platform":"sensor"})),
-        ],
-        after_state: Some(Box::new(move |core, s| {
-            if s.len() < 38 {
-                return;
+            ("delay_end", json!({"platform":"sensor"})),
+        ] {
+            components.insert(key.into(), value);
+        }
+    }
+
+    fn process_aabb(&self, dev: &V8, inner: &[u8]) {
+        // 20 0a [len16] [seq16] .. .. .. 03 00 06 [6-byte record], on every door open or close.
+        // Its last byte is 00 open, 01 closed; 04 shows up once after power-on, meaning unknown.
+        if inner.len() < 19
+            || inner[0] != 0x20
+            || inner[1] != 0x0a
+            || inner[10] != 0x03
+            || inner[11..13] != [0x00, 0x06]
+        {
+            return;
+        }
+        match inner[18] {
+            0x00 => dev.core().publish_on_off("door", true),
+            0x01 => dev.core().publish_on_off("door", false),
+            _ => {}
+        }
+    }
+
+    fn process_state(&self, dev: &V8, s: &[u8]) {
+        let core = dev.core();
+        core.publish_property("downloaded_program", smart_course_name(s[25]).into());
+        core.publish_property("set_downloaded_program", slot_name(s[25]).into());
+        core.publish_property("detergent", dose_name(s[32]).into());
+        core.publish_property("softener", dose_name(s[33]).into());
+        core.publish_property("ezdispense_detergent", i64::from(s[34]).into());
+        core.publish_property("ezdispense_softener", i64::from(s[35]).into());
+        // [37]: bit 2 drawer open; bits 0 and 1 detergent and softener tank low, the
+        // softener one reading clear while the drawer is open. Bits 6 and 7 pulse, unknown.
+        core.publish_on_off("dispenser_drawer", s[37] & 0x04 != 0);
+        core.publish_on_off("detergent_refill", s[37] & 0x01 != 0);
+        core.publish_on_off("softener_refill", s[37] & 0x02 != 0);
+        let mut state = self.state.lock();
+        state.detergent = s[32];
+        state.softener = s[33];
+        state.dispense_type = s[36];
+        state.slot = s[25];
+    }
+
+    fn course_setting(&self, dev: &V8) -> Option<&'static str> {
+        // also while the washer reports a downloaded programme selected at its own dial
+        let selected = dev.pending().course.is_none() && dev.reported_smart_course() != 0;
+        (self.state().run_slot || selected).then_some(DOWNLOADED_PROGRAM)
+    }
+
+    fn programme_command(&self, dev: &V8, cmd: &mut [u8; 18]) {
+        let state = self.state();
+        cmd[15] = state.detergent;
+        cmd[16] = state.softener;
+        cmd[17] = state.dispense_type;
+        // The slot's programme runs on the settings it was loaded with, unless changed since.
+        let Some(&(_, [course, soil, spin, temp, rinse, options], detergent, softener)) =
+            download(state.slot).filter(|_| state.run_slot)
+        else {
+            return;
+        };
+        let pending = dev.pending();
+        cmd[2] = course;
+        cmd[3] = pending.soil.unwrap_or(soil);
+        cmd[4] = pending.spin.unwrap_or(spin);
+        cmd[5] = pending.temp.unwrap_or(temp);
+        cmd[6] = pending.rinse.unwrap_or(rinse);
+        cmd[11] = pending.options.unwrap_or(options);
+        cmd[14] = state.slot;
+        cmd[15] = detergent.unwrap_or(cmd[15]);
+        cmd[16] = softener.unwrap_or(cmd[16]);
+    }
+
+    fn set_property(&self, dev: &V8, prop: &str, value: &str) -> bool {
+        match prop {
+            "set_downloaded_program" => {
+                let programme = slot_programmes()
+                    .find(|(_, n)| *n == value)
+                    .and_then(|(id, _)| download(*id));
+                if let Some(dl) = programme {
+                    dev.core().send(&self.download_command(dl));
+                    // loading a programme is picking it to run, as the LG app does
+                    self.state.lock().run_slot = true;
+                    dev.drop_pending_course();
+                    dev.publish_settings();
+                }
+                true
             }
-            core.publish_property("downloaded_program", smart_course_name(s[25]).into());
-            core.publish_property("detergent", dose_name(s[32]).into());
-            core.publish_property("softener", dose_name(s[33]).into());
-            core.publish_property("ezdispense_detergent", i64::from(s[34]).into());
-            core.publish_property("ezdispense_softener", i64::from(s[35]).into());
-            // [37]: bit 2 drawer open; bits 0 and 1 detergent and softener tank low, the
-            // softener one reading clear while the drawer is open. Bits 6 and 7 pulse, unknown.
-            core.publish_on_off("dispenser_drawer", s[37] & 0x04 != 0);
-            core.publish_on_off("detergent_refill", s[37] & 0x01 != 0);
-            core.publish_on_off("softener_refill", s[37] & 0x02 != 0);
-            *dose_state.lock() = [s[32], s[33], s[36]];
-        })),
-        patch_command: Some(Box::new(move |cmd| {
-            let d = dose_cmd.lock();
-            cmd[15] = d[0];
-            cmd[16] = d[1];
-            cmd[17] = d[2];
-        })),
-        handle_set: Some(Box::new(move |core, prop, value| {
-            let parameter = match prop {
-                "ezdispense_detergent" => 0x0d,
-                "ezdispense_softener" => 0x0e,
-                _ => return false,
-            };
-            if let Some(ml) = parse_ez(value) {
-                core.send(&[0xf0, 0x24, parameter, 0x01, ml]);
+            // F0 24 <parameter> 01 <value>, in ml per 5 kg of laundry
+            "ezdispense_detergent" | "ezdispense_softener" => {
+                let parameter = if prop == "ezdispense_detergent" {
+                    0x0d
+                } else {
+                    0x0e
+                };
+                if let Some(ml) = parse_ez(value) {
+                    dev.core().send(&[0xf0, 0x24, parameter, 0x01, ml]);
+                }
+                true
             }
-            true
-        })),
+            "set_course" => {
+                let run_slot = value == DOWNLOADED_PROGRAM;
+                self.state.lock().run_slot = run_slot;
+                if run_slot {
+                    dev.drop_pending_course();
+                    dev.publish_settings();
+                }
+                run_slot
+            }
+            "run_programme" => {
+                let state = self.state();
+                // Downloaded program with nothing known in the slot runs nothing.
+                if !state.run_slot || download(state.slot).is_some() {
+                    dev.run_programme();
+                    self.state.lock().run_slot = false;
+                    dev.publish_settings();
+                }
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -110,7 +320,7 @@ pub fn create(
     thinq: Arc<dyn Thinq2Device>,
     meta: Metadata,
 ) -> Arc<dyn DeviceHandler> {
-    V8::with_extension(ha, thinq, meta, extension)
+    V8::with_extension(ha, thinq, meta, Ezdispense::default())
 }
 
 #[cfg(test)]
@@ -165,6 +375,68 @@ mod tests {
     const WRITE_EZDISPENSE_SOFTENER_31: &str = "AA09F0240E011FA0BB";
     // The LG app starting Cotton at 40 °C with Rinse+ on COTTON_DOSED, through the bridge.
     const APP_START_COTTON: &str = "AA16F0260103FF04020000000000030000030100B3BB";
+    // The LG app starting the downloaded Blanket selected in DUVET.
+    const APP_START_BLANKET: &str = "f0260503020101000000000003003a020200";
+    // The LG app starting INITIAL's download slot, Rinse + Spin, with nothing selected.
+    const APP_START_SLOT_RINSE_SPIN: &str = "f0260e03ff00010000000000030064000200";
+    // The F0 25 loads the LG app sent for each downloadable programme, the washer
+    // reporting INITIAL's dose levels.
+    const APP_DOWNLOADS: &[(&str, &str)] = &[
+        ("Baby Care", "f025031501030706020000000050000047020200"),
+        ("Blanket", "f02503150503020101000000000000003a020200"),
+        ("Cold Wash", "f02503150103ff0101000000000000004d020200"),
+        (
+            "Colour Protection",
+            "f02503152003050201000000000000003f020200",
+        ),
+        ("Drain", "f025031517000100000000000000000079000000"),
+        ("Gym Clothes", "f025031508030501010000000000000038020200"),
+        ("Hygiene", "f02503152d03ff06010000000080000048020200"),
+        ("Jeans", "f02503152003ff02010000000000000039020200"),
+        (
+            "Juice and Food Stains",
+            "f02503150103070401000000004000006c020200",
+        ),
+        ("Kids Wear", "f025031501030906010000000040000034020200"),
+        (
+            "Lightly Soiled Items",
+            "f02503151b030202010000000000000065020200",
+        ),
+        ("Lingerie", "f02503152003050201000000000000004a020200"),
+        (
+            "MicroPlastic Care",
+            "f02503153b030704010000000000000086020200",
+        ),
+        (
+            "Minimize Detergent Residue",
+            "f02503150103ff04020000000000000066020200",
+        ),
+        (
+            "Minimize Wrinkles",
+            "f02503150103ff0401000000000000006f020200",
+        ),
+        (
+            "Quick Tub Clean",
+            "f025031530030201000000000000000071000000",
+        ),
+        ("Rainy Season", "f02503150103ff04010000000000000037020200"),
+        ("Rinse + Spin", "f02503150e03ff00010000000000000064000200"),
+        ("Silent Wash", "f025031509030704010000000000000084020200"),
+        ("Single Garment", "f02503150c03020201000000000100003e020200"),
+        ("Skin Care", "f02503150103ff0402000000001000004c020200"),
+        (
+            "Sleeve Hems and Collars",
+            "f02503150103070601000000004000006b020200",
+        ),
+        ("Small Load", "f02503150c030202010000000001000049020200"),
+        ("Spin", "f02503151700ff0000000000000000007a000000"),
+        ("Sweat Stain", "f02503150103ff0401000000000000003b020200"),
+        ("Swimming Wear", "f02503151b030202010000000000000036020200"),
+    ];
+    // Door pushes from a Y_VB_Y___W.B32QEUK-FL: closed, open, and the 04 seen after power-on.
+    const DOOR_CLOSED: &str = "AAFF200A00180044B4000101030006100A01021001723CBB";
+    const DOOR_OPEN: &str = "AAFF200A00180044B6000101030006100A01021000E8DBBB";
+    const DOOR_UNKNOWN: &str = "AAFF200A0018004311000101030006110A01021104FC08BB";
 
     fn meta() -> Metadata {
         Metadata::new("Y_VB_Y___W.B32QEUK", "Y_VB_Y___W.B32QEUK", "2.11.207")
@@ -205,6 +477,14 @@ mod tests {
 
     fn outbox_hex(thinq: &MockThinq2Device) -> Vec<String> {
         thinq.outbox().iter().map(|p| hex_encode(p)).collect()
+    }
+
+    fn inner_hex(thinq: &MockThinq2Device) -> Vec<String> {
+        thinq
+            .outbox()
+            .iter()
+            .map(|p| hex_encode(&p[2..p.len() - 2]).to_lowercase())
+            .collect()
     }
 
     /// Rewrites one byte of a single-record (0xeb) status frame, fixing up its CRC16.
@@ -577,6 +857,49 @@ mod tests {
     }
 
     #[test]
+    fn programme_an_untouched_start_runs_the_selected_downloaded_course() {
+        let (_, thinq, dev) = feed(&[DUVET]);
+        thinq.reset_recorder();
+
+        dev.set_property("run_programme", "");
+
+        assert_eq!(inner_hex(&thinq)[0], APP_START_BLANKET);
+    }
+
+    #[test]
+    fn programme_downloaded_program_runs_the_programme_in_the_slot() {
+        for (frame, command) in [
+            (INITIAL, APP_START_SLOT_RINSE_SPIN),
+            (DUVET, APP_START_BLANKET),
+        ] {
+            let (_, thinq, dev) = feed(&[frame]);
+            thinq.reset_recorder();
+
+            dev.set_property("set_course", "Downloaded program");
+            dev.set_property("run_programme", "");
+
+            assert_eq!(inner_hex(&thinq)[0], command);
+        }
+    }
+
+    #[test]
+    fn programme_set_course_shows_downloaded_program_while_the_washer_has_it_selected() {
+        let (ha, _, _) = feed(&[DUVET]);
+        expect(&ha, "set_course", "Downloaded program");
+    }
+
+    #[test]
+    fn programme_picking_a_course_drops_the_downloaded_course() {
+        let (_, thinq, dev) = feed(&[DUVET]);
+        thinq.reset_recorder();
+
+        dev.set_property("set_course", "Duvet");
+        dev.set_property("run_programme", "");
+
+        assert_eq!(thinq.outbox()[0][2 + 14], 0);
+    }
+
+    #[test]
     fn programme_the_dispense_type_is_repeated_as_reported() {
         let (_, thinq, dev) = make();
         // EZD_DETERGENT_MAIN
@@ -597,6 +920,46 @@ mod tests {
         let (_, thinq, dev) = make();
         dev.set_property("does-not-exist", "whatever");
         assert!(thinq.outbox().is_empty());
+    }
+
+    fn load(programme: &str) -> Vec<String> {
+        let (_, thinq, dev) = feed(&[INITIAL]);
+        thinq.reset_recorder();
+        dev.set_property("set_downloaded_program", programme);
+        inner_hex(&thinq)
+    }
+
+    #[test]
+    fn download_slot_loading_each_programme_sends_what_the_lg_app_sends() {
+        for (programme, command) in APP_DOWNLOADS {
+            assert_eq!(load(programme), [*command], "loading {programme}");
+        }
+    }
+
+    #[test]
+    fn download_slot_loading_a_programme_sets_set_course_to_downloaded_program() {
+        let (ha, _, dev) = feed(&[INITIAL]);
+        dev.set_property("set_course", "Cotton");
+        dev.set_property("set_downloaded_program", "Blanket");
+        expect(&ha, "set_course", "Downloaded program");
+    }
+
+    #[test]
+    fn download_slot_a_programme_without_a_captured_load_command_sends_nothing() {
+        assert!(load("School Uniform").is_empty());
+    }
+
+    #[test]
+    fn door_record_publishes_open_closed_from_the_03_record() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(DOOR_CLOSED));
+        expect(&ha, "door", "OFF");
+        thinq.emit_data(&hex_decode(DOOR_OPEN));
+        expect(&ha, "door", "ON");
+        thinq.emit_data(&hex_decode(DOOR_UNKNOWN)); // ignored
+        expect(&ha, "door", "ON");
+        thinq.emit_data(&hex_decode(DOOR_CLOSED));
+        expect(&ha, "door", "OFF");
     }
 
     #[test]

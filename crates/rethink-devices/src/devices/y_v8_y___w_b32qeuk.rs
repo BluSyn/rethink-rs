@@ -102,46 +102,62 @@ struct Settings {
     /// Hours as `Number()` parsed them: 4.5 is kept and published, and sent as 4.
     delay_end: f64,
     options: u8,
+    /// The selected downloaded course, which a start repeats unless a course was picked.
+    smart_course: u8,
 }
 
+/// Settings chosen but not yet run, as wire codes. Cleared once a programme runs.
 #[derive(Clone, Copy, Default)]
-struct Pending {
-    course: Option<u8>,
-    soil: Option<u8>,
-    spin: Option<u8>,
-    temp: Option<u8>,
-    rinse: Option<u8>,
-    delay_end: Option<f64>,
-    options: Option<u8>,
+pub(crate) struct Pending {
+    pub course: Option<u8>,
+    pub soil: Option<u8>,
+    pub spin: Option<u8>,
+    pub temp: Option<u8>,
+    pub rinse: Option<u8>,
+    pub delay_end: Option<f64>,
+    pub options: Option<u8>,
 }
 
-pub(crate) struct Extension {
-    pub courses: &'static [(u8, &'static str)],
-    pub extra_courses: &'static [(u8, &'static str)],
-    pub extra_components: Vec<(String, Value)>,
-    pub after_state: Option<Box<dyn Fn(&AabbDeviceCore, &[u8]) + Send + Sync>>,
-    pub patch_command: Option<Box<dyn Fn(&mut [u8; 18]) + Send + Sync>>,
-    pub handle_set: Option<Box<dyn Fn(&AabbDeviceCore, &str, &str) -> bool + Send + Sync>>,
-}
+/// What a sibling model changes, in place of upstream's subclass overrides. Each hook
+/// defaults to this model's own behaviour.
+pub(crate) trait Extension: Send + Sync + 'static {
+    /// Courses beyond this dial's, decoded and offered by Set course.
+    fn extra_courses(&self) -> &'static [(u8, &'static str)] {
+        &[]
+    }
 
-impl Extension {
-    fn base() -> Self {
-        Self {
-            courses: COURSES,
-            extra_courses: &[],
-            extra_components: Vec::new(),
-            after_state: None,
-            patch_command: None,
-            handle_set: None,
-        }
+    /// Adds, replaces or tombstones discovery components.
+    fn components(&self, _components: &mut Map<String, Value>) {}
+
+    /// Every AABB payload, after any status record in it has been handled.
+    fn process_aabb(&self, _dev: &Device, _inner: &[u8]) {}
+
+    /// A status record, after this model's own fields and settings are published.
+    fn process_state(&self, _dev: &Device, _s: &[u8]) {}
+
+    /// The Set course label, in place of the chosen or reported course's.
+    fn course_setting(&self, _dev: &Device) -> Option<&'static str> {
+        None
+    }
+
+    /// Edits a Run programme frame before it is sent.
+    fn programme_command(&self, _dev: &Device, _cmd: &mut [u8; 18]) {}
+
+    /// Sees every write first. Returns true when this model must not handle it too.
+    fn set_property(&self, _dev: &Device, _prop: &str, _value: &str) -> bool {
+        false
     }
 }
+
+struct Base;
+
+impl Extension for Base {}
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     reported: Mutex<Settings>,
     pending: Mutex<Pending>,
-    ext: Extension,
+    ext: Box<dyn Extension>,
 }
 
 impl Device {
@@ -150,20 +166,16 @@ impl Device {
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
     ) -> Arc<Self> {
-        Self::with_extension(ha, thinq, meta, |_| Extension::base())
+        Self::with_extension(ha, thinq, meta, Base)
     }
 
-    pub(crate) fn with_extension<F>(
+    pub(crate) fn with_extension(
         ha: Arc<dyn HaConnection>,
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
-        build: F,
-    ) -> Arc<Self>
-    where
-        F: FnOnce(Arc<AabbDeviceCore>) -> Extension,
-    {
+        ext: impl Extension,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
-        let ext = build(core.clone());
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
         base.components = components(&ext);
         core.set_config(base);
@@ -171,7 +183,7 @@ impl Device {
             core: core.clone(),
             reported: Mutex::new(Settings::default()),
             pending: Mutex::new(Pending::default()),
-            ext,
+            ext: Box::new(ext),
         });
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
@@ -179,28 +191,37 @@ impl Device {
                 if let Some(rec) = process_enveloped_status(inner, CLASS_BYTE, RECORD_LEN) {
                     dev.process_state(rec);
                 }
+                dev.ext.process_aabb(&dev, inner);
             }
         }));
         this
     }
 
+    pub(crate) fn core(&self) -> &AabbDeviceCore {
+        &self.core
+    }
+
+    pub(crate) fn pending(&self) -> Pending {
+        *self.pending.lock()
+    }
+
+    pub(crate) fn drop_pending_course(&self) {
+        self.pending.lock().course = None;
+    }
+
+    fn courses(&self) -> impl Iterator<Item = &'static (u8, &'static str)> {
+        COURSES.iter().chain(self.ext.extra_courses())
+    }
+
     fn course_name(&self, code: u8) -> &'static str {
-        self.ext
-            .courses
-            .iter()
-            .chain(self.ext.extra_courses.iter())
+        self.courses()
             .find(|(c, _)| *c == code)
             .map(|(_, n)| *n)
             .unwrap_or("None")
     }
 
     fn course_code(&self, name: &str) -> Option<u8> {
-        self.ext
-            .courses
-            .iter()
-            .chain(self.ext.extra_courses.iter())
-            .find(|(_, n)| *n == name)
-            .map(|(c, _)| *c)
+        self.courses().find(|(_, n)| *n == name).map(|(c, _)| *c)
     }
 
     fn process_state(&self, s: &[u8]) {
@@ -275,11 +296,14 @@ impl Device {
             rinse: s[12],
             delay_end: f64::from(s[14]),
             options,
+            smart_course: s[22],
         };
         self.publish_settings();
-        if let Some(hook) = &self.ext.after_state {
-            hook(&self.core, s);
-        }
+        self.ext.process_state(self, s);
+    }
+
+    pub(crate) fn reported_smart_course(&self) -> u8 {
+        self.reported.lock().smart_course
     }
 
     fn effective(&self) -> Settings {
@@ -293,13 +317,22 @@ impl Device {
             rinse: pending.rinse.unwrap_or(reported.rinse),
             delay_end: pending.delay_end.unwrap_or(reported.delay_end),
             options: pending.options.unwrap_or(reported.options),
+            smart_course: if pending.course.is_some() {
+                0
+            } else {
+                reported.smart_course
+            },
         }
     }
 
-    fn publish_settings(&self) {
+    /// Republishes every set_* entity, after each state record and each write.
+    pub(crate) fn publish_settings(&self) {
         let s = self.effective();
-        self.core
-            .publish_property("set_course", self.course_name(s.course).into());
+        let course = self
+            .ext
+            .course_setting(self)
+            .unwrap_or_else(|| self.course_name(s.course));
+        self.core.publish_property("set_course", course.into());
         self.core.publish_property(
             "set_temp",
             temperature_value(s.temp as usize).unwrap_or("None").into(),
@@ -330,6 +363,8 @@ impl Device {
             .publish_on_off("set_steam", s.options & OPT_STEAM != 0);
     }
 
+    /// `F0 26 <course> <soil> <spin> <temp> <rinse> <dry> <reserve h> <reserve min> <load>
+    /// <options> <flags> 00 <downloaded course> 00 00 00`, as the LG app sends it.
     fn programme_command(&self) -> [u8; 18] {
         let s = self.effective();
         let mut cmd = [
@@ -347,15 +382,20 @@ impl Device {
             s.options,
             0x03,
             0,
-            0,
+            s.smart_course,
             0,
             0,
             0,
         ];
-        if let Some(patch) = &self.ext.patch_command {
-            patch(&mut cmd);
-        }
+        self.ext.programme_command(self, &mut cmd);
         cmd
+    }
+
+    /// Sends the programme and drops the pending choices: the appliance is the authority again.
+    pub(crate) fn run_programme(&self) {
+        let cmd = self.programme_command();
+        self.pending.lock().clear_choices();
+        self.core.send(&cmd);
     }
 
     fn set_option(&self, bit: u8, on: bool) {
@@ -365,21 +405,12 @@ impl Device {
     }
 
     pub fn set_property(&self, prop: &str, mqtt_value: &str) {
-        if self
-            .ext
-            .handle_set
-            .as_ref()
-            .is_some_and(|hook| hook(&self.core, prop, mqtt_value))
-        {
+        if self.ext.set_property(self, prop, mqtt_value) {
             return;
         }
         set_power_start_pause(&self.core, prop, mqtt_value);
         match prop {
-            "run_programme" => {
-                let cmd = self.programme_command();
-                self.pending.lock().clear_choices();
-                self.core.send(&cmd);
-            }
+            "run_programme" => self.run_programme(),
             "set_course" => {
                 if let Some(code) = self.course_code(mqtt_value) {
                     self.pending.lock().course = Some(code);
@@ -462,8 +493,8 @@ pub fn create(
     Device::new(ha, thinq, meta)
 }
 
-pub(crate) fn dial_courses() -> &'static [(u8, &'static str)] {
-    COURSES
+pub(crate) fn smart_courses() -> &'static [(u8, &'static str)] {
+    SMART
 }
 
 pub(crate) fn smart_course_name(code: u8) -> &'static str {
@@ -498,11 +529,10 @@ fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
     table.iter().map(|(_, n)| *n).collect()
 }
 
-fn components(ext: &Extension) -> std::collections::HashMap<String, Value> {
-    let course_names: Vec<&str> = ext
-        .courses
+fn components(ext: &dyn Extension) -> std::collections::HashMap<String, Value> {
+    let course_names: Vec<&str> = COURSES
         .iter()
-        .chain(ext.extra_courses.iter())
+        .chain(ext.extra_courses())
         .map(|(_, n)| *n)
         .collect();
     let mut c = Map::new();
@@ -607,32 +637,32 @@ fn components(ext: &Extension) -> std::collections::HashMap<String, Value> {
     add(
         &mut c,
         "set_course",
-        json!({"platform":"select","unique_id":"$deviceid-set_course","state_topic":"$this/set_course","command_topic":"$this/set_course/set","name":"Set course","icon":"mdi:tune-vertical","options":course_names}),
+        json!({"platform":"select","unique_id":"$deviceid-set_course","state_topic":"$this/set_course","command_topic":"$this/set_course/set","name":"Set course","icon":"mdi:tune-vertical","options":course_names,"entity_category":"config"}),
     );
     add(
         &mut c,
         "set_temp",
-        json!({"platform":"select","unique_id":"$deviceid-set_temp","state_topic":"$this/set_temp","command_topic":"$this/set_temp/set","name":"Set temperature","icon":"mdi:thermometer","options":TEMPERATURE_LABELS}),
+        json!({"platform":"select","unique_id":"$deviceid-set_temp","state_topic":"$this/set_temp","command_topic":"$this/set_temp/set","name":"Set temperature","icon":"mdi:thermometer","options":TEMPERATURE_LABELS,"entity_category":"config"}),
     );
     add(
         &mut c,
         "set_spin",
-        json!({"platform":"select","unique_id":"$deviceid-set_spin","state_topic":"$this/set_spin","command_topic":"$this/set_spin/set","name":"Set spin","icon":"mdi:autorenew","options":spin_options()}),
+        json!({"platform":"select","unique_id":"$deviceid-set_spin","state_topic":"$this/set_spin","command_topic":"$this/set_spin/set","name":"Set spin","icon":"mdi:autorenew","options":spin_options(),"entity_category":"config"}),
     );
     add(
         &mut c,
         "set_rinse",
-        json!({"platform":"select","unique_id":"$deviceid-set_rinse","state_topic":"$this/set_rinse","command_topic":"$this/set_rinse/set","name":"Set rinse","icon":"mdi:water","options":RINSES}),
+        json!({"platform":"select","unique_id":"$deviceid-set_rinse","state_topic":"$this/set_rinse","command_topic":"$this/set_rinse/set","name":"Set rinse","icon":"mdi:water","options":RINSES,"entity_category":"config"}),
     );
     add(
         &mut c,
         "set_soil",
-        json!({"platform":"select","unique_id":"$deviceid-set_soil","state_topic":"$this/set_soil","command_topic":"$this/set_soil/set","name":"Set soil level","icon":"mdi:washing-machine","options":SOIL_LABELS}),
+        json!({"platform":"select","unique_id":"$deviceid-set_soil","state_topic":"$this/set_soil","command_topic":"$this/set_soil/set","name":"Set soil level","icon":"mdi:washing-machine","options":SOIL_LABELS,"entity_category":"config"}),
     );
     add(
         &mut c,
         "set_delay_end",
-        json!({"platform":"number","unique_id":"$deviceid-set_delay_end","state_topic":"$this/set_delay_end","command_topic":"$this/set_delay_end/set","name":"Set delayed end","icon":"mdi:timer-sand","unit_of_measurement":"h","min":0,"max":19,"step":1}),
+        json!({"platform":"number","unique_id":"$deviceid-set_delay_end","state_topic":"$this/set_delay_end","command_topic":"$this/set_delay_end/set","name":"Set delayed end","icon":"mdi:timer-sand","unit_of_measurement":"h","min":0,"max":19,"step":1,"entity_category":"config"}),
     );
     add(
         &mut c,
@@ -642,32 +672,32 @@ fn components(ext: &Extension) -> std::collections::HashMap<String, Value> {
     add(
         &mut c,
         "set_steam",
-        json!({"platform":"switch","unique_id":"$deviceid-set_steam","state_topic":"$this/set_steam","command_topic":"$this/set_steam/set","name":"Set steam","icon":"mdi:kettle-steam"}),
+        json!({"platform":"switch","unique_id":"$deviceid-set_steam","state_topic":"$this/set_steam","command_topic":"$this/set_steam/set","name":"Set steam","icon":"mdi:kettle-steam","entity_category":"config"}),
     );
     add(
         &mut c,
         "set_prewash",
-        json!({"platform":"switch","unique_id":"$deviceid-set_prewash","state_topic":"$this/set_prewash","command_topic":"$this/set_prewash/set","name":"Set pre-wash","icon":"mdi:water-sync"}),
+        json!({"platform":"switch","unique_id":"$deviceid-set_prewash","state_topic":"$this/set_prewash","command_topic":"$this/set_prewash/set","name":"Set pre-wash","icon":"mdi:water-sync","entity_category":"config"}),
     );
     add(
         &mut c,
         "set_turbowash",
-        json!({"platform":"switch","unique_id":"$deviceid-set_turbowash","state_topic":"$this/set_turbowash","command_topic":"$this/set_turbowash/set","name":"Set TurboWash","icon":"mdi:rocket-launch"}),
+        json!({"platform":"switch","unique_id":"$deviceid-set_turbowash","state_topic":"$this/set_turbowash","command_topic":"$this/set_turbowash/set","name":"Set TurboWash","icon":"mdi:rocket-launch","entity_category":"config"}),
     );
     add(
         &mut c,
         "set_crease_care",
-        json!({"platform":"switch","unique_id":"$deviceid-set_crease_care","state_topic":"$this/set_crease_care","command_topic":"$this/set_crease_care/set","name":"Set crease care","icon":"mdi:iron-outline"}),
+        json!({"platform":"switch","unique_id":"$deviceid-set_crease_care","state_topic":"$this/set_crease_care","command_topic":"$this/set_crease_care/set","name":"Set crease care","icon":"mdi:iron-outline","entity_category":"config"}),
     );
     add(
         &mut c,
         "set_steam_softener",
-        json!({"platform":"switch","unique_id":"$deviceid-set_steam_softener","state_topic":"$this/set_steam_softener","command_topic":"$this/set_steam_softener/set","name":"Set steam softener","icon":"mdi:kettle-steam-outline"}),
+        json!({"platform":"switch","unique_id":"$deviceid-set_steam_softener","state_topic":"$this/set_steam_softener","command_topic":"$this/set_steam_softener/set","name":"Set steam softener","icon":"mdi:kettle-steam-outline","entity_category":"config"}),
     );
     add(
         &mut c,
         "set_medic_rinse",
-        json!({"platform":"switch","unique_id":"$deviceid-set_medic_rinse","state_topic":"$this/set_medic_rinse","command_topic":"$this/set_medic_rinse/set","name":"Set medic rinse","icon":"mdi:water-check"}),
+        json!({"platform":"switch","unique_id":"$deviceid-set_medic_rinse","state_topic":"$this/set_medic_rinse","command_topic":"$this/set_medic_rinse/set","name":"Set medic rinse","icon":"mdi:water-check","entity_category":"config"}),
     );
     add(
         &mut c,
@@ -714,9 +744,7 @@ fn components(ext: &Extension) -> std::collections::HashMap<String, Value> {
         "ai_dd",
         json!({"platform":"binary_sensor","unique_id":"$deviceid-ai_dd","state_topic":"$this/ai_dd","name":"AI DD","icon":"mdi:brain"}),
     );
-    for (key, value) in &ext.extra_components {
-        c.insert(key.clone(), value.clone());
-    }
+    ext.components(&mut c);
     c.into_iter().collect()
 }
 
@@ -1193,6 +1221,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn set_entities_are_configuration_and_run_programme_is_not() {
+        let (ha, _, _) = make();
+        let components = components(&ha);
+        let category = |name: &str| components[name].get("entity_category").cloned();
+        let set: Vec<&String> = components
+            .keys()
+            .filter(|k| k.starts_with("set_"))
+            .collect();
+        assert_eq!(set.len(), 12);
+        for name in set {
+            assert_eq!(category(name), Some(json!("config")), "{name}");
+        }
+        assert_eq!(category("run_programme"), None);
     }
 
     #[test]

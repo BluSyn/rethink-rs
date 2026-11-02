@@ -9,10 +9,9 @@
 //! Port of upstream PR #265.
 
 use crate::device_trait::DeviceHandler;
-use crate::devices::y_v8_y___w_b32qeuk::{dial_courses, Device as V8, Extension};
-use rethink_core::device_base::AabbDeviceCore;
+use crate::devices::y_v8_y___w_b32qeuk::{Device as V8, Extension};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 /// Withheld controls and their platforms. HA removes a component whose discovery
@@ -29,19 +28,17 @@ const WITHHELD: &[(&str, &str)] = &[
     ("set_medic_rinse", "switch"),
 ];
 
-fn extension(_core: Arc<AabbDeviceCore>) -> Extension {
-    Extension {
-        courses: dial_courses(),
-        extra_courses: &[],
-        extra_components: WITHHELD
-            .iter()
-            .map(|(key, platform)| (key.to_string(), json!({ "platform": platform })))
-            .collect(),
-        after_state: None,
-        patch_command: None,
-        handle_set: Some(Box::new(|_, prop, _| {
-            WITHHELD.iter().any(|(key, _)| *key == prop)
-        })),
+struct Withheld;
+
+impl Extension for Withheld {
+    fn components(&self, components: &mut Map<String, Value>) {
+        for (key, platform) in WITHHELD {
+            components.insert(key.to_string(), json!({ "platform": platform }));
+        }
+    }
+
+    fn set_property(&self, _dev: &V8, prop: &str, _value: &str) -> bool {
+        WITHHELD.iter().any(|(key, _)| *key == prop)
     }
 }
 
@@ -50,7 +47,7 @@ pub fn create(
     thinq: Arc<dyn Thinq2Device>,
     meta: Metadata,
 ) -> Arc<dyn DeviceHandler> {
-    V8::with_extension(ha, thinq, meta, extension)
+    V8::with_extension(ha, thinq, meta, Withheld)
 }
 
 #[cfg(test)]
