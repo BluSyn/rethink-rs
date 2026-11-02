@@ -2,7 +2,7 @@
 
 use crate::devmgr::{ConnectedDevice, Platform};
 use rethink_util::sync::Mutex;
-use rethink_core::ha::HaConnection;
+use rethink_core::ha::{DeviceDiscovery, HaConnection, PropertyValue};
 use rethink_core::thinq::{Thinq1Device, Thinq2Device};
 use rethink_devices::device_trait::DeviceHandler;
 use rethink_devices::registry::{lookup_t1, lookup_t2};
@@ -14,6 +14,58 @@ use std::time::Duration;
 /// before the old socket has closed; publishing `offline` for the dying session makes Home Assistant
 /// flip on/unavailable at the same timestamp (e.g. a washer every couple of minutes mid-cycle).
 pub const AVAILABILITY_GRACE: Duration = Duration::from_secs(5);
+
+/// Adds the Wi-Fi signal and network sensors (the official app shows both on the device info page)
+/// to a ThinQ2 handler's discovery document, so the device handlers need no changes.
+struct WifiDiagnostics {
+    inner: Arc<dyn HaConnection>,
+    ssid: Option<String>,
+}
+
+impl HaConnection for WifiDiagnostics {
+    fn publish_config(&self, id: &str, config: &DeviceDiscovery) {
+        let mut config = config.clone();
+        config.components.insert(
+            "wifirssi".into(),
+            serde_json::json!({
+                "platform": "sensor",
+                "unique_id": "$deviceid-wifirssi",
+                "state_topic": "$this/wifirssi",
+                "name": "Wi-Fi signal",
+                "device_class": "signal_strength",
+                "unit_of_measurement": "dBm",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            }),
+        );
+        if self.ssid.is_some() {
+            config.components.insert(
+                "wifissid".into(),
+                serde_json::json!({
+                    "platform": "sensor",
+                    "unique_id": "$deviceid-wifissid",
+                    "state_topic": "$this/wifissid",
+                    "name": "Wi-Fi network",
+                    "icon": "mdi:wifi",
+                    "entity_category": "diagnostic",
+                }),
+            );
+        }
+        self.inner.publish_config(id, &config);
+        if let Some(ssid) = &self.ssid {
+            self.inner.publish_property(id, "wifissid", ssid.as_str().into());
+        }
+    }
+    fn publish_property(&self, id: &str, property: &str, value: PropertyValue) {
+        self.inner.publish_property(id, property, value);
+    }
+    fn publish_event(&self, id: &str, topic_suffix: &str, payload: &str) {
+        self.inner.publish_event(id, topic_suffix, payload);
+    }
+    fn is_connected(&self) -> bool {
+        self.inner.is_connected()
+    }
+}
 
 /// Adapter: ConnectedDevice → Thinq2Device trait.
 struct T2Adapter {
@@ -227,8 +279,25 @@ impl HaBridge {
                     self.t2_adapters
                         .lock()
                         .insert(thinqdev.id.clone(), adapter.clone());
+                    let ha: Arc<dyn HaConnection> = Arc::new(WifiDiagnostics {
+                        inner: self.ha.clone(),
+                        ssid: thinqdev.home_ap_ssid(),
+                    });
+                    let (id, rssi_ha) = (thinqdev.id.clone(), ha.clone());
+                    let last_rssi = Mutex::new(None::<f64>);
+                    thinqdev.add_rssi_handler(move |rssi| {
+                        if last_rssi.lock().replace(rssi) == Some(rssi) {
+                            return;
+                        }
+                        let value = if rssi.fract() == 0.0 {
+                            PropertyValue::Int(rssi as i64)
+                        } else {
+                            PropertyValue::Num(rssi)
+                        };
+                        rssi_ha.publish_property(&id, "wifirssi", value);
+                    });
                     Some(factory(
-                        self.ha.clone(),
+                        ha,
                         adapter as Arc<dyn Thinq2Device>,
                         thinqdev.meta.clone(),
                     ))
@@ -412,5 +481,74 @@ mod tests {
         assert_eq!(log.entries(), ["online"]);
         tokio::time::sleep(PAST_GRACE).await;
         assert_eq!(log.entries(), ["online", "offline"]);
+    }
+
+    fn wifi_components(ha: &rethink_core::MockHaConnection) -> Vec<String> {
+        let mut keys: Vec<String> = ha
+            .device("w")
+            .and_then(|d| d.config)
+            .map(|c| c.components.into_keys().filter(|k| k.starts_with("wifi")).collect())
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn thinq2_handlers_get_wifi_signal_and_network_sensors() {
+        let ha = rethink_core::MockHaConnection::new();
+        let bridge = HaBridge::new(ha.clone());
+        let dev = washer("w");
+        dev.set_deploy(serde_json::json!({"data": {"appInfo": {"HomeApSsid": "HomeNet"}}}));
+        bridge.new_device(dev.clone());
+        assert_eq!(wifi_components(&ha), ["wifirssi", "wifissid"]);
+        let config = ha.device("w").unwrap().config.unwrap();
+        assert_eq!(config.components["wifirssi"]["device_class"], "signal_strength");
+        assert_eq!(config.components["wifirssi"]["unit_of_measurement"], "dBm");
+        assert_eq!(config.components["wifissid"]["entity_category"], "diagnostic");
+        let prop = |name: &str| ha.device("w").unwrap().properties.get(name).cloned();
+        assert_eq!(prop("wifissid"), Some("HomeNet".into()));
+        dev.notify_rssi(-60.0);
+        assert_eq!(prop("wifirssi"), Some(PropertyValue::Int(-60)));
+        // A republish keeps the sensors; repeated readings are not re-sent.
+        bridge.republish_all();
+        assert_eq!(wifi_components(&ha), ["wifirssi", "wifissid"]);
+    }
+
+    #[test]
+    fn without_deploy_info_only_the_signal_sensor_is_added() {
+        let ha = rethink_core::MockHaConnection::new();
+        let bridge = HaBridge::new(ha.clone());
+        bridge.new_device(washer("w"));
+        assert_eq!(wifi_components(&ha), ["wifirssi"]);
+        assert!(ha.device("w").unwrap().properties.get("wifissid").is_none());
+    }
+
+    #[test]
+    fn repeated_rssi_readings_are_published_once() {
+        let log = Arc::new(RssiLog::default());
+        let bridge = HaBridge::new(log.clone());
+        let dev = washer("w");
+        bridge.new_device(dev.clone());
+        for rssi in [-60.0, -60.0, -61.5, -61.5, -60.0] {
+            dev.notify_rssi(rssi);
+        }
+        assert_eq!(*log.0.lock(), ["-60", "-61.5", "-60"]);
+    }
+
+    /// Records every wifirssi payload, in order.
+    #[derive(Default)]
+    struct RssiLog(Mutex<Vec<String>>);
+
+    impl HaConnection for RssiLog {
+        fn publish_config(&self, _id: &str, _config: &DeviceDiscovery) {}
+        fn publish_property(&self, _id: &str, property: &str, value: PropertyValue) {
+            if property == "wifirssi" {
+                self.0.lock().push(value.as_string());
+            }
+        }
+        fn publish_event(&self, _id: &str, _topic_suffix: &str, _payload: &str) {}
+        fn is_connected(&self) -> bool {
+            true
+        }
     }
 }

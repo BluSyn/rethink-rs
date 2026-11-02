@@ -105,6 +105,12 @@ impl DeviceAcceptor {
             .map(str::to_string)
         {
             if topic_ends_with_device("clip/message/devices/", &topic, &provisioned) {
+                if let Some(rssi) = payload.get("rssi").and_then(|v| v.as_f64()) {
+                    let dev = self.devices.lock().get(&client_id).cloned();
+                    if let Some(dev) = dev {
+                        dev.notify_rssi(rssi);
+                    }
+                }
                 if cmd == "device_packet" {
                     if let Some(dev) = self.devices.lock().get(&client_id).cloned() {
                         if self.manager.get(&provisioned).is_none() {
@@ -611,6 +617,23 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         acc.handle_mqtt("clip/message/devices/some-other-device", &packet, 9);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn message_envelope_rssi_reaches_the_device() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "11111111-2222-3333-4444-555555555555";
+        acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &deploy_json(did), 9);
+        let dev = manager.get(did).expect("registered");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        dev.add_rssi_handler(move |rssi| s.lock().push(rssi));
+        let topic = format!("clip/message/devices/{did}");
+        let status = serde_json::json!({"did": did, "cmd": "device_packet", "data": "AA04BB", "rssi": -60});
+        acc.handle_mqtt(&topic, &status, 9);
+        acc.handle_mqtt(&topic, &serde_json::json!({"did": did, "cmd": "device_packet", "data": "AA04BB"}), 9);
+        acc.handle_mqtt("clip/message/devices/some-other-device", &status, 9);
+        assert_eq!(*seen.lock(), vec![-60.0]);
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct ConnectedDevice {
     pub on_close: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
     pub on_data: Mutex<Vec<Box<dyn Fn(&[u8]) + Send + Sync>>>,
     pub on_send: Mutex<Vec<Box<dyn Fn(SendToDevice) + Send + Sync>>>,
+    /// Wi-Fi signal in dBm, carried in the envelope of every ThinQ2 message.
+    pub on_rssi: Mutex<Vec<Box<dyn Fn(f64) + Send + Sync>>>,
     /// The deploy/preDeploy message that registered this appliance.
     pub deploy: Mutex<Option<serde_json::Value>>,
     /// A rethink handler is assigned. Never cleared; the connection does not outlive the handler.
@@ -62,6 +64,7 @@ impl ConnectedDevice {
             on_close: Mutex::new(Vec::new()),
             on_data: Mutex::new(Vec::new()),
             on_send: Mutex::new(Vec::new()),
+            on_rssi: Mutex::new(Vec::new()),
             deploy: Mutex::new(None),
             managed: AtomicBool::new(false),
         })
@@ -87,6 +90,26 @@ impl ConnectedDevice {
         for h in self.on_data.lock().iter() {
             h(buf);
         }
+    }
+
+    pub fn notify_rssi(&self, rssi: f64) {
+        for h in self.on_rssi.lock().iter() {
+            h(rssi);
+        }
+    }
+
+    pub fn add_rssi_handler<F: Fn(f64) + Send + Sync + 'static>(&self, f: F) {
+        self.on_rssi.lock().push(Box::new(f));
+    }
+
+    /// The SSID the appliance reported joining, from its deploy message.
+    pub fn home_ap_ssid(&self) -> Option<String> {
+        self.deploy
+            .lock()
+            .as_ref()?
+            .pointer("/data/appInfo/HomeApSsid")?
+            .as_str()
+            .map(str::to_string)
     }
 
     pub fn notify_send(&self, msg: SendToDevice) {
