@@ -38,11 +38,11 @@ An alias is the same handler, not a second implementation. Where one alias drops
 
 | ThinQ modelId | Sold as | This handler |
 | --- | --- | --- |
-| `RAC_056905_WW`, `RAC_0B0001_WW` | DualCool wall IDU. `RAC_0B0001_WW` is an alias of the ThinQ2 handler. The same `RAC_056905_WW` id on ThinQ1 (WH09SKN-18) is `rac_056905_ww_t1`. | ThinQ2: climate, fan, and swing, plus Jet, energy save, display light, AI Air, and Viraat when the unit reports those caps. ThinQ1: JSON status on the monitoring socket. |
-| `WIN_056905_WW` | Window AC, for example LW1823HRSM | Climate named in the device block, from the unit's caps. |
+| `RAC_056905_WW`, `RAC_0B0001_WW` | DualCool wall IDU. `RAC_0B0001_WW` is an alias of the ThinQ2 handler. The same `RAC_056905_WW` id on ThinQ1 (WH09SKN-18) is `rac_056905_ww_t1`. | ThinQ2: climate, fan, and swing, plus Jet, energy save, AI Air, and Viraat when the unit reports those caps. Display light also needs a known firmware checksum. ThinQ1: JSON status on the monitoring socket. |
+| `WIN_056905_WW` | Window AC, for example LW1823HRSM | Climate: power, mode, setpoint, fan, and swing. |
 | `POT_056905_WW` | LP1022FVSM portable | Climate plus a Jet switch. |
 | `PAC_910604_WW` | FQ18PADNQN floor-standing | Climate, two-vane swing, wind mode, human sense, and air quality. No filter reset. |
-| `DUCT_626301_WW` | Ducted IDU (PWFMDD200) | The RAC climate handler with this unit's low/medium/high fan speeds. |
+| `DUCT_626301_WW` | Ducted IDU (PWFMDD200) | Climate with this unit's fan speeds: 2/4/6 are low/medium/high. |
 | `CST_570004_WW` | Ceiling cassette | DualCool TLV with its own mode, fan, and swing tables. Not a RAC alias. |
 
 ### Air, water, and ventilation
@@ -54,7 +54,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `HUM_056905_WW` | PuriCare humidifier | Power, mode, fan, target humidity, night, sleep, and auto. |
 | `AIR_910604_WW` | AS309DWA air purifier | Power, mode, and fan. Room temperature and humidity are not published. |
 | `VENT_725601_WW`, `VENT_725601`, `Z-H0151B2SR` | Heat-recovery ventilator. The last two ids are aliases. | One fan entity for power, speed, and preset, plus CO2 and particulate readings. |
-| `WHT_056905_WW` | WH27S / APHWC801M heat-pump water heater | Water-heater climate (heat pump, eco, performance, off), power draw, and tank level. |
+| `WHT_056905_WW` | WH27S / APHWC801M heat-pump water heater | Water-heater climate (heat pump, eco, performance, off), power draw, and hot water remaining. |
 | `1WPU4CIGCR__2` | PuriCare water purifier (ATOM-U) | Read-only state and dispense totals. |
 | `1WPD6CMIDR__3` | WD722RH water purifier | State plus the settings whose ThinQ-app write was captured. Ice, dispensing, and sterilisation stay read-only. |
 
@@ -81,13 +81,13 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | ThinQ modelId | Sold as | This handler |
 | --- | --- | --- |
 | `Y_V8_Y___W.B32QEUK` | FSR7A04PG | Course and options. Run programme sends one `F0 26` frame. |
-| `Y_V8_Y___W.B_2QEUK` | F2WR709S2W | That layout with fewer controls. Pause needs Remote Start; Start is ignored. |
+| `Y_V8_Y___W.B_2QEUK` | F2WR709S2W | Telemetry of `Y_V8_Y___W.B32QEUK`. Start, pause, Delay End, and the wash-option switches are withdrawn. |
 | `F_V7_Y___W.B_2QEUK`, `F_V8_Y___W.B_2QEUK`, `F_V__Y___W.B_2QEUK`, `F_V7_Y___W.B__QEUK`, `F_V__Y___W.B__QEUK`, `F_V3_Y___W.B_2QEUK` | F4WV508S2E, F4WV709P1E (32-byte F4WV909P2TE), TW4V9RW9W, F2V5PS0W, WV9-1609B, F82AV35WHS. All aliases of one handler. | Course, spin, temperature, power, start, and pause. A 32-byte record also gets remote start and Delay End. |
 | `F_VB_Y___W.B_2QEUK` | F4WV710ATR | The F_V8 record plus detergent and softener doses. Child lock is not exposed. |
 | `F_C__Y___W.A__QEUK`, `F_V7_Y___W.A__QEUK` | F4WV709P1, and WV5-1275W for the alias | 30-byte status, door lock, power, start, and pause. |
 | `F_V__Y___W.A__QEUK` | WV9-1409W | Course at its own offset. Start sends one `F0 26` with the settings held in HA. |
-| `G2V7_Y___W.B_2QEUK` | F2NX50S9TKC | 67-byte status, course, and the slim-unit options. |
-| `VCDWL2QEUK` | F4X7511TWS | 64-byte status, course, and power. Off is only the real off byte. |
+| `G2V7_Y___W.B_2QEUK` | F2NX50S9TKC | Course, temperature, spin, and power, start, and pause. |
+| `VCDWL2QEUK` | F4X7511TWS | Course and status. Power is off only when the status byte is 0. |
 | `F_V__F___W.B_1QEUK`, `F_VA_F___W.B__QEUK` | FV1413H2B / FV1413H2BA. The second id is an alias. | Course, spin, temperature, dry mode, energy, and power/start/pause. |
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
 | `F_V__F___W.B__ECON` | CV9014WC2 washer/dryer | Staged course (spin, temperature, rinse, dry, delay) then start. |
@@ -95,7 +95,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `Y_VB_Y___W.B32QEUK` | F14R76BSTA and F4W1175YW | The Y_V8 record plus ezDispense doses, the drawer, and both tank-low alerts. |
 | `V_V__F___W.B_2QEUK` | W4X1085NWH washer/dryer | Power, pause, and run programme. It does not resume a pause. |
 | `F3L2CYU__` | WM3900HBA | Read-only power, status, and course. |
-| `F3L7CYK5W_US_WIFI` | Unknown | Status, course, child lock, rinse, initial time, and tub-clean count. |
+| `F3L7CYK5W_US_WIFI` | Unknown | Read-only status, course, child lock, rinse, initial time, and tub-clean count. |
 | `F3M2CYK__` | WM4500HBA | Read-only. Power comes from the heartbeat, not the short status record. |
 | `F3P2CYUBE__`, `F3P2CYUBW__` | WM4000HWA, and WM3850HVA for the alias | Course, options, and delay, written only while Remote Start is armed. The alias publishes no TurboWash. |
 | `F3P2CYVAT__` | WM3600HWA | Read-only course, time, and tub-clean count. |
@@ -103,7 +103,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F24VDD` | Unknown | Course, spin, temperature, rinse, and reserve. Start and resume send the captured template. |
 | `FAFXU25006` | WM5800HVA | Read-only 72-byte status. |
 | `T1789EFH_F` | WT7300CW top-loader | Course and options from the marker-led record. Stale `0xE2` snapshots are ignored. |
-| `T17A1EFHU_F` | WT7305CV / WT7305CW | The same top-loader family with this model's smart-course defaults. |
+| `T17A1EFHU_F` | WT7305CV / WT7305CW | Course, delay, extra rinses, pause, and power off. Smart-course defaults come from this model's modelJSON. |
 | `TLVE5BB` | WT21BWV6 | Read-only 50-byte status. |
 | `MI2U7B` | SideKick pedestal washer | Course, state, and drawer. Writes wait for a fresh powered-on report. |
 | `WTDN3` | F2J7HG1W (ThinQ1) | Course, rinse, child lock, delay, and tub-clean count. Remaining time is 0 while off. Power, start, and pause. |
