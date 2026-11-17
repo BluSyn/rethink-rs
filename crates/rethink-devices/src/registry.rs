@@ -108,7 +108,13 @@ mod tests {
 
         let fv7 = t2_factory("F_V7_Y___W.B_2QEUK").unwrap();
         let fv7_alias = t2_factory("F_V7_Y___W.B__QEUK").unwrap();
+        let fv3 = t2_factory("F_V3_Y___W.B_2QEUK").unwrap();
         assert!(std::ptr::fn_addr_eq(fv7, fv7_alias));
+        assert!(std::ptr::fn_addr_eq(fv7, fv3));
+
+        let wtwn3 = t1_factory("WTWN3").unwrap();
+        let wtwn3h = t1_factory("WTWN3H").unwrap();
+        assert!(std::ptr::fn_addr_eq(wtwn3, wtwn3h));
     }
 
     /// Deterministic xorshift, so a failing frame reproduces.

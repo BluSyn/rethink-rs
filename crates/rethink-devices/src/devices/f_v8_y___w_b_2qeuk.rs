@@ -742,6 +742,20 @@ mod tests {
     }
 
     #[test]
+    fn f82av35whs_alias_uses_this_handler() {
+        let canonical = crate::registry::t2_factory("F_V8_Y___W.B_2QEUK").unwrap();
+        let factory = crate::registry::t2_factory("F_V3_Y___W.B_2QEUK").unwrap();
+        assert!(std::ptr::fn_addr_eq(canonical, factory));
+        let ha = MockHaConnection::new();
+        let meta = Metadata::new("F_V3_Y___W.B_2QEUK", "F82AV35WHS", "1");
+        let thinq = MockThinq2Device::new(DEVICE_ID, meta.clone());
+        let _dev = factory(ha.clone(), thinq.clone(), meta);
+        thinq.emit_data(&hex_decode(SAMPLE));
+        assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
+        assert_eq!(prop(&ha, "status").as_deref(), Some("Standby"));
+    }
+
+    #[test]
     fn wv9_alias_uses_this_handler() {
         let factory = crate::registry::t2_factory("F_V__Y___W.B__QEUK").unwrap();
         let ha = MockHaConnection::new();

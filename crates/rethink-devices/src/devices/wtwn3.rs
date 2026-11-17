@@ -724,6 +724,18 @@ mod tests {
     }
 
     #[test]
+    fn wtwn3h_uses_the_same_handler() {
+        let meta = Metadata::new("WTWN3H", "F4J7VY2WD", "1.0");
+        let thinq = MockThinq1Device::new(DEVICE_ID, meta.clone());
+        let ha = MockHaConnection::new();
+        let factory = crate::t1_factory("WTWN3H").unwrap();
+        let dev = factory(ha, thinq.clone(), meta);
+        thinq.reset_recorder();
+        dev.start();
+        assert_eq!(thinq.sent(), vec![json!({"Cmd":"Mon","CmdOpt":"Start"})]);
+    }
+
+    #[test]
     fn publish_config_restores_availability_and_discovery() {
         let (ha, _thinq, dev) = make_device();
         DeviceHandler::drop_device(dev.as_ref());

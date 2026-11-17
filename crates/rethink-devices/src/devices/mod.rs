@@ -67,7 +67,7 @@ register_devices! {
         y_v8_y___w_b32qeuk => { "Y_V8_Y___W.B32QEUK" },
         y_v8_y___w_b_2qeuk => { "Y_V8_Y___W.B_2QEUK" },
         f_v8_y___w_b_2qeuk => {
-            "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK" | "F_V__Y___W.B__QEUK"
+            "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK" | "F_V__Y___W.B__QEUK" | "F_V3_Y___W.B_2QEUK"
         },
         y_v8_f___w_b_2qeuk => { "Y_V8_F___W.B_2QEUK" },
         vcdwl2qeuk => { "VCDWL2QEUK" },
@@ -135,7 +135,7 @@ register_devices! {
     }
     t1 {
         wtdn3 => { "WTDN3" },
-        wtwn3 => { "WTWN3" },
+        wtwn3 => { "WTWN3" | "WTWN3H" },
         f3l2cnv4w_wifi => { "F3L2CNV4W_WIFI" },
         rac_056905_ww_t1 => { "RAC_056905_WW" },
         f3l2cyv5w_wifi => { "F3L2CYV5W_WIFI" },
