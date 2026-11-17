@@ -87,7 +87,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F_C__Y___W.A__QEUK`, `F_V7_Y___W.A__QEUK` | F4WV709P1, and WV5-1275W for the alias | 30-byte status, door lock, power, start, and pause. |
 | `F_V__Y___W.A__QEUK` | WV9-1409W | Course at its own offset. Start sends one `F0 26` with the settings held in HA. |
 | `G2V7_Y___W.B_2QEUK` | F2NX50S9TKC | Course, temperature, spin, and power, start, and pause. |
-| `VCDWL2QEUK` | F4X7511TWS | Course and status. Power is off only when the status byte is 0. |
+| `VCDWL2QEUK` | F4X7511TWS | Read-only course and status. Power is off only when the status byte is 0. |
 | `F_V__F___W.B_1QEUK`, `F_VA_F___W.B__QEUK` | FV1413H2B / FV1413H2BA. The second id is an alias. | Course, spin, temperature, dry mode, energy, and power/start/pause. |
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
 | `F_V__F___W.B__ECON` | CV9014WC2 washer/dryer | Staged course (spin, temperature, rinse, dry, delay) then start. |
@@ -121,7 +121,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `RV13D4ASJW_D_US` | DLEX4000W | Course, Time Dry, and AI. Writes need Remote Start. |
 | `RV13D5JSD_D_US` | DLEX4200B | Read-only status except a power-off button. Completion stays latched through power-off. |
 | `BDH_D30007_US` | DLHC5502V | Read-only course, dry level, eco hybrid, and the newer error table. |
-| `RH10V9_CH` | Unknown heat-pump dryer | Phase, live remaining minutes, and course. |
+| `RH10V9_CH` | Unknown heat-pump dryer | Read-only phase, live remaining minutes, and course. |
 | `RH16_T_KR` | RH16VT | Course start with reserve hours, and the ten captured download courses. |
 | `RC90U2_WW`, `RC90V9_WW`, `RC90V9_AUS`, `RH90V9_WW` | RC9DN9029, RC91V9EV2Q, DVH9-09B, and RC10V9AV2W. The last three are aliases. The same `RC90U2_WW` id on ThinQ1 is `rc90u2_ww_t1`. | Course, dry level, eco hybrid, power, and pause, on both the AABB handler and the ThinQ1 adapter. `RH90V9_WW` adds Cotton+ and Tub Clean and drops its old extra entities. |
 | `SDH_GVX5_6211` | RHX5009NHB | Course and options. Power on also wakes the dryer. |
