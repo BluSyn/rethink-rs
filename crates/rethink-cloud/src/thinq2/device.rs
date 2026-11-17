@@ -9,7 +9,13 @@ use rethink_core::metadata::Metadata;
 use rethink_util::sync::Mutex;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// The LG cloud follows `completeProvisioning` of a preDeploy with `newProvisioning`
+/// about four seconds later, without waiting for `completeProvisioning_ack`.
+const NEW_PROVISIONING_DELAY: Duration = Duration::from_secs(4);
 
 /// Firmware string for Home Assistant. An empty `softVer` falls back to `appVersion`
 /// (2REBGLUB_2P__ on clip_bkn_v1.9.238 reports firmware only there).
@@ -28,6 +34,14 @@ pub struct DeviceAcceptor {
     manager: Arc<DeviceManager>,
     clients_by_id: Mutex<HashMap<String, u64>>,
     devices: Mutex<HashMap<u64, Arc<ConnectedDevice>>>,
+    /// Per-client generation of the pending `newProvisioning`. A deploy, a later
+    /// preDeploy, or a disconnect bumps it so the sleeper for the old one no-ops.
+    new_prov: Mutex<HashMap<u64, u64>>,
+    /// `newProvisioning` payloads this acceptor has published. Tests read it; a
+    /// long-running process only grows it by one entry per answered preDeploy.
+    new_provisioning_sent: Mutex<Vec<serde_json::Value>>,
+    /// Times a repeat deploy/preDeploy was warned as already set up.
+    already_set_up: AtomicUsize,
 }
 
 impl DeviceAcceptor {
@@ -37,6 +51,9 @@ impl DeviceAcceptor {
             manager,
             clients_by_id: Mutex::new(HashMap::new()),
             devices: Mutex::new(HashMap::new()),
+            new_prov: Mutex::new(HashMap::new()),
+            new_provisioning_sent: Mutex::new(Vec::new()),
+            already_set_up: AtomicUsize::new(0),
         });
 
         let acc = acceptor.clone();
@@ -88,7 +105,7 @@ impl DeviceAcceptor {
         acceptor
     }
 
-    fn handle_mqtt(&self, topic: &str, payload: &serde_json::Value, client_id: u64) {
+    fn handle_mqtt(self: &Arc<Self>, topic: &str, payload: &serde_json::Value, client_id: u64) {
         let topic = clip_relative_topic(topic);
 
         let did = payload.get("did").and_then(|v| v.as_str()).unwrap_or("");
@@ -135,6 +152,17 @@ impl DeviceAcceptor {
         if topic_ends_with_device("clip/provisioning/devices/", &topic, did)
             && (cmd == "preDeploy" || cmd == "deploy")
         {
+            // A freshly paired device answers newProvisioning with deploy on the
+            // same connection. That is the expected sequence, not a repeat.
+            let previous_cmd = self
+                .broker
+                .client_meta(client_id)
+                .deploy_msg
+                .as_ref()
+                .and_then(|d| d.get("cmd"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let deploy_after_predeploy = cmd == "deploy" && previous_cmd.as_deref() == Some("preDeploy");
             let mut meta = self.broker.client_meta(client_id);
             meta.deploy_msg = Some(payload.clone());
             self.broker.set_client_meta(client_id, meta);
@@ -149,14 +177,72 @@ impl DeviceAcceptor {
                 },
                 None,
             );
+            // A repeated preDeploy re-arms the timer; a deploy cancels it.
+            if cmd == "preDeploy" {
+                self.arm_new_provisioning(client_id, did.to_string());
+            } else {
+                self.cancel_new_provisioning(client_id);
+            }
             // Master 8f6d19e: register immediately here so start()/status query
             // can run before the appliance speaks.
             if self.devices.lock().get(&client_id).is_none() {
                 self.complete_provisioning(did, client_id);
-            } else {
+            } else if !deploy_after_predeploy {
+                self.already_set_up.fetch_add(1, Ordering::SeqCst);
                 eprintln!("device {did} already set up");
             }
         }
+    }
+
+    fn bump_new_provisioning(&self, client_id: u64) -> u64 {
+        let mut map = self.new_prov.lock();
+        let next = map.get(&client_id).copied().unwrap_or(0).wrapping_add(1);
+        map.insert(client_id, next);
+        next
+    }
+
+    fn cancel_new_provisioning(&self, client_id: u64) {
+        // Bump, don't delete: the next preDeploy must not reuse a generation a
+        // cancelled sleeper is still waiting on.
+        self.bump_new_provisioning(client_id);
+    }
+
+    /// Publish `newProvisioning` `NEW_PROVISIONING_DELAY` after this preDeploy,
+    /// unless a later deploy, preDeploy, or disconnect cancels it. Does not wait
+    /// for `completeProvisioning_ack`; some devices never send one.
+    fn arm_new_provisioning(self: &Arc<Self>, client_id: u64, did: String) {
+        let gen = self.bump_new_provisioning(client_id);
+        let this = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("new-provisioning".into())
+            .spawn(move || {
+                std::thread::sleep(NEW_PROVISIONING_DELAY);
+                if this.new_prov.lock().get(&client_id).copied() != Some(gen) {
+                    return;
+                }
+                rethink_core::logging::log(
+                    "status",
+                    &[&format!("sending newProvisioning to {did}")],
+                );
+                let message = serde_json::json!({
+                    "did": did,
+                    "mid": 0,
+                    "cmd": "newProvisioning",
+                    "type": 0,
+                    "data": null,
+                });
+                this.new_provisioning_sent.lock().push(message.clone());
+                this.broker.publish(
+                    PublishPacket {
+                        topic: format!("lime/devices/{did}"),
+                        payload: serde_json::to_vec(&message).unwrap_or_default(),
+                        retain: false,
+                        qos: 0,
+                        dup: false,
+                    },
+                    None,
+                );
+            });
     }
 
     fn complete_provisioning(&self, device_id: &str, client_id: u64) {
@@ -320,6 +406,7 @@ impl DeviceAcceptor {
     }
 
     fn disconnected(&self, client_id: u64) {
+        self.cancel_new_provisioning(client_id);
         if let Some(dev) = self.devices.lock().remove(&client_id) {
             self.clients_by_id.lock().remove(&dev.id);
             dev.notify_close();
@@ -533,6 +620,129 @@ mod tests {
         body["cmd"] = serde_json::json!("preDeploy");
         acc.handle_mqtt(&format!("clip/provisioning/devices/{did}"), &body, 4);
         assert!(manager.get(did).is_some());
+        acc.disconnected(4);
+    }
+
+    fn predeploy(did: &str) -> serde_json::Value {
+        let mut body = deploy_json(did);
+        body["cmd"] = serde_json::json!("preDeploy");
+        body
+    }
+
+    fn new_provisioning_of(acc: &DeviceAcceptor) -> Vec<serde_json::Value> {
+        acc.new_provisioning_sent.lock().clone()
+    }
+
+    #[test]
+    fn pre_deploy_sends_new_provisioning_once_after_four_seconds() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "fresh-pair";
+        acc.handle_mqtt(
+            &format!("clip/provisioning/devices/{did}"),
+            &predeploy(did),
+            3,
+        );
+        assert!(manager.get(did).is_some(), "preDeploy still registers immediately");
+        std::thread::sleep(Duration::from_millis(3000));
+        assert!(
+            new_provisioning_of(&acc).is_empty(),
+            "newProvisioning waits the cloud's four seconds"
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(
+            new_provisioning_of(&acc),
+            vec![serde_json::json!({
+                "did": did,
+                "mid": 0,
+                "cmd": "newProvisioning",
+                "type": 0,
+                "data": null,
+            })]
+        );
+        acc.handle_mqtt(
+            &format!("clip/message/devices/{did}"),
+            &serde_json::json!({
+                "did": did,
+                "cmd": "completeProvisioning_ack",
+            }),
+            3,
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            new_provisioning_of(&acc).len(),
+            1,
+            "the ack does not send another newProvisioning"
+        );
+    }
+
+    #[test]
+    fn deploy_does_not_send_new_provisioning() {
+        let (_broker, _manager, acc) = clip_acceptor();
+        let did = "already-paired";
+        acc.handle_mqtt(
+            &format!("clip/provisioning/devices/{did}"),
+            &deploy_json(did),
+            5,
+        );
+        std::thread::sleep(NEW_PROVISIONING_DELAY + Duration::from_millis(400));
+        assert!(new_provisioning_of(&acc).is_empty());
+        assert_eq!(acc.already_set_up.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn disconnect_cancels_new_provisioning() {
+        let (_broker, _manager, acc) = clip_acceptor();
+        let did = "gone";
+        acc.handle_mqtt(
+            &format!("clip/provisioning/devices/{did}"),
+            &predeploy(did),
+            6,
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        acc.disconnected(6);
+        std::thread::sleep(NEW_PROVISIONING_DELAY + Duration::from_millis(400));
+        assert!(new_provisioning_of(&acc).is_empty());
+    }
+
+    #[test]
+    fn repeated_pre_deploy_sends_one_new_provisioning_four_seconds_after_the_last() {
+        let (_broker, _manager, acc) = clip_acceptor();
+        let did = "rearm";
+        let topic = format!("clip/provisioning/devices/{did}");
+        acc.handle_mqtt(&topic, &predeploy(did), 8);
+        std::thread::sleep(NEW_PROVISIONING_DELAY + Duration::from_millis(400));
+        assert_eq!(new_provisioning_of(&acc).len(), 1);
+
+        acc.handle_mqtt(&topic, &predeploy(did), 8);
+        std::thread::sleep(Duration::from_millis(1500));
+        acc.handle_mqtt(&topic, &predeploy(did), 8);
+        std::thread::sleep(Duration::from_millis(3000));
+        assert_eq!(
+            new_provisioning_of(&acc).len(),
+            1,
+            "a later preDeploy replaces the pending one"
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(new_provisioning_of(&acc).len(), 2);
+        assert_eq!(acc.already_set_up.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn deploy_after_pre_deploy_cancels_new_provisioning_without_a_warning() {
+        let (_broker, manager, acc) = clip_acceptor();
+        let did = "answered";
+        let topic = format!("clip/provisioning/devices/{did}");
+        acc.handle_mqtt(&topic, &predeploy(did), 9);
+        let first = manager.get(did).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        acc.handle_mqtt(&topic, &deploy_json(did), 9);
+        std::thread::sleep(NEW_PROVISIONING_DELAY + Duration::from_millis(400));
+        assert!(new_provisioning_of(&acc).is_empty());
+        assert_eq!(acc.already_set_up.load(Ordering::SeqCst), 0);
+        assert!(
+            Arc::ptr_eq(&first, &manager.get(did).unwrap()),
+            "the answering deploy keeps the device registered by preDeploy"
+        );
     }
 
     #[test]
