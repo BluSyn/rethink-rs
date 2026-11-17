@@ -15,6 +15,18 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn rinse_name(code: u8) -> &'static str {
+    match code {
+        0 => "Not selected",
+        1 => "Normal",
+        2 => "Rinse+",
+        3 => "Rinse++",
+        4 => "Normal + Hold",
+        5 => "Rinse+ + Hold",
+        _ => "None",
+    }
+}
+
 pub struct Device {
     id: String,
     ha: Arc<dyn HaConnection>,
@@ -152,7 +164,7 @@ impl Device {
                     "platform": "sensor",
                     "unique_id": "$deviceid-cycles",
                     "state_topic": "$this/cycles",
-                    "name": "Cycle count",
+                    "name": "Tub clean counter",
                     "icon": "mdi:counter",
                 }),
             ),
@@ -174,6 +186,39 @@ impl Device {
                     "state_topic": "$this/door_lock",
                     "name": "Door lock",
                     "device_class": "lock",
+                }),
+            ),
+            (
+                "child_lock".into(),
+                json!({
+                    "platform": "binary_sensor",
+                    "unique_id": "$deviceid-child_lock",
+                    "state_topic": "$this/child_lock",
+                    "name": "Child lock",
+                    "icon": "mdi:lock-outline",
+                }),
+            ),
+            (
+                "rinse".into(),
+                json!({
+                    "platform": "sensor",
+                    "unique_id": "$deviceid-rinse",
+                    "state_topic": "$this/rinse",
+                    "name": "Rinse mode",
+                    "icon": "mdi:waves",
+                    "device_class": "enum",
+                    "options": ["Not selected", "Normal", "Rinse+", "Rinse++", "Normal + Hold", "Rinse+ + Hold"],
+                }),
+            ),
+            (
+                "delay_time".into(),
+                json!({
+                    "platform": "sensor",
+                    "unique_id": "$deviceid-delay_time",
+                    "state_topic": "$this/delay_time",
+                    "device_class": "duration",
+                    "unit_of_measurement": "min",
+                    "name": "Delay time",
                 }),
             ),
             (
@@ -254,7 +299,9 @@ impl Device {
         let error = buf[6] as usize;
         let spin = buf[8] as usize;
         let temp = buf[9] as usize;
+        let rinse = buf[10];
         let drying = buf[11] as u32;
+        let time_delay = buf[12] as i64 * 60 + buf[13] as i64;
         let lock_status = buf[15];
         let custom_course = buf[20] as u32;
         let cycles = buf[21] as i64;
@@ -285,8 +332,15 @@ impl Device {
         self.publish_on_off("remote_start", lock_status & 2 != 0);
         // inverted logic, off=locked
         self.publish_on_off("door_lock", lock_status & 0x40 == 0);
+        self.publish_on_off("child_lock", lock_status & 0x80 != 0);
+        self.publish_property("rinse", rinse_name(rinse).into());
+        self.publish_property("delay_time", PropertyValue::Int(time_delay));
         self.publish_property("initial_time", PropertyValue::Int(time_initial));
-        self.publish_property("remaining_time", PropertyValue::Int(time_remain));
+        // Off, the appliance keeps reporting the last programme's estimate.
+        self.publish_property(
+            "remaining_time",
+            PropertyValue::Int(if status == 0 { 0 } else { time_remain }),
+        );
     }
 
     pub fn set_property(&self, prop: &str, mqtt_value: &str) {
@@ -435,6 +489,36 @@ mod tests {
         assert_eq!(prop(&ha, "cycles"), PropertyValue::Int(6));
         assert_eq!(prop(&ha, "initial_time"), PropertyValue::Int(0));
         assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(0));
+    }
+
+    #[test]
+    fn off_clears_a_stale_remaining_time_and_reports_rinse_lock_and_delay() {
+        let (ha, thinq, _dev) = make_device();
+        let cfg = ha.device(DEVICE_ID).unwrap().config.unwrap();
+        assert_eq!(cfg.components["cycles"]["name"], "Tub clean counter");
+        assert!(cfg.components.contains_key("child_lock"));
+        assert!(cfg.components.contains_key("rinse"));
+        assert!(cfg.components.contains_key("delay_time"));
+
+        let mut off = [0u8; 28];
+        off[1] = 1;
+        off[2] = 2;
+        off[10] = 2;
+        off[12] = 1;
+        off[13] = 30;
+        off[15] = 0x80;
+        thinq.emit_data(&off);
+        assert_eq!(prop(&ha, "status"), "Off".into());
+        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(0));
+        assert_eq!(prop(&ha, "rinse"), "Rinse+".into());
+        assert_eq!(prop(&ha, "child_lock"), "ON".into());
+        assert_eq!(prop(&ha, "delay_time"), PropertyValue::Int(90));
+
+        let mut running = off;
+        running[0] = 6;
+        thinq.emit_data(&running);
+        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(62));
+        assert_eq!(prop(&ha, "status"), "Washing".into());
     }
 
     #[test]
