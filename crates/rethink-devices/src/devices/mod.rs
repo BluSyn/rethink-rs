@@ -89,7 +89,7 @@ register_devices! {
         rv13u6am8w_d_us_wifi => { "RV13U6AM8W_D_US_WIFI" },
         rv13d5jsd_d_us => { "RV13D5JSD_D_US" },
         f3l2cyu__ => { "F3L2CYU__" },
-        f3p2cyube__ => { "F3P2CYUBE__" },
+        f3p2cyube__ => { "F3P2CYUBE__" | "F3P2CYUBW__" },
         f3m2cyk__ => { "F3M2CYK__" },
         f3p2cyvat__ => { "F3P2CYVAT__" },
         f3p3cyk2_ => { "F3P3CYK2_" },

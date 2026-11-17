@@ -348,6 +348,8 @@ pub struct Device {
     core: Arc<AabbDeviceCore>,
     /// Folded into the next `start_course`; 0 starts now.
     delay_minutes: Mutex<u16>,
+    /// WM3850HVA (F3P2CYUBW__) has no TurboWash button, so the bit stays clear.
+    has_turbo_wash: bool,
 }
 
 impl Device {
@@ -357,12 +359,14 @@ impl Device {
         meta: Metadata,
     ) -> Arc<Self> {
         let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
+        let has_turbo_wash = meta.model_id != "F3P2CYUBW__";
         let this = Arc::new(Self {
             core: core.clone(),
             delay_minutes: Mutex::new(0),
+            has_turbo_wash,
         });
         let mut config = default_config(&meta, Some(json!({"name": "LG Washer"})));
-        config.components = components();
+        config.components = components(has_turbo_wash);
         core.set_config(config);
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
@@ -421,8 +425,10 @@ impl Device {
         let opts35 = rec[OPTS35_OFFSET];
         self.core
             .publish_on_off("cold_wash", opts35 & OPT35_COLD_WASH != 0);
-        self.core
-            .publish_on_off("turbo_wash", opts35 & OPT35_TURBO_WASH != 0);
+        if self.has_turbo_wash {
+            self.core
+                .publish_on_off("turbo_wash", opts35 & OPT35_TURBO_WASH != 0);
+        }
         self.core
             .publish_on_off("pre_wash", opts35 & OPT35_PRE_WASH != 0);
         let opts36 = rec[OPTS36_OFFSET];
@@ -491,7 +497,7 @@ impl Device {
     }
 }
 
-fn components() -> HashMap<String, Value> {
+fn components(has_turbo_wash: bool) -> HashMap<String, Value> {
     let specialty_options: Vec<&str> = std::iter::once(UNARMED)
         .chain(SPECIALTY_COURSES.iter().map(|c| c.name))
         .collect();
@@ -875,6 +881,7 @@ fn components() -> HashMap<String, Value> {
         ),
     ]
     .into_iter()
+    .filter(|(name, _)| has_turbo_wash || name != "turbo_wash")
     .collect()
 }
 
@@ -1129,6 +1136,22 @@ mod tests {
         expect(&ha, "cold_wash", "OFF");
         emit(&thinq, COLD_WASH_ON);
         expect(&ha, "cold_wash", "ON");
+    }
+
+    #[test]
+    fn wm3850hva_has_no_turbo_wash_entity() {
+        let ha = MockHaConnection::new();
+        let meta = Metadata::new("F3P2CYUBW__", "WM3850HVA", "1");
+        let thinq = MockThinq2Device::new(DEVICE_ID, meta.clone());
+        let factory = crate::t2_factory("F3P2CYUBW__").unwrap();
+        let _dev = factory(ha.clone(), thinq.clone(), meta);
+        let comps = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert!(!comps.contains_key("turbo_wash"));
+        assert!(comps.contains_key("pre_wash"));
+        emit(&thinq, PREWASH_ON);
+        expect(&ha, "course", "Normal");
+        expect(&ha, "pre_wash", "ON");
+        assert!(prop(&ha, "turbo_wash").is_none());
     }
 
     #[test]
