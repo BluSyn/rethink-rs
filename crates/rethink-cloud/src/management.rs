@@ -19,7 +19,7 @@ use rethink_util::tlv_catalog::{classify_tlvs, llm_export_text, KNOWN_TAGS};
 use rethink_util::uart_binary::{analyze_uart_binary, uart_binary_export_text};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -99,6 +99,13 @@ pub struct FrameLog {
     by_device: Mutex<HashMap<String, VecDeque<FrameEvent>>>,
 }
 
+fn device_is_current(manager: &DeviceManager, dev: &Arc<crate::devmgr::ConnectedDevice>) -> bool {
+    manager
+        .get(&dev.id)
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, dev))
+}
+
 impl FrameLog {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
@@ -142,16 +149,33 @@ impl FrameLog {
             .unwrap_or_default()
     }
 
-    /// Attach capture handlers for the life of the device connection.
-    pub fn attach(self: &Arc<Self>, dev: &crate::devmgr::ConnectedDevice) {
+    /// Attach capture handlers for the life of this connection.
+    ///
+    /// `accept` can replace an id without a drop. Handlers stay on the old object, so they
+    /// record only while that object is still the manager's current device.
+    pub fn attach(
+        self: &Arc<Self>,
+        dev: &Arc<crate::devmgr::ConnectedDevice>,
+        manager: &Arc<DeviceManager>,
+    ) {
         let id = dev.id.clone();
         let log = self.clone();
+        let mgr = manager.clone();
+        let this = dev.clone();
         dev.add_data_handler(move |buf| {
+            if !device_is_current(&mgr, &this) {
+                return;
+            }
             log.push(&id, "rx", rethink_util::hex::encode(buf), false, "packet");
         });
         let id2 = dev.id.clone();
         let log2 = self.clone();
+        let mgr2 = manager.clone();
+        let this2 = dev.clone();
         dev.add_send_handler(move |msg| {
+            if !device_is_current(&mgr2, &this2) {
+                return;
+            }
             let (payload, wire_type) = monitor_send_payload(&msg);
             log2.push(&id2, "tx", payload, false, wire_type);
         });
@@ -442,8 +466,8 @@ async fn handle_device_ws(mut socket: WebSocket, state: MgmtState, id: String) {
     let mut online = false;
     let (data_tx, mut data_rx) = mpsc::unbounded_channel::<String>();
 
-    // Register data listeners when device appears
-    let mut hooked: HashSet<String> = HashSet::new();
+    // Live fan-out. Re-hook when accept() replaces this id; the old object's handlers no-op.
+    let mut hooked: Option<Arc<crate::devmgr::ConnectedDevice>> = None;
     let mut history_sent = false;
 
     // Replay recent frames immediately so the UI is not empty until the next packet.
@@ -485,28 +509,43 @@ async fn handle_device_ws(mut socket: WebSocket, state: MgmtState, id: String) {
                             }
                             history_sent = true;
                         }
-                        if !hooked.contains(&id) {
-                            hooked.insert(id.clone());
-                            // Live fan-out only — ring buffer is filled by FrameLog::attach in main.
-                            let tx = data_tx.clone();
-                            d.add_data_handler(move |buf| {
-                                let _ = tx.send(json!({
-                                    "rx": rethink_util::hex::encode(buf),
-                                    "injected": false,
-                                    "ts": FrameLog::now_ms(),
-                                    "type": "packet",
-                                }).to_string());
-                            });
-                            let tx2 = data_tx.clone();
-                            d.add_send_handler(move |msg| {
-                                let _ = tx2.send(monitor_tx_json(msg).to_string());
-                            });
-                        }
                     } else {
                         let _ = socket.send(Message::Text(
                             json!({"status":"offline"}).to_string().into()
                         )).await;
                     }
+                }
+                // Live fan-out only — the ring is FrameLog::attach. Re-bind when the id's object changes.
+                if let Some(d) = dev {
+                    let same = hooked.as_ref().is_some_and(|h| Arc::ptr_eq(h, &d));
+                    if !same {
+                        hooked = Some(d.clone());
+                        let tx = data_tx.clone();
+                        let mgr = state.manager.clone();
+                        let this = d.clone();
+                        d.add_data_handler(move |buf| {
+                            if !device_is_current(&mgr, &this) {
+                                return;
+                            }
+                            let _ = tx.send(json!({
+                                "rx": rethink_util::hex::encode(buf),
+                                "injected": false,
+                                "ts": FrameLog::now_ms(),
+                                "type": "packet",
+                            }).to_string());
+                        });
+                        let tx2 = data_tx.clone();
+                        let mgr2 = state.manager.clone();
+                        let this2 = d.clone();
+                        d.add_send_handler(move |msg| {
+                            if !device_is_current(&mgr2, &this2) {
+                                return;
+                            }
+                            let _ = tx2.send(monitor_tx_json(msg).to_string());
+                        });
+                    }
+                } else {
+                    hooked = None;
                 }
             }
             msg = data_rx.recv() => {
@@ -1608,6 +1647,45 @@ mod tests {
         assert!(recent.first().unwrap().hex.contains(&format!("{:04x}", 150 - FRAME_RING_CAP)));
         assert_eq!(recent.last().unwrap().hex, format!("{:04x}", 149));
         assert!(log.recent("other").is_empty());
+    }
+
+    #[test]
+    fn replaced_device_stops_writing_the_old_connection_into_history() {
+        use crate::devmgr::{ConnectedDevice, Platform};
+        let mgr = DeviceManager::new();
+        let log = FrameLog::new();
+        let make = |id: &str| {
+            ConnectedDevice::new(
+                id.into(),
+                Platform::Thinq2,
+                rethink_core::metadata::Metadata::new("M", "M", "1"),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+            )
+        };
+        let first = make("device-1");
+        let second = make("device-1");
+        mgr.accept(first.clone());
+        log.attach(&first, &mgr);
+        first.notify_data(&[0xaa]);
+        mgr.accept(second.clone());
+        log.attach(&second, &mgr);
+        second.notify_data(&[0xbb]);
+        first.notify_data(&[0xcc]);
+        let hexes: Vec<_> = log.recent("device-1").into_iter().map(|e| e.hex).collect();
+        assert_eq!(hexes, ["aa".to_string(), "bb".to_string()]);
+    }
+
+    #[test]
+    fn panel_keeps_the_review_guards() {
+        let panel = include_str!("../../../html/panel.js");
+        assert!(panel.contains("deviceSelectGen"));
+        assert!(panel.contains("decodeGen"));
+        let index = include_str!("../../../html/index.html");
+        assert!(index.contains("id=\"decode_direction\" class=\"browser-default\""));
+        let monitor = include_str!("../../../html/monitor.html");
+        assert!(monitor.contains("new URL('./', window.location.href)"));
+        assert!(!monitor.contains("location.replace('/'"));
     }
 
     #[test]

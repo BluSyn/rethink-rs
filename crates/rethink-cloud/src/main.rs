@@ -159,9 +159,10 @@ async fn main() -> Result<()> {
         let ha_bridge = ha_bridge.clone();
         let lg_bridge = lg_bridge.clone();
         let frame_log = frame_log.clone();
+        let manager_for_log = manager.clone();
         manager.on_new_device(move |dev| {
             // Always capture frames so the integrated monitor has history on select.
-            frame_log.attach(&dev);
+            frame_log.attach(&dev, &manager_for_log);
             ha_bridge.new_device(dev.clone());
             if let Some(ref br) = lg_bridge {
                 br.on_local_device(Arc::new(bridge_adapter::ConnectedAsLocal(dev)));

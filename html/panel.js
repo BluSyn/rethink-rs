@@ -100,6 +100,10 @@ let reconnectTimer
 let deviceReconnectTimer
 let bridge_status = false
 let selectedDeviceId = null
+/** Bumps on each selectDevice() so a late REST response cannot paint a different selection. */
+let deviceSelectGen = 0
+/** Shared by runDecode() and runMultiFrameBreakdown(); stale responses must not render. */
+let decodeGen = 0
 /** @type {HTMLElement[]} ordered multi-selection (A, B, …) */
 let selectedFrames = []
 /** Anchor for shift+click range */
@@ -369,6 +373,7 @@ function renderDetailBar(data, fallbackId) {
 }
 
 async function selectDevice(id) {
+    const gen = ++deviceSelectGen
     selectedDeviceId = id
     for (const d of Object.values(devices)) {
         d.row.classList.toggle('selected', d.id === id)
@@ -402,6 +407,7 @@ async function selectDevice(id) {
     try {
         const res = await fetch(`${baseUrl}api/devices/${encodeURIComponent(id)}/frames`)
         const data = await res.json()
+        if (gen !== deviceSelectGen) return
         if (data.ok && Array.isArray(data.frames) && data.frames.length) {
             // Only seed if WS history hasn't already filled the list
             if (get('messages').childElementCount === 0) {
@@ -417,6 +423,7 @@ async function selectDevice(id) {
     try {
         const res = await fetch(`${baseUrl}api/devices/${encodeURIComponent(id)}`)
         const data = await res.json()
+        if (gen !== deviceSelectGen) return
         if (data.ok) {
             get('device_meta').textContent = `${data.modelId || model} · ${data.platform || ''} · ${
                 data.mapped ? 'HA mapped' : 'unmapped'
@@ -505,6 +512,7 @@ function setInjectEnabled(on) {
 }
 
 function clearFrames() {
+    decodeGen++
     get('messages').innerHTML = ''
     selectedFrames = []
     frameSelectAnchor = null
@@ -668,10 +676,13 @@ function onFrameClick(ev, el) {
         runMultiFrameBreakdown(framesInTimeOrder(selectedFrames))
     } else if (selectedFrames.length === 1) {
         loadFrameIntoDecoder(selectedFrames[0])
+    } else {
+        decodeGen++
     }
 }
 
 function loadFrameIntoDecoder(el) {
+    decodeGen++
     const payload = el.dataset.payload || ''
     const dir = el.dataset.dir || 'rx'
     const kind = el.dataset.kind || 'hex'
@@ -1296,6 +1307,7 @@ function tlvDeltaSummary(mapA, mapB) {
  */
 async function runMultiFrameBreakdown(ordered) {
     if (!ordered || ordered.length < 2) return
+    const gen = ++decodeGen
     const dev = deviceContextLines()
     const t0 = parseTsMs(ordered[0])
     const tLast = parseTsMs(ordered[ordered.length - 1])
@@ -1314,6 +1326,7 @@ async function runMultiFrameBreakdown(ordered) {
                 decodePayloadSilent(el.dataset.payload || '', el.dataset.dir || 'rx'),
             ),
         )
+        if (gen !== decodeGen) return
 
         // UI focus: last frame
         const lastDec = decodedList[decodedList.length - 1]
@@ -1396,9 +1409,17 @@ async function runMultiFrameBreakdown(ordered) {
             if (disappeared.length) lines.push(`- ${disappeared.join(' · ')}`)
             if (changed.length) lines.push(`~ ${changed.join(' · ')}`)
 
-            const body = get('tlv_body')
             const deltaB = decodedList[best.j]
-            if (body && deltaB.decode.elements) {
+            const bFrame = ordered[best.j]
+            const bPayload = (bFrame && bFrame.dataset.payload) || ''
+            get('decode_hex').value = bPayload
+            get('decode_direction').value =
+                bFrame && bFrame.dataset.dir === 'tx' ? 'toDevice' : 'fromDevice'
+            renderPayloadView((deltaB.decode && deltaB.decode.hex) || bPayload, null)
+            if (deltaB.decode) lastDecode = deltaB.decode
+
+            const body = get('tlv_body')
+            if (body && deltaB.decode && deltaB.decode.elements) {
                 body.innerHTML = ''
                 for (const el of deltaB.decode.elements) {
                     const tr = document.createElement('tr')
@@ -1436,6 +1457,7 @@ async function runMultiFrameBreakdown(ordered) {
 
         get('text_breakdown').value = lines.join('\n').replace(/\n{3,}/g, '\n\n')
     } catch (err) {
+        if (gen !== decodeGen) return
         M.toast({ html: `sequence error: ${err}` })
     }
 }
@@ -1562,6 +1584,7 @@ function renderDecode(data) {
 
 /** Decode TLV/AABB and always refresh the text breakdown. */
 async function runDecode() {
+    const gen = ++decodeGen
     const hex = get('decode_hex').value.trim()
     if (!hex) {
         M.toast({ html: 'Nothing to decode' })
@@ -1580,6 +1603,7 @@ async function runDecode() {
             body: JSON.stringify({ hex, direction, model_id }),
         })
         const data = await res.json()
+        if (gen !== decodeGen) return
         if (!data.ok) {
             M.toast({ html: data.error || 'decode failed' })
             return
@@ -1587,6 +1611,7 @@ async function runDecode() {
         if (data.decode) renderDecode(data.decode)
         get('text_breakdown').value = data.text || ''
     } catch (err) {
+        if (gen !== decodeGen) return
         M.toast({ html: `decode error: ${err}` })
     }
 }
