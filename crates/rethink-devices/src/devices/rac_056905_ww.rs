@@ -119,15 +119,19 @@ struct Inner {
     shared_tag_fields: std::collections::HashMap<u16, Arc<FieldDefinition>>,
 }
 
+pub(crate) type ExtraFeaturesHook = Box<dyn Fn(&Arc<Device>, &mut DeviceDiscovery) + Send + Sync>;
+
 pub struct Device {
     pub core: Arc<TlvDeviceCore>,
     fan_modes: FanModes,
+    has_jet_flag: bool,
+    extra_features: Option<ExtraFeaturesHook>,
     inner: Mutex<Inner>,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
-        Self::with_fan_modes(ha, thinq, meta, FAN_MODES)
+        Self::with_options(ha, thinq, meta, FAN_MODES, true, None)
     }
 
     /// A variant with its own 0x1fa fan speeds (DUCT_626301_WW).
@@ -137,10 +141,24 @@ impl Device {
         meta: Metadata,
         fan_modes: FanModes,
     ) -> Arc<Self> {
+        Self::with_options(ha, thinq, meta, fan_modes, true, None)
+    }
+
+    /// A variant with custom fan speeds, Jet-flag toggle, and extra model features (CSL_306406_WW).
+    pub(crate) fn with_options(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        fan_modes: FanModes,
+        has_jet_flag: bool,
+        extra_features: Option<ExtraFeaturesHook>,
+    ) -> Arc<Self> {
         let core = TlvDeviceCore::new(ha, thinq);
         let this = Arc::new(Self {
             core: core.clone(),
             fan_modes,
+            has_jet_flag,
+            extra_features,
             inner: Mutex::new(Inner {
                 meta,
                 initial_values_received: false,
@@ -193,11 +211,11 @@ impl Device {
         this
     }
 
-    fn get_power_tlv(&self) -> Option<u32> {
+    pub(crate) fn get_power_tlv(&self) -> Option<u32> {
         self.core.get_raw(0x1f7)
     }
 
-    fn get_mode_tlv(&self) -> Option<u32> {
+    pub(crate) fn get_mode_tlv(&self) -> Option<u32> {
         self.core.get_raw(0x1f9)
     }
 
@@ -559,7 +577,15 @@ impl Device {
             let mut f = FieldDefinition::new("climate", "current_humidity")
                 .with_id(0x336)
                 .read_only();
-            f.read_xform = Some(Box::new(|raw| Some(PropertyValue::Int(raw as i64))));
+            // Some models (e.g. CSL_306406_WW) report tenths of a percent (530 = 53 %).
+            f.read_xform = Some(Box::new(|raw| {
+                let pct = if raw > 100 {
+                    (f64::from(raw) / 10.0).round() as i64
+                } else {
+                    i64::from(raw)
+                };
+                Some(PropertyValue::Int(pct))
+            }));
             f.read_callback = Some(Box::new(move |val| {
                 this.core
                     .ha
@@ -893,8 +919,10 @@ impl Device {
         }
 
         let jet_bits = self.core.get_raw(0x2cd).unwrap_or(0) & 3;
-        let jet_cool = (jet_bits & 1) != 0 || (self.has_tag(0x323) && jet_bits == 0);
-        let jet_heat = (jet_bits & 2) != 0 || (self.has_tag(0x323) && jet_bits == 0);
+        let jet_cool =
+            self.has_jet_flag && ((jet_bits & 1) != 0 || (self.has_tag(0x323) && jet_bits == 0));
+        let jet_heat =
+            self.has_jet_flag && ((jet_bits & 2) != 0 || (self.has_tag(0x323) && jet_bits == 0));
         if jet_cool || jet_heat {
             self.add_jet_field(
                 &mut config,
@@ -1078,6 +1106,9 @@ impl Device {
         );
         config.components.insert(k, v);
 
+        if let Some(ref hook) = self.extra_features {
+            hook(self, &mut config);
+        }
         self.add_extended_features(&mut config);
         self.describe_standard_features(&mut config, jet_cool, jet_heat);
         {
@@ -1294,7 +1325,7 @@ impl Device {
         }));
     }
 
-    fn add_optional_sensor_field(
+    pub(crate) fn add_optional_sensor_field(
         &self,
         config: &mut DeviceDiscovery,
         ids: &[u16],
@@ -1366,7 +1397,7 @@ impl Device {
         );
     }
 
-    fn temp_limit(&self, tags: &[u16], max: bool) -> Option<f64> {
+    pub(crate) fn temp_limit(&self, tags: &[u16], max: bool) -> Option<f64> {
         let mut values = Vec::new();
         for tag in tags {
             if let Some(v) = self.core.get_raw(*tag) {
@@ -1408,7 +1439,7 @@ impl Device {
         self.add_config_switch_values(config, id, name, desc, icon, 1, 0);
     }
 
-    fn add_config_switch_values(
+    pub(crate) fn add_config_switch_values(
         &self,
         config: &mut DeviceDiscovery,
         id: u16,
@@ -1447,7 +1478,7 @@ impl Device {
         self.core.add_field(config, f, true);
     }
 
-    fn describe_feature(
+    pub(crate) fn describe_feature(
         &self,
         config: &mut DeviceDiscovery,
         name: &str,

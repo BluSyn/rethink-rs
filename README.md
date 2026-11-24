@@ -43,6 +43,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `POT_056905_WW` | LP1022FVSM portable | Climate plus a Jet switch. |
 | `PAC_910604_WW` | FQ18PADNQN floor-standing | Climate, two-vane swing, wind mode, human sense, and air quality. No filter reset. |
 | `DUCT_626301_WW` | Ducted IDU (PWFMDD200) | Climate with this unit's fan speeds: 2/4/6 are low/medium/high. |
+| `CSL_306406_WW` | Console air conditioner | The `RAC_056905_WW` handler with console fan speeds, Jet button, filter hours, plasma, beep, display light, and auto dry. |
 | `CST_570004_WW` | Ceiling cassette | DualCool TLV with its own mode, fan, and swing tables. Not a RAC alias. |
 
 ### Air, water, and ventilation
@@ -185,7 +186,6 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
 | `BDH_HI2103_EU` | RH18U8AVCW | Open PR #315 |
 | `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
-| `CSL_306406_WW` | Console air conditioner | Open PR #343 |
 | `D3210` | LDP6810SS | Open PR #329 |
 | `F3S1CWK__` | WKGX201HWA washer half | Open PR #300 |
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
