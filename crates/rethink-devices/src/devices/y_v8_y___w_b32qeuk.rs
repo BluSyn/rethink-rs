@@ -13,7 +13,7 @@ use crate::washer_common::{
 };
 use rethink_core::device_base::{default_config, process_enveloped_status, AabbDeviceCore};
 use rethink_core::hex_decode;
-use rethink_core::{HaConnection, Metadata, Thinq2Device};
+use rethink_core::{HaConnection, Metadata, PropertyValue, Thinq2Device};
 use rethink_util::sync::Mutex;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -137,6 +137,14 @@ pub(crate) trait Extension: Send + Sync + 'static {
     /// Every AABB payload, after any status record in it has been handled.
     fn process_aabb(&self, _dev: &Device, _inner: &[u8]) {}
 
+    /// Runs before `process_state` publishes any properties for a new status record.
+    fn before_state(&self, _s: &[u8]) {}
+
+    /// Filters or transforms a property before it is published. Return `None` to suppress.
+    fn filter_publish(&self, _prop: &str, value: PropertyValue) -> Option<PropertyValue> {
+        Some(value)
+    }
+
     /// A status record, after this model's own fields and settings are published.
     fn process_state(&self, _dev: &Device, _s: &[u8]) {}
 
@@ -225,6 +233,27 @@ impl Device {
         self.programme_command()
     }
 
+    pub(crate) fn clear_pending(&self) {
+        *self.pending.lock() = Pending::default();
+    }
+
+    pub(crate) fn effective_delay_end(&self) -> f64 {
+        self.effective().delay_end
+    }
+
+    fn pub_prop(&self, prop: &str, value: PropertyValue) {
+        if let Some(v) = self.ext.filter_publish(prop, value) {
+            self.core.publish_property(prop, v);
+        }
+    }
+
+    fn pub_on_off(&self, prop: &str, on: bool) {
+        let v: PropertyValue = if on { "ON" } else { "OFF" }.into();
+        if let Some(v) = self.ext.filter_publish(prop, v) {
+            self.core.publish_property(prop, v);
+        }
+    }
+
     fn courses(&self) -> Vec<&'static (u8, &'static str)> {
         if let Some(table) = self.ext.courses_override() {
             table.iter().collect()
@@ -252,65 +281,48 @@ impl Device {
         if s.len() < RECORD_LEN {
             return;
         }
+        self.ext.before_state(s);
         let status = s[2];
         let options = s[16];
         let lock_status = s[17];
-        self.core.publish_on_off("power", status > 0);
-        self.core
-            .publish_property("error_message", error_message(s[8] as usize).into());
-        self.core.publish_on_off("error", s[8] != 0);
-        self.core
-            .publish_property("status", fy_steam_name(status).into());
-        self.core
-            .publish_property("course", self.course_name(s[7]).into());
-        self.core
-            .publish_property("smart_course", named(SMART, s[22]).into());
-        self.core
-            .publish_property("spin", spin_value(s[10] as usize).unwrap_or("None").into());
-        self.core.publish_property(
+        self.pub_on_off("power", status > 0);
+        self.pub_prop("error_message", error_message(s[8] as usize).into());
+        self.pub_on_off("error", s[8] != 0);
+        self.pub_prop("status", fy_steam_name(status).into());
+        self.pub_prop("course", self.course_name(s[7]).into());
+        self.pub_prop("smart_course", named(SMART, s[22]).into());
+        self.pub_prop("spin", spin_value(s[10] as usize).unwrap_or("None").into());
+        self.pub_prop(
             "temp",
             temperature_value(s[11] as usize).unwrap_or("None").into(),
         );
-        self.core
-            .publish_property("cycles", i64::from(s[23]).into());
-        self.core
-            .publish_on_off("remote_start", lock_status & 0x02 != 0);
-        self.core
-            .publish_on_off("door_lock", lock_status & 0x40 == 0);
-        self.core
-            .publish_on_off("child_lock", lock_status & 0x80 == 0);
-        self.core
-            .publish_on_off("wrinkle_care", lock_status & 0x20 != 0);
-        self.core.publish_property(
+        self.pub_prop("cycles", i64::from(s[23]).into());
+        self.pub_on_off("remote_start", lock_status & 0x02 != 0);
+        self.pub_on_off("door_lock", lock_status & 0x40 == 0);
+        self.pub_on_off("child_lock", lock_status & 0x80 == 0);
+        self.pub_on_off("wrinkle_care", lock_status & 0x20 != 0);
+        self.pub_prop(
             "initial_time",
             (i64::from(s[5]) * 60 + i64::from(s[6])).into(),
         );
-        self.core.publish_property(
+        self.pub_prop(
             "remaining_time",
             (i64::from(s[3]) * 60 + i64::from(s[4])).into(),
         );
-        self.core.publish_property(
+        self.pub_prop(
             "reserve_time",
             (i64::from(s[14]) * 60 + i64::from(s[15])).into(),
         );
-        self.core
-            .publish_property("energy", (i64::from(s[30]) * 256 + i64::from(s[31])).into());
-        self.core
-            .publish_property("soil", soil_level(s[9] as usize).unwrap_or("None").into());
-        self.core
-            .publish_property("rinse", indexed(RINSES, s[12]).into());
-        self.core
-            .publish_on_off("turbowash", options & OPT_TURBO != 0);
-        self.core
-            .publish_on_off("crease_care", options & OPT_CREASE != 0);
-        self.core
-            .publish_on_off("steam_softener", options & OPT_STEAM_SOFT != 0);
-        self.core
-            .publish_on_off("medic_rinse", options & OPT_MEDIC != 0);
-        self.core
-            .publish_on_off("prewash", options & OPT_PREWASH != 0);
-        self.core.publish_on_off("steam", options & OPT_STEAM != 0);
-        self.core.publish_on_off("ai_dd", s[18] & 0x01 != 0);
+        self.pub_prop("energy", (i64::from(s[30]) * 256 + i64::from(s[31])).into());
+        self.pub_prop("soil", soil_level(s[9] as usize).unwrap_or("None").into());
+        self.pub_prop("rinse", indexed(RINSES, s[12]).into());
+        self.pub_on_off("turbowash", options & OPT_TURBO != 0);
+        self.pub_on_off("crease_care", options & OPT_CREASE != 0);
+        self.pub_on_off("steam_softener", options & OPT_STEAM_SOFT != 0);
+        self.pub_on_off("medic_rinse", options & OPT_MEDIC != 0);
+        self.pub_on_off("prewash", options & OPT_PREWASH != 0);
+        self.pub_on_off("steam", options & OPT_STEAM != 0);
+        self.pub_on_off("ai_dd", s[18] & 0x01 != 0);
 
         *self.reported.lock() = Settings {
             course: s[7],
@@ -356,35 +368,27 @@ impl Device {
             .ext
             .course_setting(self)
             .unwrap_or_else(|| self.course_name(s.course));
-        self.core.publish_property("set_course", course.into());
-        self.core.publish_property(
+        self.pub_prop("set_course", course.into());
+        self.pub_prop(
             "set_temp",
             temperature_value(s.temp as usize).unwrap_or("None").into(),
         );
-        self.core.publish_property(
+        self.pub_prop(
             "set_spin",
             spin_value(s.spin as usize).unwrap_or("None").into(),
         );
-        self.core
-            .publish_property("set_rinse", indexed(RINSES, s.rinse).into());
-        self.core.publish_property(
+        self.pub_prop("set_rinse", indexed(RINSES, s.rinse).into());
+        self.pub_prop(
             "set_soil",
             soil_level(s.soil as usize).unwrap_or("None").into(),
         );
-        self.core
-            .publish_property("set_delay_end", s.delay_end.into());
-        self.core
-            .publish_on_off("set_turbowash", s.options & OPT_TURBO != 0);
-        self.core
-            .publish_on_off("set_crease_care", s.options & OPT_CREASE != 0);
-        self.core
-            .publish_on_off("set_steam_softener", s.options & OPT_STEAM_SOFT != 0);
-        self.core
-            .publish_on_off("set_medic_rinse", s.options & OPT_MEDIC != 0);
-        self.core
-            .publish_on_off("set_prewash", s.options & OPT_PREWASH != 0);
-        self.core
-            .publish_on_off("set_steam", s.options & OPT_STEAM != 0);
+        self.pub_prop("set_delay_end", s.delay_end.into());
+        self.pub_on_off("set_turbowash", s.options & OPT_TURBO != 0);
+        self.pub_on_off("set_crease_care", s.options & OPT_CREASE != 0);
+        self.pub_on_off("set_steam_softener", s.options & OPT_STEAM_SOFT != 0);
+        self.pub_on_off("set_medic_rinse", s.options & OPT_MEDIC != 0);
+        self.pub_on_off("set_prewash", s.options & OPT_PREWASH != 0);
+        self.pub_on_off("set_steam", s.options & OPT_STEAM != 0);
         self.ext.publish_settings(self);
     }
 

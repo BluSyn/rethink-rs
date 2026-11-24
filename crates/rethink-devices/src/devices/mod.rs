@@ -71,6 +71,7 @@ register_devices! {
             "F_V7_Y___W.B_2QEUK" | "F_V8_Y___W.B_2QEUK" | "F_V__Y___W.B_2QEUK" | "F_V7_Y___W.B__QEUK" | "F_V__Y___W.B__QEUK" | "F_V3_Y___W.B_2QEUK"
         },
         y_v8_f___w_b_2qeuk => { "Y_V8_F___W.B_2QEUK" },
+        y_v8_f___w_b32qeuk => { "Y_V8_F___W.B32QEUK" },
         vcdwl2qeuk => { "VCDWL2QEUK" },
         f_v__f___w_b_1qeuk => { "F_V__F___W.B_1QEUK" | "F_VA_F___W.B__QEUK" | "F_V7_F___W.B__QEUK" },
         f_v__f___w_b__qeuk => { "F_V__F___W.B__QEUK" },
@@ -105,6 +106,7 @@ register_devices! {
         rh10v9_ch => { "RH10V9_CH" },
         wtl_fxu_bdv_na_01 => { "WTL_FXU_BDV_NA_01" },
         f3s1cwkb__ => { "F3S1CWKB__" },
+        f3s1cwk__ => { "F3S1CWK__" },
         rv13s1amjw_us => { "RV13S1AMJW_US" },
         dhum_056905_ww => { "DHUM_056905_WW" },
         dhum_231006_ww => { "DHUM_231006_WW" },

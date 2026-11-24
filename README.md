@@ -94,6 +94,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
 | `F_V__F___W.B__ECON` | CV9014WC2 washer/dryer | Staged course (spin, temperature, rinse, dry, delay) then start. |
 | `Y_V8_F___W.B_2QEUK` | W4WR70E61 washer/dryer | Wash and dry fields, plus the wash-cycle counter. |
+| `Y_V8_F___W.B32QEUK` | FWY916WBTN1 washer/dryer | The `Y_V8_Y___W.B32QEUK` handler with drying mode, Air condensing, `F0 25` programme select, `F0 26` resume, and command-ack status; omits child lock, wrinkle care, crease care, and steam softener. |
 | `Y_VB_Y___W.B32QEUK` | F14R76BSTA and F4W1175YW | The Y_V8 record plus ezDispense doses (settable for `run_programme`), the drawer, and both tank-low alerts. |
 | `Y_VB_F___W.B32QEUK` | F4DR711S2BA washer/dryer | The `Y_VB_Y___W.B32QEUK` handler plus drying mode, panel course defaults, detergent-empty alert, and tub / drying air temperatures. |
 | `V_V__F___W.B_2QEUK` | W4X1085NWH washer/dryer | Power, pause, and run programme. It does not resume a pause. |
@@ -138,6 +139,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | --- | --- | --- |
 | `WTL_FXU_BDV_NA_01` | WKEX200HBA, one module | Washer and dryer state, course, and time on one device. |
 | `F3S1CWKB__` | WKEX200HBA washer half | Course and power. The run phase comes from the status dump, not the short record. |
+| `F3S1CWK__` | WKGX201HWA washer half | Class `0x33` 45-byte status, downloaded course, cycle energy, wash-completed latch, and power on/off buttons. |
 | `RV13S1AMJW_US` | WKEX200HBA dryer half | Course, dry level, and a power switch. Not an RV13B6 alias. |
 | `W3S1CVK2EVS_D_US` | WKGX201HWA dryer half | Class `0x34` `RV13D5JSD_D_US` layout with power on/off buttons, control lock, remote start, downloaded course, and cycle energy; omits Damp Dry Signal. |
 
@@ -189,14 +191,12 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
 | `BDH_HI2103_EU` | RH18U8AVCW | Open PR #315 |
 | `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
-| `F3S1CWK__` | WKGX201HWA washer half | Open PR #300 |
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
 | `TLXA5CFPH` | Unknown | Open PR #342 |
 | `VCCHL2QEUK` | WHX9016TLC washer/dryer | Open PR #344 |
 | `WLSEL6333F` | LSEL6333F | Open PRs #304 and #329 |
 | `WLRGL5825F` | Unknown range | Open PR #273 |
-| `Y_V8_F___W.B32QEUK` | FWY916WBTN1 | Open PR #316 |
 
 Unlisted appliances can still be used in **bridge mode** (no HA translation). For new devices or gaps, contribute **upstream**, not here.
 
