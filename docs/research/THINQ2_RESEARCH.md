@@ -1,10 +1,10 @@
-# ThinQ2 reverse-engineering research (Rust rewrite era)
+# ThinQ2 reverse-engineering notes
 
-Last updated: 2026-08-10. Sources are named with the capability or model they contribute.
+Protocol quick reference for reverse-engineering ThinQ2 appliances. For the current list of supported and unsupported models, see [`README.md`](../../README.md#status-of-this-fork).
 
 ## Wire protocols (ThinQ2)
 
-### CLIP / MQTT (`Thinq2CloudProtocol` wiki)
+### CLIP / MQTT ([`Thinq2CloudProtocol.md`](Thinq2CloudProtocol.md))
 - After SoftAP Wi-Fi join, devices use HTTPS + MQTTS; no inbound device listeners.
 - Provisioning: `https://common.lgthinq.com/route` → `apiServer` / `mqttServer` (any TLS cert accepted on route).
 - Device cert: CSR to `apiServer/device/{uuid}/certificate`; MQTT client uses mutual TLS (device cert + AWS IoT CA).
@@ -42,86 +42,55 @@ Last updated: 2026-08-10. Sources are named with the capability or model they co
 - Status query / monitor enable: `F0ED…` patterns (model-specific).
 - Set commands: `F017…` (fridge), `F0xx…` (washer/dryer/hood).
 
-### SoftAP / setup (`SetupProtocol:JSON` wiki)
+### SoftAP / setup ([`SetupProtocol:JSON.md`](SetupProtocol:JSON.md))
 - SoftAP IP typically `192.168.120.254`; JSON length-prefixed frames and XML variants.
-- Newer modules: RTK_RTL8711am / RTL8720cm / BEKEN_BK7234 — need relaxed TLS ciphers and SoftAP setApInfo hardening (PR#131, #81, #92).
-
-## Local branches (this clone)
-
-| Branch | Contribution |
-|--------|----------------|
-| `custom-ac` / `origin/custom-ac` | AC customizations; F_VA washer map; SoftAP/TLS hardening already on tip |
-| `origin/dehumidifier` / `new-device-dehumid` | DHUM_056905_WW HA support (already ported to Rust) |
-| `rust-rewrite` | Full Rust port (this work) |
-
-## Open GitHub PRs (anszom/rethink, 2026-08) — device / RE relevance
-
-| PR | Title | Contribution | Rust status |
-|----|-------|--------------|-------------|
-| #131 | SoftAP + legacy TLS for RTK_RTL8711am | Provisioning + weak ciphers | **Rust cloud:** OpenSSL device TLS (`SECLEVEL=0`, TLS1.0+) on HTTPS/MQTTS; SoftAP extras in setup |
-| #130 | RH10V9_CH heat-pump dryer | AABB dryer status | **Registered** |
-| #129 | CST_570004_WW cassette AC | RAC alias + 0xa7 + humidity 0x336 | **Registered** (alias + a7 codec) |
-| #128 | F_VA_F___W.B__QEUK washer | Alias → F_V__F handler | **Registered** |
-| #127 | Home Assistant add-on | Packaging | Docs only (out of runtime) |
-| #123 | F_V7_Y___W.B__QEUK washer | Alias → F_V8_Y | **Registered** as F_V7_Y___W.B_2QEUK |
-| #122 | ac_common base | Shared AC TLV refactor | Research; RAC still monolithic |
-| #121 | Dashboard UI | Names, nicer panel | **This work: management UI** |
-| #120 | STUDIO_HOOD | AABB fan+light hood | **Registered** (`studio_hood`) |
-| #118 | 1WPU4CIGCR__2 water purifier | AABB capability API | Documented; deferred (large) |
-| #117 | Korean WashTower FAKPK21021 / BDH_D39301_KR | Extended EB/EC | Documented; deferred (3k+ LOC) |
-| #116 | HWWA9K_F2 CordZero vacuum | AABB stick vacuum | Documented; deferred |
-| #115 | ST_B_E4H01Y_APL Styler | AABB garment care | Documented; deferred |
-| #114 | HUM_056905_WW humidifier | TLV modelJSON map | **Registered** (`hum_056905_ww`) |
-| #113 | DHUM_056905_WW + **DHUM_231006_WW** | Dehumidifier + KR mode tables | **Both registered** |
-| #96 | 2REF12EII_P_2 / GML844 fridge | AABB slim fridge | **Registered** (`dev_2ref12eii_p_2`) |
-| #92 / #81 | RTL8720cm SoftAP | Provisioning | Setup path |
-| #73 / #89 | WIN_056905_WW window AC | TLV climate | **Registered** |
-| #64 | DHUM_056905_WW | Dehumidifier | **Registered** |
+- Newer modules: RTK_RTL8711am / RTL8720cm / BEKEN_BK7234 — need relaxed TLS ciphers (`SECLEVEL=0`, TLS 1.0+) and SoftAP `setApInfo` handling.
 
 ## External reverse-engineering sources
 
 | Source | What it contributes |
 |--------|---------------------|
-| [rethink wiki](https://github.com/anszom/rethink/wiki) | TLV/AABB/CLIP SoftAP specs; per-appliance notes (RAC, WIN, washers, fridges, WHT_056905_WW WashTower family) |
+| [rethink wiki](https://github.com/anszom/rethink/wiki) | TLV/AABB/CLIP SoftAP specs; per-appliance notes (RAC, WIN, washers, fridges, `WHT_056905_WW` water heater) |
 | [rvanbaalen/lg-local](https://github.com/rvanbaalen/lg-local) | Independent local control; TLV parser + CRC16; points back to rethink wiki as protocol authority |
-| LG modelJSON (`tlv_*` labels) | Authoritative tag→field map for HUM_056905_WW (PR#114); used instead of packet guessing |
-| Bridge dual-decode | PR#113 verifies DHUM fields against LG cloud while bridged |
+| LG modelJSON (`tlv_*` labels) | Authoritative tag→field map for models like `HUM_056905_WW`; used instead of packet guessing |
+| Bridge dual-decode | Verifies fields against LG cloud while bridged |
 
 ## DeviceType quick reference
 
-Management UI shows **name + code** (e.g. `A/C (401)`). Map lives in `html/panel.js` (`DEVICE_TYPE_NAMES`; wideq + rethink).
+Management UI shows **name + code** (e.g. `A/C (401)`). Map lives in `html/panel.js` (`DEVICE_TYPE_NAMES`).
 
 | deviceType | Class | Examples |
 |------------|-------|----------|
-| 101 | Refrigerator | 2REF*, GML844 / 2REF12EII_P_2 |
+| 101 | Refrigerator | `2REF*`, `2RES*`, `2REB*` |
 | 102 | Kimchi Refrigerator | |
-| 103 | Water purifier | 1WPU4CIGCR__2 |
-| 201 | Washer | F_V*, VCDWL2QEUK, WTDN3 |
-| 202 | Dryer | RV13*, RH10V9_CH |
-| 203 | Styler | ST_B_E4H01Y_APL |
-| 204 | Dishwasher | |
-| 221/222/223 | WashTower | FAKPK21021 / BDH_D39301_KR / WHT_* |
-| 301 | Oven / Range | |
-| 302 | Microwave | |
+| 103 | Water purifier | `1WPU4CIGCR__2`, `1WPD6CMIDR__3` |
+| 201 | Washer | `F_V*`, `Y_V*`, `VCDWL2QEUK`, `WTDN3` |
+| 202 | Dryer | `RV13*`, `RH10V9_CH`, `RC90*` |
+| 203 | Styler | `ST_B_E4H01Y_APL`, `S5MPC` |
+| 204 | Dishwasher | `D0211`, `N17`, `N02`, `H11` |
+| 221/222/223 | WashTower | `WTL_FXU_BDV_NA_01`, `FAKPK21021`, `BDH_D39301_KR` |
+| 301 | Oven / Range | `WFV474PGV`, `WLSI_633_`, `WLREL6323S` |
+| 302 | Microwave | `WMVEM1825`, `WMVEL2137`, `WMHES1738` |
 | 303 | Cooktop | |
-| 304 | Range Hood | STUDIO_HOOD |
-| 401 | A/C | RAC, WIN, CST, POT |
-| 402 | Air Purifier | |
-| 403 | Dehumidifier | DHUM_* |
-| 404 | Humidifier | HUM_056905_WW |
+| 304 | Range Hood | `STUDIO_HOOD` |
+| 401 | A/C | `RAC_*`, `WIN_*`, `CST_*`, `POT_*`, `CSL_*` |
+| 402 | Air Purifier | `AIR_910604_WW` |
+| 403 | Dehumidifier | `DHUM_*` |
+| 404 | Humidifier | `HUM_056905_WW` |
+| 406 | Water heater | `WHT_056905_WW` |
 | 501 | Robot Vacuum | |
-| 504 | Vacuum | HWWA9K_F2 |
+| 504 | Vacuum | `HWWA9K_F2`, `HWWA9S_F2U` |
 
-## Adding support (Rust)
+## Adding support
 
-1. Implement handler under `crates/rethink-devices/src/devices/` (tests in the same file).
-2. One line in the `register_devices!` table in `devices/mod.rs`.
-3. Fixture tests from PR captures or live `monitor` LLM export.
-4. See wiki *Adding-support-for-a-new-device* and management RE panel.
+1. Implement a handler under `crates/rethink-devices/src/devices/` (tests in the same file).
+2. Add one line to the `register_devices!` table in `crates/rethink-devices/src/devices/mod.rs`.
+3. Add fixture tests from captures.
+4. See [`Adding-support-for-a-new-device.md`](Adding-support-for-a-new-device.md) and the management UI RE panel.
 
-## Management RE tooling (this work)
+## Management RE tooling
 
 - Device list + detail (meta, HA properties, platform).
 - Server-side TLV/AABB decode (`/api/decode`).
 - Unknown-tag classification vs known catalog (`/api/re/unknowns`).
-- One-click LLM-ready export text for unknown traffic.
+- One-click text export for unknown traffic.

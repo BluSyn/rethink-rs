@@ -1,8 +1,8 @@
 # CST_570004_WW (cassette AC, deviceType 401) RE notes
 
-Alias of `RAC_056905_WW` handler. Values frames use kind **`0xa7`** (same TLV body as wall RAC).
+Uses its own handler (`cst_570004_ww.rs`) with the DualCool TLV wire format. Values frames use kind **`0xa7`** (same TLV body as wall RAC).
 
-## Your delta capture (2026-08-10)
+## Delta capture (2026-08-10)
 
 A and B are **byte-identical** (`hex` equal), Δt **268 ms**. Empty delta is correct — two deliveries of the same values snapshot (keep-alive / re-publish), not a state change. For RE, treat as **one** frame.
 

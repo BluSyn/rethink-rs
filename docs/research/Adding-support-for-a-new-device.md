@@ -13,24 +13,24 @@ The general approach is reverse-engineering: get the device talking, watch its t
 
 ## Prerequisites
 
-- A working `rethink-cloud` installation — see the [installation guide](Installing-rethink‐cloud).
+- A working `rethink-cloud` installation — see the [installation guide](https://github.com/anszom/rethink/wiki/Installing-rethink%E2%80%90cloud).
 - The device's **ThinQ Model ID** (e.g. `RAC_056905_WW`, `2REF11EIDA__4`). This is printed during provisioning and is the key used to register a device class in the code.
-- Ideally, an LG ThinQ account and the official app, so you can use [bridge mode](Bridge) and observe how LG's own cloud handles the device. This is the single most valuable reverse-engineering aid.
+- Ideally, an LG ThinQ account and the official app, so you can use [bridge mode](https://github.com/anszom/rethink/wiki/Bridge) and observe how LG's own cloud handles the device. This is the single most valuable reverse-engineering aid.
 - Find or create an [issue](https://github.com/anszom/rethink/issues) for the unsupported device. This will allow other users to see that you're working on it.
 
 ## Provision the device
 
-Run the device through the normal provisioning ("setup") process so that it connects to `rethink-cloud`. See the [setup protocol](SetupProtocol) and the installation guide.
+Run the device through the normal provisioning ("setup") process so that it connects to `rethink-cloud`. See the [setup protocol](SetupProtocol.md) and the installation guide.
 
 **Provisioning is largely protocol-agnostic** — it usually succeeds even for devices rethink does not yet translate, because it only configures Wi-Fi and cloud endpoints. So you can provision an unsupported device and still observe its traffic.
 
 If provisioning fails for your device, see [issue #58](https://github.com/anszom/rethink/issues/58).
 
-Once provisioning completes, the device should appear in the [web management panel](Bridge#device-setup) (default port `44401`).
+Once provisioning completes, the device should appear in the [web management panel](https://github.com/anszom/rethink/wiki/Bridge#device-setup) (default port `44401`).
 
 ## Bridge the device to the official cloud
 
-Enable [bridge mode](Bridge) for the device. In bridge mode, rethink forwards the device's traffic to the real LG cloud while still letting you observe every packet and inject new ones. This works even if the device's protocol is not supported yet.
+Enable [bridge mode](https://github.com/anszom/rethink/wiki/Bridge) for the device. In bridge mode, rethink forwards the device's traffic to the real LG cloud while still letting you observe every packet and inject new ones. This works even if the device's protocol is not supported yet.
 
 In the bridge mode, the official LG app keeps working, so you can **toggle real settings and issue real commands** and watch what travels over the wire. Each packet sent to/from the device can be observed in the management panel and rethink-cloud logs.
 
@@ -40,10 +40,10 @@ With the device provisioned and bridged, this is the classic loop: identify the 
 
 ## Identify the protocol variant
 
-ThinQ2 devices have been observed to use one of two binary formats. Determine which one your device uses by inspecting the packets in the management panel's device monitor, or in the logs (enable the `incoming` log topic in `config.json`).
+ThinQ2 devices have been observed to use one of two binary formats. Determine which one your device uses by inspecting the packets in the management panel's device monitor, or in the logs (enable the `incoming` log topic in `config.jsonc`).
 
-- **[TLV protocol](TLVProtocol)** — type/length/value-encoded fields, framed with a CRC16. Used e.g. by DualCool AC. Use `TlvDeviceCore` in Rust.
-- **[AABB protocol](AABBProtocol)** — fixed-layout packets bracketed by `0xAA`…`0xBB` with a simple checksum. Used e.g. by fridges and newer washers. Use `AabbDeviceCore`.
+- **[TLV protocol](TLVProtocol.md)** — type/length/value-encoded fields, framed with a CRC16. Used e.g. by DualCool AC. Use `TlvDeviceCore` in Rust.
+- **[AABB protocol](AABBProtocol.md)** — fixed-layout packets bracketed by `0xAA`…`0xBB` with a simple checksum. Used e.g. by fridges and newer washers. Use `AabbDeviceCore`.
 
 ThinQ1 devices (like WTDN3) use the older XML-style protocol and implement `DeviceHandler` with ThinQ1 mocks/adapters.
 
@@ -89,7 +89,7 @@ Encode each finding as a property your device class publishes to Home Assistant.
 
 Now do the reverse: **change settings in the official LG app** and capture the commands the cloud sends down to the device. This tells you how to *write* state.
 
-Match each app action to the resulting packet, then implement `setProperty()` (or the equivalent TLV write transform) so that Home Assistant commands produce the same bytes. Most devices also need an initial "query" packet before they report anything — e.g. the fridges send `F0ED…` on startup (see the device classes' `start()` method).
+Match each app action to the resulting packet, then implement `set_property()` (or the equivalent TLV write transform) so that Home Assistant commands produce the same bytes. Most devices also need an initial "query" packet before they report anything — e.g. the fridges send `F0ED…` on startup (see the device classes' `start()` method).
 
 ## Cross-check against the LG cloud's own parsing
 
@@ -156,7 +156,7 @@ Type notes on stdin while operating the appliance. Offline analysis: MCP `read_c
 
 ## Caveats
 
-- The cloud feed is the key enabler: it provides labelled ground truth, which turns field inference into a supervised problem — and it's the only generic decoder available for [AABB](AABBProtocol) devices.
+- The cloud feed is the key enabler: it provides labelled ground truth, which turns field inference into a supervised problem — and it's the only generic decoder available for [AABB](AABBProtocol.md) devices.
 - Correlation is a coarse time-window match, so a quiet account helps; concurrent activity on other devices can leak into the window.
 - The agent *proposes*; you review. Entity modelling — sensible names, device classes, value ranges, which fields are even worth exposing — is a judgement call best left to a human, and is bound by the [Guidelines](#guidelines).
 - Safety: only `toDevice` injection actuates hardware and it's gated; `probe` only injects `fromDevice`. Still, you are talking to a real appliance through the real cloud — supervise it.
