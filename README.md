@@ -66,12 +66,17 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `2REF11EIDA__4` | LF28H8330S | Fridge and freezer setpoints, and the flex drawer. |
 | `2REF11EIDG__4` | LRFXC2606S / LRFXS3106S | Setpoints, Ice Plus, Sabbath, Smart Learner, filter life, and water use. |
 | `2REF11EICT__4` | LRYXC2606S | The EIDG controls, plus Craft Ice and the ice-maker states. Sabbath schedule is left out. |
+| `2REF11EICDX_2` | LHFS28XBS | Nonlinear Celsius and linear Fahrenheit setpoints, Ice Plus, Craft Ice, Sabbath, Smart Learner, Smart Grid, water filter, and per-door events. |
 | `2REF11EBIVPC4` | Unknown | Celsius setpoints in this model's raw units, door, express freeze, and Shabbat. |
 | `2REF11EII__M2`, `2REF12EII_N_2` | LMXS28626S, and GC-L228FTL1 for the alias | Setpoints from the model-JSON maps (with `2REF12EII_N_2`'s own Celsius/Fahrenheit tables). This handler does not ack the appliance. |
+| `2REF12EICD__2` | Unknown fridge | 26-byte status with nonlinear Celsius tables, 41-byte `F0 17` writes, Ice Plus, Sabbath, Smart Learner, and Craft Ice. |
 | `2REF12EII_P_2` | GML844 slim multi-door | Fridge and freezer setpoints with this model's own formulas. |
+| `2REF12EJDD__2` | LRFDS3006D | 18-byte status with model-JSON temperature maps, Ice Plus, Smart Grid, Sabbath Mode, door, and water/fresh-air filter health. |
 | `2REFT1DIC4P_U` | GF-V700BSLC | Setpoints, express freeze, and Craft Ice. |
 | `2REFTBDII4P_U` | GF-L500MBL | Setpoints. A temperature write also sets the unit byte. |
+| `2RES1VE41PFA2` | Unknown side-by-side (T20_VS4M) | Setpoints, express freeze, Sabbath mode, water filter health, and per-door `10 A8` events. |
 | `2RES1VE61NFA2` | GSJV70PZTE | Fridge and freezer setpoints, express cool, and express freeze. |
+| `2RES1VE61PFA2` | GC-L257SLP | Setpoints, express cool, express freeze, Smart Learner, water filter status, and per-door `10 A8` events. |
 | `2REB1GLVB1__2` | GSB470BASZ | Setpoints, express cool, express freeze, and eco friendly. |
 | `2REBGLUB_2P__` | GBBSJ2CCEP | Setpoints, Super Cool, Vacation, Fresh Converter, door counts, energy, and night view. |
 | `2REBGLUBD1P_A` | GBBSJ11ESW | Setpoints, Super Freeze, Vacation, and Super Cool. Only the fridge door is reported. |
@@ -182,12 +187,7 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 
 | ThinQ modelId | Sold as | Named by |
 | --- | --- | --- |
-| `2REF11EICDX_2` | LHFS28XBS | Open PR #304 |
 | `2REF11EID___2` | LFXC22526S (ThinQ1) | Open PR #320 |
-| `2REF12EICD__2` | Unknown fridge | Open PR #273 |
-| `2REF12EJDD__2` | LRFDS3006D | Open PR #337 |
-| `2RES1VE41PFA2` | Unknown side-by-side | Open PR #298 |
-| `2RES1VE61PFA2` | GC-L257SLP | Open PR #324 |
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
 | `BDH_HI2103_EU` | RH18U8AVCW | Open PR #315 |
 | `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
