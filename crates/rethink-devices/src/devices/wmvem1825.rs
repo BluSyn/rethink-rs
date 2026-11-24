@@ -60,12 +60,22 @@ fn preference_payload() -> [u8; PREFERENCE_PAYLOAD_LEN] {
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
+    max_fan_speed: u8,
     fan_speed: Mutex<u8>,
     light_level: Mutex<u8>,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
+        Self::with_max_fan_speed(ha, thinq, meta, 2)
+    }
+
+    pub(crate) fn with_max_fan_speed(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        max_fan_speed: u8,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::new(ha, thinq.clone());
         let mut cfg = default_config(&meta, Some(json!({"name": "LG Microwave"})));
         cfg.components = [
@@ -124,7 +134,7 @@ impl Device {
                     "percentage_state_topic": "$this/fan_speed",
                     "percentage_command_topic": "$this/fan_speed/set",
                     "speed_range_min": 1,
-                    "speed_range_max": 2,
+                    "speed_range_max": max_fan_speed,
                     "name": "Vent fan",
                     "icon": "mdi:fan",
                 }),
@@ -174,6 +184,7 @@ impl Device {
 
         let this = Arc::new(Self {
             core: core.clone(),
+            max_fan_speed,
             fan_speed: Mutex::new(0),
             light_level: Mutex::new(0),
         });
@@ -204,7 +215,7 @@ impl Device {
             self.core
                 .publish_property("power_level", (i64::from(power_level) * 10).into());
         }
-        if fan_speed <= 2 {
+        if fan_speed <= self.max_fan_speed {
             *self.fan_speed.lock() = fan_speed;
             self.core.publish_on_off("fan_power", fan_speed > 0);
             self.core
@@ -295,7 +306,8 @@ impl Device {
                 let Some(v) = js::number(mqtt_value).filter(|v| v.is_finite()) else {
                     return;
                 };
-                *self.fan_speed.lock() = v.round().clamp(0.0, 2.0) as u8;
+                *self.fan_speed.lock() =
+                    v.round().clamp(0.0, f64::from(self.max_fan_speed)) as u8;
                 self.send_hood_command();
             }
             "light_power" => {

@@ -89,6 +89,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `G2V7_Y___W.B_2QEUK` | F2NX50S9TKC | Course, temperature, spin, and power, start, and pause. |
 | `VCDWL2QEUK` | F4X7511TWS | Read-only course and status. Power is off only when the status byte is 0. |
 | `F_V__F___W.B_1QEUK`, `F_VA_F___W.B__QEUK` | FV1413H2B / FV1413H2BA. The second id is an alias. | Course, spin, temperature, dry mode, energy, and power/start/pause. |
+| `F_V__F___W.B__QEUK` | CV9011EC4 washer/dryer | The `F_V__F___W.B_1QEUK` handler with enveloped `0x20` status and `Cotton+` at code `0x04`. |
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
 | `F_V__F___W.B__ECON` | CV9014WC2 washer/dryer | Staged course (spin, temperature, rinse, dry, delay) then start. |
 | `Y_V8_F___W.B_2QEUK` | W4WR70E61 washer/dryer | Wash and dry fields, plus the wash-cycle counter. |
@@ -155,7 +156,9 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `WLSI_633_` | LSIS6338FE | Read-only oven and cooktop on the 115-byte record. |
 | `WLREL6323S` | LREL6323S | Read-only oven and cooktop, plus clock and beeper writes. |
 | `WMVEM1825` | MVEM1825D/F | Oven state, hood fan and light, clock, and beeper. |
+| `WMHES1738` | MHES1738F | The `WMVEM1825` handler with five vent fan speeds. |
 | `WMVEL2137` | MVEL2033F | The same, with four vent speeds, sound, and clock sync. |
+| `WMVEF1337F` | MVEF1337F | The `WMVEL2137` handler with 53-byte records and content-sync acks. |
 
 ### Stylers and vacuums
 
@@ -188,7 +191,6 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
 | `F_V7_F___W.B__QEUK` | CV5012PC4A | Open PR #308 |
-| `F_V__F___W.B__QEUK` | CV9011EC4 | Open PR #341 |
 | `RV13B6AM_D_US_WIFI` | DLE3500W | Open PRs #326 and #336 |
 | `RV13U7JS9W_D_US_WIFI` | DLEX7800VE | Open PR #329 |
 | `T1872EFHU_F` | WT7800CV | Open PR #329 |
@@ -197,8 +199,6 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `W3S1CVK2EVS_D_US` | WKGX201HWA dryer half | Open PR #300 |
 | `WLSEL6333F` | LSEL6333F | Open PRs #304 and #329 |
 | `WLRGL5825F` | Unknown range | Open PR #273 |
-| `WMHES1738` | MHES1738F | Open PR #323 |
-| `WMVEF1337F` | MVEF1337F | Open PR #339 |
 | `Y_V8_F___W.B32QEUK` | FWY916WBTN1 | Open PR #316 |
 
 Unlisted appliances can still be used in **bridge mode** (no HA translation). For new devices or gaps, contribute **upstream**, not here.

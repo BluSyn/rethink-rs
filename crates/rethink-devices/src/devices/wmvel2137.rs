@@ -174,6 +174,7 @@ fn parse_local_time(value: &str) -> Option<(u8, u8, u8)> {
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
+    record_len: usize,
     last_vent_speed: Mutex<u8>,
     last_lamp_level: Mutex<u8>,
 }
@@ -184,7 +185,17 @@ impl Device {
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
     ) -> Arc<Self> {
-        let core = AabbDeviceCore::new(ha, thinq.clone());
+        Self::with_options(ha, thinq, meta, RECORD_LEN, false)
+    }
+
+    pub(crate) fn with_options(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        record_len: usize,
+        auto_ack: bool,
+    ) -> Arc<Self> {
+        let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), auto_ack);
         let mut cfg = default_config(&meta, Some(json!({"name": "LG Microwave"})));
         cfg.components = [
             (
@@ -350,6 +361,7 @@ impl Device {
 
         let this = Arc::new(Self {
             core: core.clone(),
+            record_len,
             last_vent_speed: Mutex::new(1),
             last_lamp_level: Mutex::new(1),
         });
@@ -363,7 +375,8 @@ impl Device {
     }
 
     fn process_status(&self, rec: &[u8]) {
-        if rec.len() != RECORD_LEN || rec[SETTINGS_OFFSET] & SETTINGS_PREFIX_MASK != SETTINGS_PREFIX
+        if rec.len() != self.record_len
+            || rec[SETTINGS_OFFSET] & SETTINGS_PREFIX_MASK != SETTINGS_PREFIX
         {
             return;
         }
@@ -421,10 +434,11 @@ impl Device {
         if buf.first().copied() != Some(CLASS_BYTE) {
             return;
         }
-        if buf.len() == 48 && buf[1] == 0xeb {
-            self.process_status(&buf[2..2 + RECORD_LEN]);
-        } else if buf.len() == 94 && buf[1] == 0xec {
-            self.process_status(&buf[48..48 + RECORD_LEN]);
+        let n = self.record_len;
+        if buf.len() == 2 + n && buf[1] == 0xeb {
+            self.process_status(&buf[2..2 + n]);
+        } else if buf.len() == 2 + 2 * n && buf[1] == 0xec {
+            self.process_status(&buf[2 + n..2 + 2 * n]);
         }
     }
 

@@ -6,7 +6,9 @@
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::{pub_error_status, pub_temp_spin, set_power_start_pause};
 use crate::washer_common::{course_name, drying_mode, fy_base_components, install_components};
-use rethink_core::device_base::{default_config, process_common_status, AabbDeviceCore};
+use rethink_core::device_base::{
+    default_config, process_common_status, process_enveloped_status, AabbDeviceCore,
+};
 use rethink_core::{HaConnection, Metadata, Thinq2Device};
 use serde_json::json;
 use std::sync::Arc;
@@ -15,12 +17,28 @@ const RECORD_LEN: usize = 39;
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
+    accept_enveloped: bool,
+    cotton_plus_0x04: bool,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
+        Self::with_options(ha, thinq, meta, false, false)
+    }
+
+    pub(crate) fn with_options(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        accept_enveloped: bool,
+        cotton_plus_0x04: bool,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::new(ha, thinq.clone());
-        let this = Arc::new(Self { core: core.clone() });
+        let this = Arc::new(Self {
+            core: core.clone(),
+            accept_enveloped,
+            cotton_plus_0x04,
+        });
 
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
         install_components(&mut base, fy_base_components(crate::washer_common::FY_REFRESH));
@@ -44,6 +62,12 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
+        if self.accept_enveloped {
+            if let Some(rec) = process_enveloped_status(buf, 0x20, RECORD_LEN) {
+                self.process_status(rec);
+                return;
+            }
+        }
         if let Some(rec) = process_common_status(buf, 0x20, RECORD_LEN) {
             self.process_status(rec);
         }
@@ -64,10 +88,12 @@ impl Device {
 
         self.core.publish_on_off("power", status > 0);
         pub_error_status(&self.core, error, status, crate::washer_common::fy_refresh_name);
-        self.core.publish_property(
-            "course",
-            course_name(course as u32).unwrap_or("None").into(),
-        );
+        let course_label = if self.cotton_plus_0x04 && course == 0x04 {
+            "Cotton+"
+        } else {
+            course_name(course as u32).unwrap_or("None")
+        };
+        self.core.publish_property("course", course_label.into());
         pub_temp_spin(&self.core, temp, spin);
         self.core.publish_property(
             "drying_mode",
