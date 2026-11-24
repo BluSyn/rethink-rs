@@ -155,20 +155,20 @@ impl TestPki {
     /// Server config presenting `leaf`; with `require_client_cert`, clients need a leaf of
     /// this CA.
     pub fn server_config(&self, leaf: &Leaf, require_client_cert: bool) -> Arc<ServerConfig> {
+        use rustls::pki_types::pem::PemObject;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut leaf.cert_pem.as_bytes())
+            CertificateDer::pem_slice_iter(leaf.cert_pem.as_bytes())
                 .collect::<Result<_, _>>()
                 .unwrap();
-        let key = rustls_pemfile::private_key(&mut leaf.key_pem.as_bytes())
-            .unwrap()
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes())
             .unwrap();
         let builder = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .unwrap();
         let builder = if require_client_cert {
             let mut roots = RootCertStore::empty();
-            for cert in rustls_pemfile::certs(&mut self.ca_pem.as_bytes()) {
+            for cert in CertificateDer::pem_slice_iter(self.ca_pem.as_bytes()) {
                 roots.add(cert.unwrap()).unwrap();
             }
             let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)

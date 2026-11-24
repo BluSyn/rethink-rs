@@ -32,7 +32,7 @@ Shared tables: `washer_common.rs`, `fridge_common.rs`, `ac_tables.rs`, `tl_us_wa
 
 ## Build and test
 
-Rust 1.88 or newer. The image is `rust:1.99-bookworm`.
+Rust 1.88 or newer. The image is `rust:1.100-trixie`.
 
 ```bash
 cargo test --workspace --offline -- --test-threads=8

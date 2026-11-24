@@ -1,6 +1,6 @@
 //! LG EMP OAuth2 signed requests (port of bridge/oauth2.ts).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use std::time::{SystemTime, UNIX_EPOCH};
 

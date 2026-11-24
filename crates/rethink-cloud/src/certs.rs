@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use openssl::pkey::PKey;
 use openssl::ssl::SslAcceptor;
 use openssl::x509::X509;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::sync::Arc;
@@ -33,14 +34,11 @@ impl From<Certificate> for Ca {
 /// modules (RTK_RTL8711am) only offer legacy CBC-SHA suites that rustls rejects.
 #[allow(dead_code)] // kept for non-device TLS uses / tests
 pub fn server_config(ca: &Ca) -> Result<Arc<ServerConfig>> {
-    let mut cert_reader = std::io::Cursor::new(ca.cert_pem.as_bytes());
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .context("parse cert pem")?;
-    let mut key_reader = std::io::Cursor::new(ca.key_pem.as_bytes());
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .context("parse key pem")?
-        .context("no private key in pem")?;
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(ca.cert_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .context("parse cert pem")?;
+    let key = PrivateKeyDer::from_pem_slice(ca.key_pem.as_bytes()).context("parse key pem")?;
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -134,14 +132,12 @@ pub fn sign_csr(ca: &Ca, csr_pem: &str) -> Result<String> {
 
 #[allow(dead_code)] // helper for rustls TLS wiring / tests
 pub fn load_private_key_der(ca: &Ca) -> Result<PrivateKeyDer<'static>> {
-    let mut key_reader = std::io::Cursor::new(ca.key_pem.as_bytes());
-    let key = rustls_pemfile::private_key(&mut key_reader)?
-        .context("no private key")?;
-    Ok(key)
+    PrivateKeyDer::from_pem_slice(ca.key_pem.as_bytes()).context("parse private key")
 }
 
 #[allow(dead_code)] // helper for rustls TLS wiring / tests
 pub fn load_cert_der(ca: &Ca) -> Result<Vec<CertificateDer<'static>>> {
-    let mut cert_reader = std::io::Cursor::new(ca.cert_pem.as_bytes());
-    Ok(rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?)
+    CertificateDer::pem_slice_iter(ca.cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("parse cert pem")
 }

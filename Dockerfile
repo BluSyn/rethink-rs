@@ -10,7 +10,7 @@
 #
 # time 0.3.x needs rustc >= 1.88; icu_* 2.2 needs >= 1.86.
 
-FROM rust:1.99-bookworm AS build
+FROM rust:1.100-trixie AS build
 WORKDIR /app
 
 ENV CARGO_TERM_COLOR=always \
@@ -99,16 +99,16 @@ RUN cargo build --release \
           target/release/thinq-control \
           /out/
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 WORKDIR /app
 
 # Upgrade what the base image ships as well, so that a rebuild picks up security fixes such
 # as the ca-certificates update for the eMudhra CA compromise (DSA-6572-1). The system trust
-# store is what the Home Assistant MQTT client checks an mqtts:// broker against; the
-# bridge's HTTPS client uses the webpki roots compiled into the binary instead.
+# store is what both the Home Assistant MQTT client (mqtts://) and the bridge's HTTPS client
+# (reqwest / rustls-platform-verifier) check certificates against.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates openssl \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r app \
     && useradd -r -g app app

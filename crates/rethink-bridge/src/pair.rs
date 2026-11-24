@@ -2,9 +2,7 @@
 
 use crate::state::Environment;
 use base64::Engine;
-use rand::RngCore;
-use rsa::pkcs8::DecodePublicKey;
-use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+use openssl::rsa::{Padding, Rsa};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -85,16 +83,19 @@ fn rsa_pkcs1_encrypt(public_key_pem: &str, plaintext: &[u8]) -> anyhow::Result<V
                 .join("\n")
         )
     };
-    let pubkey = RsaPublicKey::from_public_key_pem(&pem)
-        .or_else(|_| {
-            // try SPKI DER from base64
+    let pubkey = Rsa::public_key_from_pem(pem.as_bytes())
+        .or_else(|_| Rsa::public_key_from_pem_pkcs1(pem.as_bytes()))
+        .or_else(|_| -> anyhow::Result<_> {
             let der = base64::engine::general_purpose::STANDARD.decode(public_key_pem.trim())?;
-            RsaPublicKey::from_public_key_der(&der).map_err(|e| anyhow::anyhow!("{e}"))
+            Rsa::public_key_from_der(&der)
+                .or_else(|_| Rsa::public_key_from_der_pkcs1(&der))
+                .map_err(|e| anyhow::anyhow!("{e}"))
         })?;
-    let mut rng = rand::thread_rng();
-    let encrypted = pubkey
-        .encrypt(&mut rng, Pkcs1v15Encrypt, plaintext)
+    let mut encrypted = vec![0u8; pubkey.size() as usize];
+    let len = pubkey
+        .public_encrypt(plaintext, &mut encrypted, Padding::PKCS1)
         .map_err(|e| anyhow::anyhow!("RSA encrypt: {e}"))?;
+    encrypted.truncate(len);
     Ok(encrypted)
 }
 
@@ -125,7 +126,7 @@ pub async fn pair_thinq2(
     public_key_pem: &str,
 ) -> anyhow::Result<PairResult> {
     let mut nonce = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::fill(&mut nonce);
 
     // Route (with timeout race similar to TS)
     let route_url = format!("{IOT_BASE_URL}/route");
@@ -445,5 +446,21 @@ mod tests {
         assert!(pk.contains("PRIVATE KEY") || pk.contains("EC PRIVATE"));
         assert!(pubk.contains("PUBLIC KEY"));
         assert!(csr.contains("CERTIFICATE REQUEST") || csr.contains("BEGIN"));
+    }
+
+    #[test]
+    fn rsa_pkcs1_encrypt_roundtrips_pem_and_bare_base64() {
+        let key = Rsa::generate(2048).unwrap();
+        let pub_pem = String::from_utf8(key.public_key_to_pem().unwrap()).unwrap();
+        let pub_der_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.public_key_to_der().unwrap());
+        let plain = b"otp-secret-payload";
+
+        for input in [&pub_pem, &pub_der_b64] {
+            let ct = rsa_pkcs1_encrypt(input, plain).unwrap();
+            let mut dec = vec![0u8; key.size() as usize];
+            let n = key.private_decrypt(&ct, &mut dec, Padding::PKCS1).unwrap();
+            assert_eq!(&dec[..n], plain);
+        }
     }
 }

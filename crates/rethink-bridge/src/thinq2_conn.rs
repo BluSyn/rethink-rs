@@ -268,7 +268,7 @@ mod tests {
         buf: &mut BytesMut,
     ) -> Option<v4::Packet> {
         loop {
-            match v4::read(buf, 1 << 20) {
+            match v4::Packet::read(buf, 1 << 20) {
                 Ok(packet) => return Some(packet),
                 Err(mqttbytes::Error::InsufficientBytes(_)) => {}
                 Err(e) => panic!("{e}"),

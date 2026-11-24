@@ -47,7 +47,8 @@ fn http_get(path: &str) -> Result<Value> {
     let body = ureq::get(&url)
         .call()
         .map_err(|e| anyhow!("GET {url}: {e}"))?
-        .into_string()?;
+        .body_mut()
+        .read_to_string()?;
     Ok(serde_json::from_str(&body).unwrap_or(json!({"raw": body})))
 }
 
@@ -55,10 +56,11 @@ fn http_post_json(path: &str, body: &Value) -> Result<Value> {
     let host = mgmt_host();
     let url = format!("http://{host}{path}");
     let resp = ureq::post(&url)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())
+        .header("Content-Type", "application/json")
+        .send(&body.to_string())
         .map_err(|e| anyhow!("POST {url}: {e}"))?
-        .into_string()?;
+        .body_mut()
+        .read_to_string()?;
     Ok(serde_json::from_str(&resp).unwrap_or(json!({"raw": resp})))
 }
 

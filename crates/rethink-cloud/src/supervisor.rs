@@ -32,6 +32,7 @@ pub async fn mqtt_service(url: &str, token: Option<&str>) -> Option<MqttBroker> 
 
 /// The JSON answer, or `None` for an unsuccessful status.
 async fn ask(url: &str, token: &str) -> reqwest::Result<Option<Value>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
         // The Supervisor is on the add-on network, which a proxy from the environment is not.
         .no_proxy()

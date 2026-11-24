@@ -68,6 +68,7 @@ pub(crate) enum Server {
 impl Server {
     /// Any http(s) URL; configuration only takes `https://` ones.
     pub(crate) fn doh(url: url::Url) -> Result<Self, String> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Plain reqwest: the DoH server itself is found through the system resolver.
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
@@ -237,6 +238,7 @@ impl Resolver {
     /// A reqwest client builder whose lookups go through this resolver (reqwest's own when it
     /// has no servers).
     pub fn http_client(self: &Arc<Self>) -> reqwest::ClientBuilder {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let builder = reqwest::Client::builder();
         if self.servers.is_empty() {
             return builder;
