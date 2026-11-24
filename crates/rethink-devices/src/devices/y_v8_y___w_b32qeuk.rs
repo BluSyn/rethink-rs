@@ -140,6 +140,9 @@ pub(crate) trait Extension: Send + Sync + 'static {
         None
     }
 
+    /// Publishes extension-specific `set_*` entities whenever settings are republished.
+    fn publish_settings(&self, _dev: &Device) {}
+
     /// Edits a Run programme frame before it is sent.
     fn programme_command(&self, _dev: &Device, _cmd: &mut [u8; 18]) {}
 
@@ -361,6 +364,7 @@ impl Device {
             .publish_on_off("set_prewash", s.options & OPT_PREWASH != 0);
         self.core
             .publish_on_off("set_steam", s.options & OPT_STEAM != 0);
+        self.ext.publish_settings(self);
     }
 
     /// `F0 26 <course> <soil> <spin> <temp> <rinse> <dry> <reserve h> <reserve min> <load>

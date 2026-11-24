@@ -81,6 +81,10 @@ fn dose_name(code: u8) -> &'static str {
     DOSES.get(code as usize).copied().unwrap_or("None")
 }
 
+fn dose_code(label: &str) -> Option<u8> {
+    DOSES.iter().position(|&n| n == label).map(|i| i as u8)
+}
+
 /// `Number()` then `Number.isInteger()`, as upstream. A blank payload is 0, out of range.
 fn parse_ez(value: &str) -> Option<u8> {
     let ml = number(value)?;
@@ -93,6 +97,9 @@ struct State {
     detergent: u8,
     softener: u8,
     dispense_type: u8,
+    /// Dose overrides chosen via `set_detergent` / `set_softener`, cleared on `run_programme`.
+    pending_detergent: Option<u8>,
+    pending_softener: Option<u8>,
     /// The programme in the download slot, and whether Set course points at it.
     slot: u8,
     run_slot: bool,
@@ -176,6 +183,14 @@ impl Extension for Ezdispense {
                 json!({"platform":"number","unique_id":"$deviceid-ezdispense_softener","state_topic":"$this/ezdispense_softener","command_topic":"$this/ezdispense_softener/set","name":"ezDispense softener amount","icon":"mdi:cup-outline","unit_of_measurement":"mL","min":9,"max":150,"step":1,"mode":"box","entity_category":"config"}),
             ),
             (
+                "set_detergent",
+                json!({"platform":"select","unique_id":"$deviceid-set_detergent","state_topic":"$this/set_detergent","command_topic":"$this/set_detergent/set","name":"Set detergent dose","icon":"mdi:cup","options":DOSES}),
+            ),
+            (
+                "set_softener",
+                json!({"platform":"select","unique_id":"$deviceid-set_softener","state_topic":"$this/set_softener","command_topic":"$this/set_softener/set","name":"Set softener dose","icon":"mdi:cup-outline","options":DOSES}),
+            ),
+            (
                 "door",
                 json!({"platform":"binary_sensor","unique_id":"$deviceid-door","state_topic":"$this/door","name":"Door","device_class":"door"}),
             ),
@@ -228,11 +243,27 @@ impl Extension for Ezdispense {
         core.publish_on_off("dispenser_drawer", s[37] & 0x04 != 0);
         core.publish_on_off("detergent_refill", s[37] & 0x01 != 0);
         core.publish_on_off("softener_refill", s[37] & 0x02 != 0);
-        let mut state = self.state.lock();
-        state.detergent = s[32];
-        state.softener = s[33];
-        state.dispense_type = s[36];
-        state.slot = s[25];
+        {
+            let mut state = self.state.lock();
+            state.detergent = s[32];
+            state.softener = s[33];
+            state.dispense_type = s[36];
+            state.slot = s[25];
+        }
+        self.publish_settings(dev);
+    }
+
+    fn publish_settings(&self, dev: &V8) {
+        let state = self.state();
+        let core = dev.core();
+        core.publish_property(
+            "set_detergent",
+            dose_name(state.pending_detergent.unwrap_or(state.detergent)).into(),
+        );
+        core.publish_property(
+            "set_softener",
+            dose_name(state.pending_softener.unwrap_or(state.softener)).into(),
+        );
     }
 
     fn course_setting(&self, dev: &V8) -> Option<&'static str> {
@@ -243,8 +274,8 @@ impl Extension for Ezdispense {
 
     fn programme_command(&self, dev: &V8, cmd: &mut [u8; 18]) {
         let state = self.state();
-        cmd[15] = state.detergent;
-        cmd[16] = state.softener;
+        cmd[15] = state.pending_detergent.unwrap_or(state.detergent);
+        cmd[16] = state.pending_softener.unwrap_or(state.softener);
         cmd[17] = state.dispense_type;
         // The slot's programme runs on the settings it was loaded with, unless changed since.
         let Some(&(_, [course, soil, spin, temp, rinse, options], detergent, softener)) =
@@ -260,12 +291,26 @@ impl Extension for Ezdispense {
         cmd[6] = pending.rinse.unwrap_or(rinse);
         cmd[11] = pending.options.unwrap_or(options);
         cmd[14] = state.slot;
-        cmd[15] = detergent.unwrap_or(cmd[15]);
-        cmd[16] = softener.unwrap_or(cmd[16]);
+        cmd[15] = state.pending_detergent.or(detergent).unwrap_or(cmd[15]);
+        cmd[16] = state.pending_softener.or(softener).unwrap_or(cmd[16]);
     }
 
     fn set_property(&self, dev: &V8, prop: &str, value: &str) -> bool {
         match prop {
+            "set_detergent" => {
+                if let Some(code) = dose_code(value) {
+                    self.state.lock().pending_detergent = Some(code);
+                }
+                dev.publish_settings();
+                true
+            }
+            "set_softener" => {
+                if let Some(code) = dose_code(value) {
+                    self.state.lock().pending_softener = Some(code);
+                }
+                dev.publish_settings();
+                true
+            }
             "set_downloaded_program" => {
                 let programme = slot_programmes()
                     .find(|(_, n)| *n == value)
@@ -305,7 +350,11 @@ impl Extension for Ezdispense {
                 // Downloaded program with nothing known in the slot runs nothing.
                 if !state.run_slot || download(state.slot).is_some() {
                     dev.run_programme();
-                    self.state.lock().run_slot = false;
+                    let mut st = self.state.lock();
+                    st.run_slot = false;
+                    st.pending_detergent = None;
+                    st.pending_softener = None;
+                    drop(st);
                     dev.publish_settings();
                 }
                 true
@@ -854,6 +903,43 @@ mod tests {
         dev.set_property("run_programme", "");
 
         assert_eq!(hex_encode(thinq.outbox().last().unwrap()), APP_START_COTTON);
+    }
+
+    #[test]
+    fn set_detergent_and_set_softener_follow_reported_and_override_f026() {
+        let (ha, thinq, dev) = feed(&[COTTON_DOSED]);
+        expect(&ha, "set_detergent", "High");
+        expect(&ha, "set_softener", "Low");
+        thinq.reset_recorder();
+
+        dev.set_property("set_detergent", "Low");
+        dev.set_property("set_softener", "Off");
+        expect(&ha, "set_detergent", "Low");
+        expect(&ha, "set_softener", "Off");
+        dev.set_property("run_programme", "");
+
+        let packet = thinq.outbox().last().unwrap().clone();
+        let inner = &packet[2..];
+        assert_eq!(inner[15], 1, "detergent level");
+        assert_eq!(inner[16], 0, "softener level");
+
+        // Choice was used up: selects follow the appliance again.
+        thinq.emit_data(&hex_decode(COTTON_DOSED));
+        expect(&ha, "set_detergent", "High");
+        expect(&ha, "set_softener", "Low");
+    }
+
+    #[test]
+    fn unknown_dose_level_is_ignored() {
+        let (_, thinq, dev) = feed(&[COTTON_DOSED]);
+        thinq.reset_recorder();
+
+        dev.set_property("set_detergent", "Lots");
+        assert!(thinq.outbox().is_empty());
+        dev.set_property("run_programme", "");
+
+        let packet = thinq.outbox().last().unwrap().clone();
+        assert_eq!(packet[2 + 15], 3, "detergent level stays as reported");
     }
 
     #[test]
