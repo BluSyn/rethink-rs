@@ -96,7 +96,7 @@ impl Device {
                     "unique_id": "$deviceid-pure_n_fresh_replace",
                     "state_topic": "$this/pure_n_fresh_replace",
                     "entity_category": "diagnostic",
-                    "name": "Pure N Fresh Replace",
+                    "name": "Pure N Fresh Status",
                 }),
             ),
             (
@@ -106,7 +106,6 @@ impl Device {
                     "icon": "mdi:water",
                     "unique_id": "$deviceid-water_filter",
                     "state_topic": "$this/water_filter",
-                    "unit_of_measurement": "months",
                     "entity_category": "diagnostic",
                     "name": "Water Filter",
                 }),
@@ -170,10 +169,16 @@ impl Device {
         self.core.publish_door_with_trigger(door == 0x01);
         self.core.publish_property(
             "pure_n_fresh_replace",
-            if pure == 0x04 { "replace" } else { "OK" }.into(),
+            if pure == 0x04 { "Replace" } else { "OK" }.into(),
         );
-        self.core
-            .publish_property("water_filter", PropertyValue::Int(water as i64));
+        self.core.publish_property(
+            "water_filter",
+            if water >= 6 {
+                "Replace".into()
+            } else {
+                PropertyValue::Int(water as i64)
+            },
+        );
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -409,7 +414,7 @@ mod tests {
                 .get("pure_n_fresh_replace")
                 .map(|x| x.as_string())
                 .as_deref(),
-            Some("replace")
+            Some("Replace")
         );
         thinq.emit_data(&hex_decode(DELTA_WATER_FILTER_7_10EC));
         assert_eq!(
@@ -419,7 +424,7 @@ mod tests {
                 .get("water_filter")
                 .map(|x| x.as_string())
                 .as_deref(),
-            Some("7")
+            Some("Replace")
         );
     }
 
