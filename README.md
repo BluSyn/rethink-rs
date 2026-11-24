@@ -75,7 +75,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `2REF12EJDD__2` | LRFDS3006D | 18-byte status with model-JSON temperature maps, Ice Plus, Smart Grid, Sabbath Mode, door, and water/fresh-air filter health. |
 | `2REFT1DIC4P_U` | GF-V700BSLC | Setpoints, express freeze, and Craft Ice. |
 | `2REFTBDII4P_U` | GF-L500MBL | Setpoints. A temperature write also sets the unit byte. |
-| `2RES1VE41PFA2` | Unknown side-by-side (T20_VS4M) | Setpoints, express freeze, Sabbath mode, water filter health, and per-door `10 A8` events. |
+| `2RES1VE41PFA2` | T20_VS4M side-by-side | Setpoints, express freeze, Sabbath mode, water filter health, and per-door `10 A8` events. |
 | `2RES1VE61NFA2` | GSJV70PZTE | Fridge and freezer setpoints, express cool, and express freeze. |
 | `2RES1VE61PFA2` | GC-L257SLP | Setpoints, express cool, express freeze, Smart Learner, water filter status, and per-door `10 A8` events. |
 | `2REB1GLVB1__2` | GSB470BASZ | Setpoints, express cool, express freeze, and eco friendly. |
@@ -88,7 +88,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | ThinQ modelId | Sold as | This handler |
 | --- | --- | --- |
 | `Y_V8_Y___W.B32QEUK` | FSR7A04PG | Course and options. Run programme sends one `F0 26` frame. |
-| `Y_V8_Y___W.B_2QEUK` | F2WR709S2W | Telemetry of `Y_V8_Y___W.B32QEUK`. Start, pause, Delay End, and the wash-option switches are withdrawn. |
+| `Y_V8_Y___W.B_2QEUK` | F2WR709S2W | The `Y_V8_Y___W.B32QEUK` handler (power and `run_programme` stay writable); start, pause, Delay End, and the wash-option switches are withdrawn. |
 | `F_V7_Y___W.B_2QEUK`, `F_V8_Y___W.B_2QEUK`, `F_V__Y___W.B_2QEUK`, `F_V7_Y___W.B__QEUK`, `F_V__Y___W.B__QEUK`, `F_V3_Y___W.B_2QEUK` | F4WV508S2E, F4WV709P1E (32-byte F4WV909P2TE), TW4V9RW9W, F2V5PS0W, WV9-1609B, F82AV35WHS. All aliases of one handler. | Course, spin, temperature, power, start, and pause. A 32-byte record also gets remote start and Delay End. |
 | `F_VB_Y___W.B_2QEUK` | F4WV710ATR | The F_V8 record plus detergent and softener doses. Child lock is not exposed. |
 | `F_C__Y___W.A__QEUK`, `F_V7_Y___W.A__QEUK` | F4WV709P1, and WV5-1275W for the alias | 30-byte status, door lock, power, start, and pause. |
@@ -115,7 +115,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F24VDD` | Unknown | Course, spin, temperature, rinse, and reserve. Start and resume send the captured template. |
 | `FAFXU25006` | WM5800HVA | Read-only 72-byte status. |
 | `FAFXU22007` | WM6700HBA | 51-byte enveloped status, door/completion events, ezDispense telemetry, and serialized `F0 E5` / `F0 24` controls. |
-| `T1789EFH_F`, `T1872EFHU_F` | WT7300CW, and WT7800CV for the alias | Course and options from the marker-led record. Stale `0xE2` snapshots are ignored. |
+| `T1789EFH_F`, `T1872EFHU_F` | WT7300CW, and WT7800CV for the alias | Course, options, power off, pause, and start from the marker-led record. Stale `0xE2` snapshots are ignored. |
 | `T17A1EFHU_F` | WT7305CV / WT7305CW | Course, delay, extra rinses, pause, and power off. Smart-course defaults come from this model's modelJSON. |
 | `TLVE5BB` | WT21BWV6 | Read-only 50-byte status. |
 | `TLXA5CFPH` | WTX5-12W top-loader | Read-only 67-byte enveloped status, course, wash time, water level, and lid lock. |
