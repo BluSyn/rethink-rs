@@ -66,6 +66,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `2REF11EIDA__4` | LF28H8330S | Fridge and freezer setpoints, and the flex drawer. |
 | `2REF11EIDG__4` | LRFXC2606S / LRFXS3106S | Setpoints, Ice Plus, Sabbath, Smart Learner, filter life, and water use. |
 | `2REF11EICT__4` | LRYXC2606S | The EIDG controls, plus Craft Ice and the ice-maker states. Sabbath schedule is left out. |
+| `2REF11EID___2` | LFXC22526S (ThinQ1) | ThinQ1 15-byte status, model-JSON setpoint tables, dynamic optional entities (Ice Plus, air/water filters, Smart Saving, Sabbath), and `ControlData` writes. |
 | `2REF11EICDX_2` | LHFS28XBS | Nonlinear Celsius and linear Fahrenheit setpoints, Ice Plus, Craft Ice, Sabbath, Smart Learner, Smart Grid, water filter, and per-door events. |
 | `2REF11EBIVPC4` | Unknown | Celsius setpoints in this model's raw units, door, express freeze, and Shabbat. |
 | `2REF11EII__M2`, `2REF12EII_N_2` | LMXS28626S, and GC-L228FTL1 for the alias | Setpoints from the model-JSON maps (with `2REF12EII_N_2`'s own Celsius/Fahrenheit tables). This handler does not ack the appliance. |
@@ -94,6 +95,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F_V__Y___W.A__QEUK` | WV9-1409W | Course at its own offset. Start sends one `F0 26` with the settings held in HA. |
 | `G2V7_Y___W.B_2QEUK` | F2NX50S9TKC | Course, temperature, spin, and power, start, and pause. |
 | `VCDWL2QEUK` | F4X7511TWS | Read-only course and status. Power is off only when the status byte is 0. |
+| `VCCHL2QEUK` | WHX9016TLC washer/dryer | 71-byte enveloped status, dry level, door events, energy, and power/start/pause (`F0 A1` / `F0 E5`). |
 | `F_V__F___W.B_1QEUK`, `F_VA_F___W.B__QEUK`, `F_V7_F___W.B__QEUK` | FV1413H2B / FV1413H2BA, and CV5012PC4A for the third id. The last two ids are aliases. | Course, spin, temperature, dry mode, downloaded cycle, energy, and power/start/pause. |
 | `F_V__F___W.B__QEUK` | CV9011EC4 washer/dryer | The `F_V__F___W.B_1QEUK` handler with enveloped `0x20` status and `Cotton+` at code `0x04`. |
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
@@ -115,6 +117,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `T1789EFH_F`, `T1872EFHU_F` | WT7300CW, and WT7800CV for the alias | Course and options from the marker-led record. Stale `0xE2` snapshots are ignored. |
 | `T17A1EFHU_F` | WT7305CV / WT7305CW | Course, delay, extra rinses, pause, and power off. Smart-course defaults come from this model's modelJSON. |
 | `TLVE5BB` | WT21BWV6 | Read-only 50-byte status. |
+| `TLXA5CFPH` | WTX5-12W top-loader | Read-only 67-byte enveloped status, course, wash time, water level, and lid lock. |
 | `MI2U7B` | SideKick pedestal washer | Course, state, and drawer. Writes wait for a fresh powered-on report. |
 | `WTDN3` | F2J7HG1W (ThinQ1) | Course, rinse, child lock, delay, and tub-clean count. Remaining time is 0 while off. Power, start, and pause. |
 | `WTWN3`, `WTWN3H` | F4J7TN1W, and F4J7VY2WD for the alias | ThinQ1 course, wash, rinse, and options. |
@@ -167,6 +170,8 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `WFV474PGV` | Unknown double oven | Both cavities' state, a gated remote start, timer, and cancel. Preference rows are write-only. |
 | `WLSI_633_` | LSIS6338FE | Read-only oven and cooktop on the 115-byte record. |
 | `WLREL6323S` | LREL6323S | Read-only oven and cooktop, plus clock and beeper writes. |
+| `WLSEL6333F` | LSEL6333F | 75-byte oven/cooktop status, `40 CF` live temperature, remote Bake start/cancel, preferences, beeper volumes, and clock sync. |
+| `WLRGL5825F` | LRGL5825F gas range | Read-only 62-byte oven and cooktop status with live oven temperature. |
 | `WMVEM1825` | MVEM1825D/F | Oven state, hood fan and light, clock, and beeper. |
 | `WMHES1738` | MHES1738F | The `WMVEM1825` handler with five vent fan speeds. |
 | `WMVEL2137` | MVEL2033F | The same, with four vent speeds, sound, and clock sync. |
@@ -187,16 +192,11 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 
 | ThinQ modelId | Sold as | Named by |
 | --- | --- | --- |
-| `2REF11EID___2` | LFXC22526S (ThinQ1) | Open PR #320 |
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
 | `BDH_HI2103_EU` | RH18U8AVCW | Open PR #315 |
 | `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
-| `TLXA5CFPH` | Unknown | Open PR #342 |
-| `VCCHL2QEUK` | WHX9016TLC washer/dryer | Open PR #344 |
-| `WLSEL6333F` | LSEL6333F | Open PRs #304 and #329 |
-| `WLRGL5825F` | Unknown range | Open PR #273 |
 
 Unlisted appliances can still be used in **bridge mode** (no HA translation). For new devices or gaps, contribute **upstream**, not here.
 

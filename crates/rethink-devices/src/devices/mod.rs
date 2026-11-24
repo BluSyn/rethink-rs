@@ -78,6 +78,7 @@ register_devices! {
         y_v8_f___w_b_2qeuk => { "Y_V8_F___W.B_2QEUK" },
         y_v8_f___w_b32qeuk => { "Y_V8_F___W.B32QEUK" },
         vcdwl2qeuk => { "VCDWL2QEUK" },
+        vcchl2qeuk => { "VCCHL2QEUK" },
         f_v__f___w_b_1qeuk => { "F_V__F___W.B_1QEUK" | "F_VA_F___W.B__QEUK" | "F_V7_F___W.B__QEUK" },
         f_v__f___w_b__qeuk => { "F_V__F___W.B__QEUK" },
         f_vb_f___w_b_2qeuk => { "F_VB_F___W.B_2QEUK" },
@@ -139,10 +140,13 @@ register_devices! {
         mi2u7b => { "MI2U7B" },
         wlsi_633_ => { "WLSI_633_" },
         wlrel6323s => { "WLREL6323S" },
+        wlsel6333f => { "WLSEL6333F" },
+        wlrgl5825f => { "WLRGL5825F" },
         y_vb_y___w_b32qeuk => { "Y_VB_Y___W.B32QEUK" },
         y_vb_f___w_b32qeuk => { "Y_VB_F___W.B32QEUK" },
         sdh_gvx5_6211 => { "SDH_GVX5_6211" },
         tlve5bb => { "TLVE5BB" },
+        tlxa5cfph => { "TLXA5CFPH" },
         dev_2reft1dic4p_u => { "2REFT1DIC4P_U" },
         dev_2reftbdii4p_u => { "2REFTBDII4P_U" },
         vent_725601_ww => { "VENT_725601_WW" | "VENT_725601" | "Z-H0151B2SR" },
@@ -156,5 +160,6 @@ register_devices! {
         rac_056905_ww_t1 => { "RAC_056905_WW" },
         f3l2cyv5w_wifi => { "F3L2CYV5W_WIFI" },
         rc90u2_ww_t1 => { "RC90U2_WW" },
+        dev_2ref11eid___2 => { "2REF11EID___2" },
     }
 }
