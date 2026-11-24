@@ -476,7 +476,7 @@ mod tests {
     fn base_f017_matches_pr96_template_exactly() {
         let base = Device::base_f017();
         assert_eq!(hex_encode(&base).to_ascii_lowercase(), F017_BASE);
-        // Critical trailing zeros (skeptic off-by-one: not 24-26/29/34)
+        // Trailing zero bytes in the captured template (indices 23-25, 28, 33).
         assert_eq!(base[23], 0x00);
         assert_eq!(base[24], 0x00);
         assert_eq!(base[25], 0x00);

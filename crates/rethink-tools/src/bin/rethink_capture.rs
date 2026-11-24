@@ -1,5 +1,5 @@
-//! Capture device wire traffic from rethink-cloud management WebSocket to JSONL.
-//! Replaces tools/rethink-capture.ts (device path; use bridge mode for cloud correlation).
+//! Capture device wire traffic from rethink-cloud management WebSocket to JSONL
+//! (device path; use bridge mode for cloud correlation).
 //!
 //! Usage:
 //!   rethink-capture <mgmt-host[:port]> <device-uuid> [out.jsonl]

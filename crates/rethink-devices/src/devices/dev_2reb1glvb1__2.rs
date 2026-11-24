@@ -241,7 +241,7 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rethink_core::{Thinq2Device, hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Metadata, PropertyValue};
+    use rethink_core::{Thinq2Device, hex_decode, hex_encode, MockHaConnection, MockThinq2Device, Metadata};
     use crate::device_trait::DeviceHandler;
 
     const DEVICE_ID: &str = "test-id";
@@ -361,11 +361,5 @@ mod tests {
                     .to_string(),
             ]
         );
-    }
-
-    // silence unused
-    #[allow(dead_code)]
-    fn _pv() -> PropertyValue {
-        PropertyValue::Int(0)
     }
 }

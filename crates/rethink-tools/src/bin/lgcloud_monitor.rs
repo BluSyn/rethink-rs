@@ -1,7 +1,6 @@
-//! Load LG ThinQ OAuth credentials and list homes/devices via the ThinQ API.
-//! Replaces tools/lgcloud-monitor.ts for the common RE use case of confirming
-//! cloud account access. Live MQTT notification streaming is handled by
-//! rethink-cloud bridge mode while devices are bridged.
+//! Load LG ThinQ OAuth credentials and verify cloud account / home access via
+//! the ThinQ API. Live MQTT notification streaming is handled by rethink-cloud
+//! bridge mode while devices are bridged.
 //!
 //! Usage:
 //!   lgcloud-monitor [--state DIR]

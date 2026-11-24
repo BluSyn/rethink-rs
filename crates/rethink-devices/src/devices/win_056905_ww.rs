@@ -92,14 +92,7 @@ impl Device {
                 }
                 false
             }));
-            // write_only sets readable=false; restore readable for read_callback path via process_key_value
-            // but power should not publish — keep readable false and use read_callback on reprocess of mode.
-            // Actually TS has readable:false and read_callback that reprocesses mode. read path:
-            // doRead = read_callback(...); if doRead && readable → publish. So readable false is fine.
-            // But read_callback only runs if field is found — and readable false still runs callback:
-            //   if doRead && def.readable → publish. Callback still runs. Good.
-            // Wait — write_only sets readable=false. Field is still in fields_by_id. process_key_value
-            // runs read_xform then read_callback. Good.
+            // Keep power unpublished while still running read_callback on 0x1f7 updates.
             power.readable = false;
             power.writable = true;
             core.add_field(config, power, true);

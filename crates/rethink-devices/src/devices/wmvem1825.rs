@@ -1,13 +1,11 @@
 //! WMVEM1825 — LG MVEM1825-series microwave (AABB class 0x41).
 //!
-//! Port of upstream commit 7ad7f28 (PR #160). Status is a 46-byte record
+//! Port of upstream commit 7ad7f28 (PR #160) and PR #183. Status is a 46-byte record
 //! (0x41EB / current half of 0x41EC). Hood fan/light share rec[36]; door uses
 //! a short 0x41B2 event. Combined F0432204 writes were verified live on the
 //! appliance, as were the clock and beeper fields of the F043210E Preferences
 //! write shared with the WFV474PGV oven (the beeper sits at payload index 3,
 //! not the oven's 8, and is reported back in rec[35]).
-//!
-//! Port of upstream commit 7ad7f28 (PR #160) and PR #183.
 
 use crate::device_trait::DeviceHandler;
 use crate::js;

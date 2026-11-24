@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
 pub struct PublishPacket {
@@ -31,15 +30,6 @@ struct Subscription {
 
 impl Subscription {
     fn new(topic_pattern: &str) -> Self {
-        // Convert MQTT filter to simple matcher: # at end → prefix, + → one level
-        let re = format!(
-            "^{}$",
-            topic_pattern
-                .replace('#', "\x00HASH\x00")
-                .replace('+', "\x00PLUS\x00")
-        );
-        // Store original; match manually
-        let _ = re;
         Self {
             pattern: topic_pattern.to_string(),
             re_parts: topic_pattern.split('/').map(|s| s.to_string()).collect(),
@@ -656,11 +646,4 @@ fn encode_publish(p: &PublishPacket) -> Vec<u8> {
     encode_remaining_length(&mut out, body.len());
     out.extend_from_slice(&body);
     out
-}
-
-// Allow unused debug/warn in broker
-#[allow(dead_code)]
-fn _log() {
-    debug!("mqtt");
-    warn!("mqtt");
 }

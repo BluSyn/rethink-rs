@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use openssl::pkey::PKey;
 use openssl::ssl::SslAcceptor;
 use openssl::x509::X509;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::sync::Arc;
 
@@ -144,10 +144,4 @@ pub fn load_private_key_der(ca: &Ca) -> Result<PrivateKeyDer<'static>> {
 pub fn load_cert_der(ca: &Ca) -> Result<Vec<CertificateDer<'static>>> {
     let mut cert_reader = std::io::Cursor::new(ca.cert_pem.as_bytes());
     Ok(rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?)
-}
-
-// Silence unused import if PrivatePkcs8KeyDer not used
-#[allow(dead_code)]
-fn _pkcs8(key: PrivatePkcs8KeyDer<'static>) -> PrivateKeyDer<'static> {
-    PrivateKeyDer::Pkcs8(key)
 }

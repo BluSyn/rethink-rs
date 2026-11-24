@@ -1,5 +1,5 @@
-//! Minimal MCP server (stdio, newline-delimited JSON-RPC 2.0) for RE workflows.
-//! Replaces tools/mcp-server.ts — uses management HTTP APIs + pure codecs.
+//! Minimal MCP server (stdio, newline-delimited JSON-RPC 2.0) for RE workflows,
+//! backed by rethink-cloud management HTTP APIs and pure packet codecs.
 //!
 //! Tools: set_mgmt_host, list_devices, encode_packet, decode_packet, read_capture,
 //!        inject (gated), health.

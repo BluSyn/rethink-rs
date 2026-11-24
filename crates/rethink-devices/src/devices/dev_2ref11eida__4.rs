@@ -131,8 +131,7 @@ impl Device {
         if buf.len() == 2 + 68 * 2 && buf[0] == 0x10 && buf[1] == 0xec {
             self.process_status(&buf[2 + 68..2 + 68 + 68]);
         }
-        // Note: TS has a bug `subarray(2, 2 + 68 + 68)` but only 68-byte buffer for 10EB;
-        // processStatus only reads first 14+ bytes so we take 68 correctly.
+        // 0x10EB carries a single 68-byte status record.
         if buf.len() == 2 + 68 && buf[0] == 0x10 && buf[1] == 0xeb {
             self.process_status(&buf[2..2 + 68]);
         }
