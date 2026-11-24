@@ -14,6 +14,7 @@ const CLASS_BYTE: u8 = 0x30;
 const STATUS_LENGTH: usize = 29;
 const STATUS_REQUEST: &[u8] = &[0xf0, 0xed, 0x11, 0x21, 0x01, 0x00, 0x00, 0x00, 0x18, 0x00];
 const POWER_OFF: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x00];
+const POWER_ON: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x01];
 
 const PHASE_OFF: u8 = 0x00;
 const PHASE_END: u8 = 0x04;
@@ -75,20 +76,50 @@ const ERRORS: &[(u8, &str)] = &[
     (19, "Unknown error (nP)"),
 ];
 
+pub(crate) struct VariantOptions {
+    pub(crate) class_byte: u8,
+    pub(crate) status_length: usize,
+    pub(crate) marker: u8,
+    pub(crate) send_status_on_start: bool,
+    pub(crate) power_on_supported: bool,
+    pub(crate) omit_damp_dry_signal: bool,
+    pub(crate) extra_components: fn(&mut std::collections::HashMap<String, serde_json::Value>),
+    pub(crate) course_override: fn(&[u8]) -> Option<&'static str>,
+    pub(crate) on_record: fn(&AabbDeviceCore, &[u8]),
+}
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     dry_completed_published: Mutex<bool>,
+    variant: Option<VariantOptions>,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
+        Self::with_variant(ha, thinq, meta, None)
+    }
+
+    pub(crate) fn with_variant(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        variant: Option<VariantOptions>,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
+        let mut comps = components();
+        if let Some(v) = &variant {
+            if v.omit_damp_dry_signal {
+                comps.remove("damp_dry_signal");
+            }
+            (v.extra_components)(&mut comps);
+        }
         let this = Arc::new(Self {
             core: core.clone(),
             dry_completed_published: Mutex::new(false),
+            variant,
         });
         let mut config = default_config(&meta, Some(json!({"name": "LG Dryer"})));
-        config.components = components();
+        config.components = comps;
         core.set_config(config);
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
@@ -100,13 +131,18 @@ impl Device {
     }
 
     fn process_aabb(&self, buf: &[u8]) {
-        if let Some(status) = process_common_status(buf, CLASS_BYTE, STATUS_LENGTH) {
+        let (class_byte, status_len) = match &self.variant {
+            Some(v) => (v.class_byte, v.status_length),
+            None => (CLASS_BYTE, STATUS_LENGTH),
+        };
+        if let Some(status) = process_common_status(buf, class_byte, status_len) {
             self.process_status(status);
         }
     }
 
     fn process_status(&self, status: &[u8]) {
-        if status.len() < 2 || status[1] != 0x1b {
+        let marker = self.variant.as_ref().map_or(0x1b, |v| v.marker);
+        if status.len() < 2 || status[1] != marker {
             return;
         }
         let rec = &status[1..];
@@ -122,15 +158,16 @@ impl Device {
             named(ERRORS, error).unwrap_or("None").into(),
         );
         self.core.publish_on_off("error", error != 0);
-        self.core.publish_property(
-            "course",
-            if is_off {
-                "None"
-            } else {
-                named(COURSES, rec[6]).unwrap_or("None")
-            }
-            .into(),
-        );
+        let course = if is_off {
+            "None"
+        } else if let Some(v) = &self.variant {
+            (v.course_override)(rec)
+                .or_else(|| named(COURSES, rec[6]))
+                .unwrap_or("None")
+        } else {
+            named(COURSES, rec[6]).unwrap_or("None")
+        };
+        self.core.publish_property("course", course.into());
         let remain = if is_off || cycle_complete {
             0
         } else {
@@ -169,7 +206,9 @@ impl Device {
             .publish_property("time_dry_setting", PropertyValue::Int(time_dry));
         let flags = rec[15];
         self.core.publish_on_off("reduce_static", flags & 0x02 != 0);
-        self.core.publish_on_off("damp_dry_signal", flags & 0x08 != 0);
+        if !self.variant.as_ref().is_some_and(|v| v.omit_damp_dry_signal) {
+            self.core.publish_on_off("damp_dry_signal", flags & 0x08 != 0);
+        }
         self.core.publish_on_off("wrinkle_care", flags & 0x10 != 0);
         let opt2 = rec[16];
         self.core.publish_on_off("energy_saver", opt2 & 0x02 != 0);
@@ -180,6 +219,9 @@ impl Device {
         } else if !is_off || !*self.dry_completed_published.lock() {
             self.core.publish_on_off("dry_completed", false);
             *self.dry_completed_published.lock() = true;
+        }
+        if let Some(v) = &self.variant {
+            (v.on_record)(&self.core, rec);
         }
     }
 }
@@ -223,14 +265,30 @@ impl DeviceHandler for Device {
         &self.core.id
     }
     fn start(&self) {
-        self.core.send(STATUS_REQUEST);
+        if self
+            .variant
+            .as_ref()
+            .map_or(true, |v| v.send_status_on_start)
+        {
+            self.core.send(STATUS_REQUEST);
+        }
     }
     fn drop_device(&self) {
         self.core.drop_device();
     }
     fn set_property(&self, prop: &str, value: &str) {
-        if prop == "power_off" && value == "PRESS" {
+        if value != "PRESS" {
+            return;
+        }
+        if prop == "power_off" {
             self.core.send(POWER_OFF);
+        } else if prop == "power_on"
+            && self
+                .variant
+                .as_ref()
+                .is_some_and(|v| v.power_on_supported)
+        {
+            self.core.send(POWER_ON);
         }
     }
     fn publish_config(&self) {

@@ -99,6 +99,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `V_V__F___W.B_2QEUK` | W4X1085NWH washer/dryer | Power, pause, and run programme. It does not resume a pause. |
 | `F3L2CYU__` | WM3900HBA | Read-only power, status, and course. |
 | `F3L7CYK5W_US_WIFI` | Unknown | Read-only status, course, child lock, rinse, initial time, and tub-clean count. |
+| `VIC2_799_US_FACTORY` | WM3500CW (ThinQ2) | Read-only `F3L7CYK5W_US_WIFI` layout with this model's courses, downloaded cycle name, error codes, and Fresh Care. |
 | `F3M2CYK__` | WM4500HBA | Read-only. Power comes from the heartbeat, not the short status record. |
 | `F3P2CYUBE__`, `F3P2CYUBW__` | WM4000HWA, and WM3850HVA for the alias | Course, options, and delay, written only while Remote Start is armed. The alias publishes no TurboWash. |
 | `F3P2CYVAT__` | WM3600HWA | Read-only course, time, and tub-clean count. |
@@ -121,6 +122,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `RV13U6AM8W_D_US_WIFI`, `RV13U7JS9W_D_US_WIFI` | DLE7300WE / DLG7301WE, and DLEX7800VE for the alias | Course (the old cycle topic is withdrawn), dry level, temperature, and error. Start is rebuilt from the last record. |
 | `RV13B6BSD_D_US_WIFI` | DLEX3900B | Read-only course, dry level, temperature, and error. |
 | `RV13B6ES_D_US_WIFI` | Unknown | Read-only, plus signal, more/less time, and load-item count. |
+| `RV13B6AM_D_US_WIFI` | DLE3500W | Read-only `RV13B6ES_D_US_WIFI` layout with this model's courses, downloaded cycle name, Time Dry setting, and Flow Sense; omits Reduce Static, Damp Dry Signal, Turbo Steam, and load items. |
 | `RV13D4ASJW_D_US` | DLEX4000W | Course, Time Dry, and AI. Writes need Remote Start. |
 | `RV13D5JSD_D_US` | DLEX4200B | Read-only status except a power-off button. Completion stays latched through power-off. |
 | `BDH_D30007_US` | DLHC5502V | Read-only course, dry level, eco hybrid, and the newer error table. |
@@ -137,6 +139,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `WTL_FXU_BDV_NA_01` | WKEX200HBA, one module | Washer and dryer state, course, and time on one device. |
 | `F3S1CWKB__` | WKEX200HBA washer half | Course and power. The run phase comes from the status dump, not the short record. |
 | `RV13S1AMJW_US` | WKEX200HBA dryer half | Course, dry level, and a power switch. Not an RV13B6 alias. |
+| `W3S1CVK2EVS_D_US` | WKGX201HWA dryer half | Class `0x34` `RV13D5JSD_D_US` layout with power on/off buttons, control lock, remote start, downloaded course, and cycle energy; omits Damp Dry Signal. |
 
 ### Dishwashers
 
@@ -189,11 +192,8 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `F3S1CWK__` | WKGX201HWA washer half | Open PR #300 |
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
-| `RV13B6AM_D_US_WIFI` | DLE3500W | Open PRs #326 and #336 |
 | `TLXA5CFPH` | Unknown | Open PR #342 |
 | `VCCHL2QEUK` | WHX9016TLC washer/dryer | Open PR #344 |
-| `VIC2_799_US_FACTORY` | A WM3500CW variant. Not the ThinQ1 WM3500CW already registered. | Open PR #336 |
-| `W3S1CVK2EVS_D_US` | WKGX201HWA dryer half | Open PR #300 |
 | `WLSEL6333F` | LSEL6333F | Open PRs #304 and #329 |
 | `WLRGL5825F` | Unknown range | Open PR #273 |
 | `Y_V8_F___W.B32QEUK` | FWY916WBTN1 | Open PR #316 |

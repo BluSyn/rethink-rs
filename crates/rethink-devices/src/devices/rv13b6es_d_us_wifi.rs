@@ -138,8 +138,16 @@ fn components() -> HashMap<String, Value> {
     .collect()
 }
 
+pub(crate) struct VariantHooks {
+    pub(crate) extra_components: fn(&mut HashMap<String, Value>),
+    pub(crate) course_fn: fn(&[u8]) -> Option<String>,
+    pub(crate) omitted: &'static [&'static str],
+    pub(crate) on_record: fn(&AabbDeviceCore, &[u8]),
+}
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
+    hooks: Option<VariantHooks>,
 }
 
 impl Device {
@@ -148,10 +156,29 @@ impl Device {
         thinq: Arc<dyn Thinq2Device>,
         meta: Metadata,
     ) -> Arc<Self> {
+        Self::with_hooks(ha, thinq, meta, None)
+    }
+
+    pub(crate) fn with_hooks(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        hooks: Option<VariantHooks>,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::new(ha, thinq.clone());
-        let this = Arc::new(Self { core: core.clone() });
+        let mut comps = components();
+        if let Some(h) = &hooks {
+            for k in h.omitted {
+                comps.remove(*k);
+            }
+            (h.extra_components)(&mut comps);
+        }
+        let this = Arc::new(Self {
+            core: core.clone(),
+            hooks,
+        });
         let mut config = default_config(&meta, Some(json!({"name": "LG Dryer"})));
-        config.components = components();
+        config.components = comps;
         core.set_config(config);
         let dev = this.clone();
         thinq.on_data(Box::new(move |data| {
@@ -160,6 +187,24 @@ impl Device {
             }
         }));
         this
+    }
+
+    fn publish_prop(&self, prop: &str, value: PropertyValue) {
+        if let Some(h) = &self.hooks {
+            if h.omitted.contains(&prop) {
+                return;
+            }
+        }
+        self.core.publish_property(prop, value);
+    }
+
+    fn publish_flag(&self, prop: &str, on: bool) {
+        if let Some(h) = &self.hooks {
+            if h.omitted.contains(&prop) {
+                return;
+            }
+        }
+        self.core.publish_on_off(prop, on);
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -182,42 +227,36 @@ impl Device {
             }
         };
 
-        self.core.publish_on_off("power", !is_off);
-        self.core
-            .publish_property("status", named(STATUS, phase).unwrap_or("None").into());
+        self.publish_flag("power", !is_off);
+        self.publish_prop("status", named(STATUS, phase).unwrap_or("None").into());
         let error = rec[7];
-        self.core.publish_property(
-            "error_message",
-            named(ERRORS, error).unwrap_or("None").into(),
-        );
-        self.core.publish_on_off("error", error != 0);
-        self.core.publish_property(
-            "course",
-            named(COURSE, rec[COURSE_OFFSET]).unwrap_or("None").into(),
-        );
-        self.core.publish_property(
+        self.publish_prop("error_message", named(ERRORS, error).unwrap_or("None").into());
+        self.publish_flag("error", error != 0);
+        let course = match &self.hooks {
+            Some(h) => (h.course_fn)(rec).unwrap_or_else(|| "None".to_string()),
+            None => named(COURSE, rec[COURSE_OFFSET]).unwrap_or("None").to_string(),
+        };
+        self.publish_prop("course", course.into());
+        self.publish_prop(
             "remaining_time",
             PropertyValue::Int(minutes(TIME_HOUR_OFFSET, TIME_MIN_OFFSET)),
         );
-        self.core.publish_property(
+        self.publish_prop(
             "initial_time",
             PropertyValue::Int(minutes(INITIAL_TIME_HOUR_OFFSET, INITIAL_TIME_MIN_OFFSET)),
         );
-        self.core.publish_property(
+        self.publish_prop(
             "dry_level",
             named(DRY_LEVEL, rec[DRY_LEVEL_OFFSET])
                 .unwrap_or("None")
                 .into(),
         );
-        self.core.publish_property(
-            "temp",
-            named(TEMP, rec[TEMP_OFFSET]).unwrap_or("None").into(),
-        );
-        self.core.publish_property(
+        self.publish_prop("temp", named(TEMP, rec[TEMP_OFFSET]).unwrap_or("None").into());
+        self.publish_prop(
             "load_item",
             PropertyValue::Int(i64::from(rec[LOAD_ITEM_OFFSET])),
         );
-        self.core.publish_property(
+        self.publish_prop(
             "signal",
             named(SIGNAL, rec[SIGNAL_OFFSET]).unwrap_or("None").into(),
         );
@@ -227,26 +266,22 @@ impl Device {
         } else {
             i64::from(rec[MORE_LESS_TIME_OFFSET] as i8)
         };
-        self.core
-            .publish_property("more_less_time", PropertyValue::Int(more_less));
+        self.publish_prop("more_less_time", PropertyValue::Int(more_less));
 
         let flags = rec[FLAGS_OFFSET];
-        self.core
-            .publish_on_off("child_lock", flags & FLAG_CHILD_LOCK != 0);
-        self.core
-            .publish_on_off("reduce_static", flags & FLAG_REDUCE_STATIC != 0);
-        self.core
-            .publish_on_off("damp_dry_signal", flags & FLAG_DAMP_DRY_SIGNAL != 0);
-        self.core
-            .publish_on_off("wrinkle_care", flags & FLAG_WRINKLE_CARE != 0);
+        self.publish_flag("child_lock", flags & FLAG_CHILD_LOCK != 0);
+        self.publish_flag("reduce_static", flags & FLAG_REDUCE_STATIC != 0);
+        self.publish_flag("damp_dry_signal", flags & FLAG_DAMP_DRY_SIGNAL != 0);
+        self.publish_flag("wrinkle_care", flags & FLAG_WRINKLE_CARE != 0);
 
         let opt2 = rec[OPT2_OFFSET];
-        self.core
-            .publish_on_off("energy_saver", opt2 & OPT2_ENERGY_SAVER != 0);
-        self.core
-            .publish_on_off("turbo_steam", opt2 & OPT2_TURBO_STEAM != 0);
-        self.core
-            .publish_on_off("remote_start", opt2 & OPT2_REMOTE_START != 0);
+        self.publish_flag("energy_saver", opt2 & OPT2_ENERGY_SAVER != 0);
+        self.publish_flag("turbo_steam", opt2 & OPT2_TURBO_STEAM != 0);
+        self.publish_flag("remote_start", opt2 & OPT2_REMOTE_START != 0);
+
+        if let Some(h) = &self.hooks {
+            (h.on_record)(&self.core, rec);
+        }
     }
 }
 

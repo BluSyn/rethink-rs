@@ -129,14 +129,33 @@ fn named(table: &[(u8, &'static str)], code: u8) -> Option<&'static str> {
     table.iter().find(|(c, _)| *c == code).map(|(_, name)| *name)
 }
 
+pub(crate) struct VariantHooks {
+    pub(crate) extra_components: fn(&mut Map<String, serde_json::Value>),
+    pub(crate) course_fn: fn(&[u8]) -> Option<String>,
+    pub(crate) on_record: fn(&AabbDeviceCore, &[u8]),
+}
+
 pub struct Device {
     core: Arc<AabbDeviceCore>,
+    hooks: Option<VariantHooks>,
 }
 
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
+        Self::with_hooks(ha, thinq, meta, None)
+    }
+
+    pub(crate) fn with_hooks(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        hooks: Option<VariantHooks>,
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::new(ha, thinq.clone());
-        let this = Arc::new(Self { core: core.clone() });
+        let this = Arc::new(Self {
+            core: core.clone(),
+            hooks,
+        });
 
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
         let comps = [
@@ -166,6 +185,9 @@ impl Device {
         for (k, v) in comps {
             components.insert(k.into(), v);
         }
+        if let Some(h) = &this.hooks {
+            (h.extra_components)(&mut components);
+        }
         base.components = components.into_iter().collect();
         core.set_config(base);
 
@@ -193,10 +215,11 @@ impl Device {
         self.core.publish_on_off("power", !is_off);
         self.core
             .publish_property("status", status_name(phase).into());
-        self.core.publish_property(
-            "course",
-            named(COURSE, rec[COURSE_OFFSET]).unwrap_or("None").into(),
-        );
+        let course = match &self.hooks {
+            Some(h) => (h.course_fn)(rec).unwrap_or_else(|| "None".to_string()),
+            None => named(COURSE, rec[COURSE_OFFSET]).unwrap_or("None").to_string(),
+        };
+        self.core.publish_property("course", course.into());
         self.core.publish_property(
             "remaining_time",
             if idle {
@@ -258,6 +281,9 @@ impl Device {
             .publish_property("load_level", (rec[LOAD_LEVEL_OFFSET] as i64).into());
         self.core
             .publish_property("tub_clean_count", (rec[TCL_COUNT_OFFSET] as i64).into());
+        if let Some(h) = &self.hooks {
+            (h.on_record)(&self.core, rec);
+        }
     }
 
     fn process_aabb(&self, buf: &[u8]) {
