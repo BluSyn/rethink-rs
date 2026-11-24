@@ -1,7 +1,11 @@
 //! BDH_D30007_US — LG DLHC5502V heat-pump dryer (long AABB class 0x30).
 //!
-//! Port of upstream master `c1a81e8`. 42-byte records, big-endian minutes.
+//! 42-byte records, big-endian minutes; `auto_ack` is on so the dryer does not
+//! repeat frames ten times. `0x85`/`0x86` frames carry `deviceContentsStatus`
+//! (length-prefixed ASCII ids + activated flag), not status records.
 //! Not aliasable to RH10/RV13/SDH dryers.
+//!
+//! Port of upstream master `c1a81e8` and PR #351.
 
 use crate::device_trait::DeviceHandler;
 use rethink_core::device_base::{default_config, AabbDeviceCore};
@@ -85,16 +89,41 @@ fn state_name(c: u8) -> Option<&'static str> {
 }
 fn course_name(c: u8) -> Option<&'static str> {
     Some(match c {
-        2 => "Towels", 4 => "Bedding", 5 => "Perm. Press", 7 => "Normal", 8 => "Activewear",
-        9 => "Small Load", 10 => "Delicates", 13 => "Air Dry", 15 => "Bedding Refresh",
-        16 => "Power Dry", 17 => "Heavy Duty", 18 => "Condenser Care", 19 => "Drum Care",
-        20 => "Down Jacket Refresh", 21 => "Timed Dry", 22 => "Outerwear Refresh",
-        23 => "Quick Dry", 44 => "AI Dry", 45 => "Silent Dry", 46 => "Shrinkage Relief",
-        50 => "Rainy Days", 51 => "Easy Ironing", 255 => "Downloaded cycle", _ => return None,
+        0 => "Not selected",
+        2 => "Towels",
+        4 => "Bedding",
+        5 => "Perm. Press",
+        7 => "Normal",
+        8 => "Activewear",
+        9 => "Small Load",
+        10 => "Delicates",
+        13 => "Air Dry",
+        15 => "Bedding Refresh",
+        16 => "Power Dry",
+        17 => "Heavy Duty",
+        18 => "Condenser Care",
+        19 => "Drum Care",
+        20 => "Down Jacket Refresh",
+        21 => "Timed Dry",
+        22 => "Outerwear Refresh",
+        23 => "Quick Dry",
+        27 => "Pet Care",
+        44 => "AI Dry",
+        45 => "Silent Dry",
+        46 => "Shrinkage Relief",
+        50 => "Rainy Days",
+        51 => "Easy Ironing",
+        255 => "Downloaded cycle",
+        _ => return None,
     })
 }
 fn download_name(c: u8) -> Option<&'static str> {
-    match c { 0 => Some("None"), 114 => Some("Wrinkle Prevention"), 140 => Some("Rack Dry"), _ => None }
+    match c {
+        0 => Some("Not selected"),
+        114 => Some("Wrinkle Prevention"),
+        140 => Some("Rack Dry"),
+        _ => None,
+    }
 }
 fn dry_level_name(c: u8) -> Option<&'static str> {
     match c {
@@ -170,8 +199,34 @@ const STATE_OPTS: &[&str] = &[
     "Dehumidification", "Dehumidification end", "End waiting", "Drum care", "Cooldown paused",
     "Cooldown standby",
 ];
-const COURSE_OPTS: &[&str] = &["Towels","Bedding","Perm. Press","Normal","Activewear","Small Load","Delicates","Air Dry","Bedding Refresh","Power Dry","Heavy Duty","Condenser Care","Drum Care","Down Jacket Refresh","Timed Dry","Outerwear Refresh","Quick Dry","AI Dry","Silent Dry","Shrinkage Relief","Rainy Days","Easy Ironing","Downloaded cycle"];
-const DOWNLOAD_OPTS: &[&str] = &["None","Wrinkle Prevention","Rack Dry"];
+const COURSE_OPTS: &[&str] = &[
+    "Not selected",
+    "Towels",
+    "Bedding",
+    "Perm. Press",
+    "Normal",
+    "Activewear",
+    "Small Load",
+    "Delicates",
+    "Air Dry",
+    "Bedding Refresh",
+    "Power Dry",
+    "Heavy Duty",
+    "Condenser Care",
+    "Drum Care",
+    "Down Jacket Refresh",
+    "Timed Dry",
+    "Outerwear Refresh",
+    "Quick Dry",
+    "Pet Care",
+    "AI Dry",
+    "Silent Dry",
+    "Shrinkage Relief",
+    "Rainy Days",
+    "Easy Ironing",
+    "Downloaded cycle",
+];
+const DOWNLOAD_OPTS: &[&str] = &["Not selected", "Wrinkle Prevention", "Rack Dry"];
 const DRY_LEVEL_OPTS: &[&str] = &["Not selected", "Damp", "Less", "Normal", "More", "Very"];
 const ECO_OPTS: &[&str] = &["Not selected", "Eco", "Normal", "Turbo"];
 const ERROR_OPTS: &[&str] = &[
@@ -220,7 +275,8 @@ const BUZZER_OPTS: &[&str] = &["1","2","3","4","Off"];
 pub struct Device { core: Arc<AabbDeviceCore> }
 impl Device {
     pub fn new(ha: Arc<dyn HaConnection>, thinq: Arc<dyn Thinq2Device>, meta: Metadata) -> Arc<Self> {
-        let core = AabbDeviceCore::new(ha, thinq.clone());
+        // Unacked, this dryer repeats most frames ten times, 1.5 s apart.
+        let core = AabbDeviceCore::with_auto_ack(ha, thinq.clone(), true);
         let mut cfg = default_config(&meta, Some(json!({"name": "LG Dryer"})));
         cfg.components = [
             ("power".into(), json!({"platform":"binary_sensor","unique_id":"$deviceid-power","state_topic":"$this/power","name":"Power","icon":"mdi:tumble-dryer","device_class":"running"})),
@@ -403,7 +459,20 @@ mod tests {
         expect(&p, "course", "Downloaded cycle");
         expect(&p, "download_course", "Wrinkle Prevention");
 
-        expect(&feed(&[TOWELS]), "download_course", "None");
+        expect(&feed(&[TOWELS]), "download_course", "Not selected");
+    }
+
+    #[test]
+    fn pet_care_is_code_27_and_frames_are_acked() {
+        const PET_CARE: &str = "aaff300a0066005964000100ec005400000000000000000000000000010000000000010000000020000080070000000302000000000000000000000300001b00000000be0000010000010000011b0000002000008007000000030200000000000000005e96bb";
+        let (ha, thinq, _dev) = make();
+        thinq.emit_data(&hex_decode(PET_CARE));
+        expect(&ha, "course", "Pet Care");
+        expect(&ha, "status", "Standby");
+        expect(&ha, "remaining_time", "190");
+        let sent = thinq.sent();
+        assert_eq!(sent.len(), 1, "auto_ack enabled");
+        assert_eq!(sent[0].cmd, "ack");
     }
 
     #[test]
@@ -554,7 +623,7 @@ mod tests {
         let p = feed(&[PAUSES, POWERS_OFF]);
         expect(&p, "power", "OFF");
         expect(&p, "status", "Off");
-        expect(&p, "course", "None");
+        expect(&p, "course", "Not selected");
         expect(&p, "remaining_time", "0");
         expect(&p, "initial_time", "0");
         expect(&p, "energy", "10");
