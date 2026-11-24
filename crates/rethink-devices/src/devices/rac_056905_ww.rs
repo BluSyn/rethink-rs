@@ -63,6 +63,11 @@ const SWING_H_MODES: SwingModes = &[
 /// Swing without vane positions: such units reject the step values.
 const SWING_ON_OFF_MODES: SwingModes = &[("on", 100), ("off", 0)];
 const MODE_PURIFY_ONLY: u32 = 46;
+/// Cooling-only units (0x2c1 = 0x0f) report Auto as mode 3. In that mode 0x1fe is the remote's
+/// comfort offset (34 + 2 * offset, -2..+2), not a temperature.
+const MODE_AUTO_COOL_ONLY: u32 = 3;
+const AUTO_OFFSET_ZERO: u32 = 34;
+const DEFAULT_SETPOINT: u32 = 46; // 23 °C, until the mode's own setpoint has been seen
 /// 0x2d3 (support.reserve): the remote's sleep timer goes up to 12 h instead of 7 h.
 const SLEEP_TIMER_12H: u32 = 0x4000;
 const MOMENTARY_INOUTDOOR: u32 = 0x2;
@@ -95,6 +100,8 @@ struct Inner {
     power_state_prev: Option<bool>,
     mode_change_hooks: Vec<PowerModeChangeHook>,
     mode_prev: Option<String>,
+    /// Last 0x1fe raw setpoint per operating mode (used when leaving cooling-only Auto).
+    setpoint_raw: std::collections::HashMap<u32, u32>,
     /// `None` until a live TLV is seen. Reconnect must not write OFF for an
     /// unknown initial value (upstream master `211a0bc`).
     air_clean: Option<bool>,
@@ -141,6 +148,7 @@ impl Device {
                 power_state_prev: None,
                 mode_change_hooks: Vec::new(),
                 mode_prev: None,
+                setpoint_raw: std::collections::HashMap::new(),
                 air_clean: None,
                 jet_mode: None,
                 energy_save: None,
@@ -191,6 +199,16 @@ impl Device {
 
     fn get_mode_tlv(&self) -> Option<u32> {
         self.core.get_raw(0x1f9)
+    }
+
+    /// 3 when opMode (0x2c1) has bit 3 set and bit 6 clear (cooling-only units), otherwise 6.
+    fn auto_mode_code(&self) -> u32 {
+        match self.core.get_raw(0x2c1) {
+            Some(op_modes) if (op_modes & (1 << 3)) != 0 && (op_modes & (1 << 6)) == 0 => {
+                MODE_AUTO_COOL_ONLY
+            }
+            _ => 6,
+        }
     }
 
     fn get_idu_action_running_tlv_num(&self) -> Option<u16> {
@@ -441,12 +459,11 @@ impl Device {
         let action: Option<&str>;
         if self.get_power_tlv() == Some(0) {
             action = Some("off");
-        } else if (mode_tlv == 0 || mode_tlv == 1 || mode_tlv == 4 || mode_tlv == 6) && !idu_running
-        {
+        } else if matches!(mode_tlv, 0 | 1 | 4 | 6 | MODE_AUTO_COOL_ONLY) && !idu_running {
             action = Some("idle");
         } else if mode_tlv == MODE_PURIFY_ONLY {
             action = Some("fan");
-        } else if mode_tlv == 6 {
+        } else if mode_tlv == 6 || mode_tlv == MODE_AUTO_COOL_ONLY {
             action = Some("None");
         } else if (mode_tlv as usize) < modes2ha.len() && !modes2ha[mode_tlv as usize].is_empty() {
             action = Some(modes2ha[mode_tlv as usize]);
@@ -490,11 +507,15 @@ impl Device {
         // default mode list stays.
         let op_modes = self.core.get_raw(0x2c1).unwrap_or(0);
         if op_modes != 0 {
+            let auto_code = self.auto_mode_code();
             let modes: Vec<&str> = std::iter::once("off")
                 .chain(
                     MODES
                         .iter()
-                        .filter(|(_, code)| op_modes & (1 << code) != 0)
+                        .filter(|(name, code)| {
+                            let bit = if *name == "auto" { auto_code } else { *code };
+                            op_modes & (1 << bit) != 0
+                        })
                         .map(|(name, _)| *name),
                 )
                 .collect();
@@ -628,6 +649,9 @@ impl Device {
                 if raw == MODE_PURIFY_ONLY {
                     return Some("fan_only".into());
                 }
+                if raw == MODE_AUTO_COOL_ONLY {
+                    return Some("auto".into());
+                }
                 MODES
                     .iter()
                     .find(|(_, code)| *code == raw)
@@ -658,11 +682,26 @@ impl Device {
                     this_w.core.set_property("climate-power", "OFF");
                     return None;
                 }
+                let code = if val == "auto" {
+                    Some(this_w.auto_mode_code())
+                } else {
+                    MODES.iter().find(|(name, _)| *name == val).map(|(_, c)| *c)
+                }?;
                 this_w.core.set_raw(0x1f7, 1);
-                MODES
-                    .iter()
-                    .find(|(name, _)| *name == val)
-                    .map(|(_, code)| i64::from(*code).into())
+                // 0x1fe changes meaning at the cooling-only Auto boundary.
+                if code == MODE_AUTO_COOL_ONLY {
+                    this_w.core.set_raw(0x1fe, AUTO_OFFSET_ZERO);
+                } else if this_w.get_mode_tlv() == Some(MODE_AUTO_COOL_ONLY) {
+                    let prev = this_w
+                        .inner
+                        .lock()
+                        .setpoint_raw
+                        .get(&code)
+                        .copied()
+                        .unwrap_or(DEFAULT_SETPOINT);
+                    this_w.core.set_raw(0x1fe, prev);
+                }
+                Some(i64::from(code).into())
             }));
             mode.write_attach_static = Some(vec![0x1f7, 0x1fa, 0x1fe]);
             self.core.add_field(&mut config, mode, true);
@@ -690,11 +729,30 @@ impl Device {
 
         // temperature
         {
+            let this_r = self.clone();
+            let this_w = self.clone();
             let mut f = FieldDefinition::new("climate", "temperature").with_id(0x1fe);
-            f.read_xform = Some(Box::new(|raw| Some(PropertyValue::from(raw as f64 / 2.0))));
-            f.write_xform = Some(Box::new(|val| {
+            f.read_xform = Some(Box::new(move |raw| {
+                let mode = this_r.get_mode_tlv();
+                if mode == Some(MODE_AUTO_COOL_ONLY) {
+                    return Some("None".into());
+                }
+                if let Some(mode) = mode {
+                    this_r.inner.lock().setpoint_raw.insert(mode, raw);
+                }
+                Some(PropertyValue::from(raw as f64 / 2.0))
+            }));
+            f.write_xform = Some(Box::new(move |val| {
+                let mode = this_w.get_mode_tlv();
+                if mode == Some(MODE_AUTO_COOL_ONLY) {
+                    return None;
+                }
                 let n: f64 = val.parse().ok()?;
-                Some(PropertyValue::Int((n * 2.0).round() as i64))
+                let raw = (n * 2.0).round() as u32;
+                if let Some(mode) = mode {
+                    this_w.inner.lock().setpoint_raw.insert(mode, raw);
+                }
+                Some(PropertyValue::Int(i64::from(raw)))
             }));
             f.write_attach_static = Some(vec![0x1f9, 0x1fa]);
             self.core.add_field(&mut config, f, true);
@@ -1144,6 +1202,12 @@ impl Device {
         let this_w = self.clone();
         let this_rc = self.clone();
         let this_wc = self.clone();
+        let jet_allowed = move |dev: &Device| {
+            let power = dev.get_power_tlv();
+            let mode = dev.get_mode_tlv();
+            power.unwrap_or(0) != 0
+                && ((jet_cool && mode == Some(0)) || (jet_heat && mode == Some(4)))
+        };
         let mut f = FieldDefinition::new(name, "").with_id(id);
         f.write_xform = Some(Box::new(move |val| {
             let on = val == "ON";
@@ -1169,33 +1233,64 @@ impl Device {
             Some("OFF".into())
         }));
         f.read_callback = Some(Box::new(move |val| {
-            let power = this_rc.get_power_tlv();
-            if power == Some(0) || power.is_none() {
+            if !jet_allowed(&this_rc) {
                 return false;
             }
-            let mode = this_rc.get_mode_tlv();
-            if !((jet_cool && mode == Some(0)) || (jet_heat && mode == Some(4))) {
-                return false;
-            }
-            this_rc.inner.lock().jet_mode = Some(matches!(val, PropertyValue::Str(s) if s == "ON"));
+            let on = matches!(val, PropertyValue::Str(s) if s == "ON");
+            this_rc.inner.lock().jet_mode = Some(on);
+            this_rc.core.ha.publish_property(
+                &this_rc.core.id,
+                "climate-preset_mode",
+                if on { "boost" } else { "none" }.into(),
+            );
             true
         }));
-        f.write_callback = Some(Box::new(move |_val| {
-            let power = this_wc.get_power_tlv();
-            let mode = this_wc.get_mode_tlv();
-            power != Some(0)
-                && ((jet_cool && mode == Some(0)) || (jet_heat && mode == Some(4)))
-        }));
+        f.write_callback = Some(Box::new(move |_val| jet_allowed(&this_wc)));
         self.core.add_field(config, f, true);
+
+        // Expose Jet as the climate entity's "boost" preset so it is reachable from the thermostat.
+        if let Some(Value::Object(climate)) = config.components.get_mut("climate") {
+            climate.insert("preset_modes".into(), json!(["boost"]));
+        }
+        let this_p = self.clone();
+        let prop_for_preset = format!("{name}-");
+        let mut preset = FieldDefinition::new("climate", "preset_mode");
+        preset.write_xform = Some(Box::new(move |val| {
+            let on = val == "boost";
+            if jet_allowed(&this_p) {
+                let state = if on { "ON" } else { "OFF" };
+                this_p.core.set_property(&prop_for_preset, state);
+                this_p
+                    .core
+                    .ha
+                    .publish_property(&this_p.core.id, &prop_for_preset, state.into());
+                this_p.core.ha.publish_property(
+                    &this_p.core.id,
+                    "climate-preset_mode",
+                    if on { "boost" } else { "none" }.into(),
+                );
+            } else {
+                this_p
+                    .core
+                    .ha
+                    .publish_property(&this_p.core.id, "climate-preset_mode", "none".into());
+            }
+            None
+        }));
+        self.core.add_field(config, preset, true);
 
         let this = self.clone();
         let prop_name = format!("{name}-");
         self.inner.lock().mode_change_hooks.push(Box::new(move || {
-            let Some(on) = this.inner.lock().jet_mode else {
-                return;
-            };
-            this.core
-                .set_property(&prop_name, if on { "ON" } else { "OFF" });
+            if !jet_allowed(&this) {
+                this.core
+                    .ha
+                    .publish_property(&this.core.id, "climate-preset_mode", "none".into());
+            }
+            // Re-assert ON after entering cool/heat; skip OFF to avoid extra Wi-Fi beeps.
+            if this.inner.lock().jet_mode == Some(true) {
+                this.core.set_property(&prop_name, "ON");
+            }
         }));
     }
 
@@ -1436,6 +1531,9 @@ impl Device {
                 .collect()
         };
         for (name, value, modes) in pending {
+            if matches!(value.as_str(), "OFF" | "off" | "0") {
+                continue;
+            }
             if self.requirement_met(modes.as_deref()) {
                 self.core.set_property(&format!("{name}-"), &value);
             }
@@ -1934,6 +2032,7 @@ impl Device {
         let prop_name = format!("{name}-");
         let field_owned = field.to_string();
         if has_check {
+            // Energy-saving defaults off on power-on; skip OFF re-assert to avoid extra beeps.
             self.inner.lock().mode_change_hooks.push(Box::new(move || {
                 let on = match field_owned.as_str() {
                     "air_clean" => this.inner.lock().air_clean,
@@ -1941,11 +2040,9 @@ impl Device {
                     "energy_save" => this.inner.lock().energy_save,
                     _ => None,
                 };
-                let Some(on) = on else {
-                    return;
-                };
-                this.core
-                    .set_property(&prop_name, if on { "ON" } else { "OFF" });
+                if on == Some(true) {
+                    this.core.set_property(&prop_name, "ON");
+                }
             }));
         } else {
             self.inner.lock().power_change_hooks.push(Box::new(move || {
@@ -2904,5 +3001,165 @@ mod tests {
         let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
         assert!(c.contains_key("climate"));
         assert!(c["climate"].get("modes").is_none());
+    }
+
+    // Cooling-only unit captures (upstream PR #340): opMode (0x2c1) = 0x0f, Auto is mode 3.
+    const COOL_ONLY_CAPS_HEX: &str = concat!(
+        "0000040000008702011159B001B04FB0A0017CB85024B8903CB8D020B9103CBAD024BB103CB0C1B103B306B280B345B4C7B582",
+        "B541B543B6A04E2FB6F0690441B701B740BC40BD4FB5C0B61024B646B5C1B6102FB646B5C2B6102FB646B5C3B61030B6465722"
+    );
+    const COOL_ONLY_AUTO_VALUES_HEX: &str = concat!(
+        "000004000000870204107A7E437DC17E847F50317F9022C85064C880C8C08340838083C0868086C0870087C18F80894088408A09",
+        "8A50588A8A8C90438CD010ACD0DBCA00D540D580C900CAD077CB1099CB40CB9012CBCACC00CC90908B40BF6002D8BFC0BFA002C",
+        "DC000BE502CBE8CCC505F1B01BED05FC340C0C0C380CCC0CD00CD40900064E8"
+    );
+    const COOL_ONLY_NOTIFY_COOL_23: &str = "00000400000087020427087E407F902ECAD0775D14";
+    const COOL_ONLY_NOTIFY_COOL_25: &str = "0000040000008702042E037F9032F70C";
+    const COOL_ONLY_NOTIFY_AUTO: &str = "00000400000087020428057E437F9022BDA7";
+
+    fn cool_only_ready() -> (Arc<MockHaConnection>, Arc<MockThinq2Device>, Arc<Device>) {
+        let (ha, thinq, dev) = make_device();
+        thinq.emit_data(&hex_decode(COOL_ONLY_CAPS_HEX));
+        thinq.emit_data(&hex_decode(COOL_ONLY_AUTO_VALUES_HEX));
+        thinq.emit_data(&hex_decode(COOL_ONLY_AUTO_VALUES_HEX));
+        thinq.reset_recorder();
+        (ha, thinq, dev)
+    }
+
+    fn written_tlvs(packet: &[u8]) -> std::collections::HashMap<u16, u32> {
+        rethink_util::tlv::parse(&packet[11..packet.len() - 2])
+            .into_iter()
+            .map(|e| (e.t, e.v))
+            .collect()
+    }
+
+    #[test]
+    fn cooling_only_unit_uses_mode_3_for_auto_and_preserves_setpoints() {
+        let (ha, thinq, _dev) = cool_only_ready();
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(
+            c["climate"]["modes"],
+            json!(["off", "cool", "dry", "fan_only", "auto"])
+        );
+        assert_eq!(ha.get_property(DEVICE_ID, "climate", "mode_state"), Some("auto".into()));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "temperature_state"),
+            Some("None".into())
+        );
+
+        // Temperature writes are ignored while in cooling-only Auto.
+        ha.set_property(DEVICE_ID, "climate", "temperature_command", "24");
+        assert!(thinq.outbox().is_empty());
+
+        // Leaving Auto before seeing Cool's setpoint falls back to 23 °C (46).
+        ha.set_property(DEVICE_ID, "climate", "mode_command", "cool");
+        assert_eq!(thinq.outbox().len(), 1);
+        let w = written_tlvs(&thinq.outbox()[0]);
+        assert_eq!(w.get(&0x1f9), Some(&0));
+        assert_eq!(w.get(&0x1fe), Some(&46));
+
+        // Entering Auto writes mode 3 and offset 0 (34).
+        thinq.emit_data(&hex_decode(COOL_ONLY_NOTIFY_COOL_23));
+        thinq.emit_data(&hex_decode(COOL_ONLY_NOTIFY_COOL_25));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "temperature_state"),
+            Some(PropertyValue::from(25))
+        );
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "climate", "mode_command", "auto");
+        let w = written_tlvs(&thinq.outbox()[0]);
+        assert_eq!(w.get(&0x1f9), Some(&3));
+        assert_eq!(w.get(&0x1fe), Some(&34));
+
+        // Leaving Auto restores Cool's last setpoint (25 °C -> 50).
+        thinq.emit_data(&hex_decode(COOL_ONLY_NOTIFY_AUTO));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "temperature_state"),
+            Some("None".into())
+        );
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "climate", "mode_command", "cool");
+        let w = written_tlvs(&thinq.outbox()[0]);
+        assert_eq!(w.get(&0x1f9), Some(&0));
+        assert_eq!(w.get(&0x1fe), Some(&50));
+    }
+
+    #[test]
+    fn jet_boost_preset_mirrors_jet_switch_and_clears_when_leaving_mode() {
+        let (ha, thinq, _dev) = make_device();
+        thinq.emit_data(&hex_decode(CAPS_RESPONSE_HEX));
+        thinq.emit_data(&hex_decode(QUERY_RESPONSE_HEX));
+        thinq.emit_data(&hex_decode(QUERY_RESPONSE_HEX));
+        let c = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
+        assert_eq!(c["climate"]["preset_modes"], json!(["boost"]));
+
+        // Refused while off.
+        thinq.emit_data(&notify(&[(0x1f7, 0), (0x1f9, 0)]));
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "climate", "preset_mode_command", "boost");
+        assert!(thinq.outbox().is_empty());
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "preset_mode_state"),
+            Some("none".into())
+        );
+
+        // Works while cooling, matches Jet switch.
+        thinq.emit_data(&notify(&[(0x1f7, 1), (0x1f9, 0)]));
+        thinq.reset_recorder();
+        ha.set_property(DEVICE_ID, "climate", "preset_mode_command", "boost");
+        assert_eq!(thinq.outbox().len(), 1);
+        assert_eq!(written_tlvs(&thinq.outbox()[0]).get(&0x323), Some(&1));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "preset_mode_state"),
+            Some("boost".into())
+        );
+        assert_eq!(ha.get_property(DEVICE_ID, "jet", "state"), Some("ON".into()));
+
+        // Leaving cool clears the preset.
+        thinq.emit_data(&notify(&[(0x1f9, 2)]));
+        assert_eq!(
+            ha.get_property(DEVICE_ID, "climate", "preset_mode_state"),
+            Some("none".into())
+        );
+    }
+
+    #[test]
+    fn power_and_mode_transitions_skip_redundant_jet_and_energy_off_writes() {
+        let (_ha, thinq, _dev) = make_device();
+        thinq.emit_data(&hex_decode(CAPS_RESPONSE_HEX));
+        thinq.emit_data(&hex_decode(QUERY_RESPONSE_HEX));
+        thinq.emit_data(&hex_decode(QUERY_RESPONSE_HEX));
+        // Report Jet=OFF, EnergySave=OFF, AirPurify=OFF while running in Cool.
+        thinq.emit_data(&notify(&[
+            (0x1f7, 1),
+            (0x1f9, 0),
+            (0x323, 0),
+            (0x20d, 0),
+            (0x20f, 0),
+        ]));
+        // Switch mode to Fan, then back to Cool: neither Jet OFF nor Energy OFF should be written.
+        thinq.emit_data(&notify(&[(0x1f9, 2)]));
+        thinq.reset_recorder();
+        thinq.emit_data(&notify(&[(0x1f9, 0)]));
+        let tags: Vec<u16> = thinq
+            .outbox()
+            .iter()
+            .flat_map(|p| written_tlvs(p).into_keys())
+            .collect();
+        assert!(!tags.contains(&0x323), "should not re-assert Jet OFF");
+        assert!(!tags.contains(&0x20d), "should not re-assert Energy saving OFF");
+
+        // Power off then on: Air purify OFF is still re-asserted (0x20f), Jet/Energy OFF are not.
+        thinq.emit_data(&notify(&[(0x1f7, 0)]));
+        thinq.reset_recorder();
+        thinq.emit_data(&notify(&[(0x1f7, 1)]));
+        let tags: Vec<u16> = thinq
+            .outbox()
+            .iter()
+            .flat_map(|p| written_tlvs(p).into_keys())
+            .collect();
+        assert!(tags.contains(&0x20f), "Air purify OFF re-assert kept");
+        assert!(!tags.contains(&0x323), "should not re-assert Jet OFF");
+        assert!(!tags.contains(&0x20d), "should not re-assert Energy saving OFF");
     }
 }
