@@ -63,6 +63,9 @@ const RUN_PHASES: [u8; 4] = [0x14, 0x17, 0x1e, 0x28];
 
 const POWER_ON: &[u8] = &[0xf0, 0xe5, 0x00, 0x02, 0x01, 0xff, 0x01, 0x02, 0x01];
 const POWER_OFF: &[u8] = &[0xf0, 0xe5, 0x00, 0x02, 0x01, 0xff, 0x01, 0x02, 0x00];
+const STATUS_REQUEST: &[u8] = &[
+    0xf0, 0xed, 0x11, 0x21, 0x01, 0x00, 0x00, 0x00, 0x18, 0x04, 0x13, 0x14, 0x00, 0x00,
+];
 
 const STATUS: &[(u8, &str)] = &[
     (0x00, "Off"),
@@ -146,6 +149,8 @@ struct State {
     cycle_ran: bool,
     completed: bool,
     course_selected: bool,
+    /// Last run phase from a 0xBD/0xCD dump, held across once-a-minute 0xEC records.
+    last_phase: Option<&'static str>,
     /// Per-course rinse counter baselines, learned from records with extra rinse off.
     rinse_base: HashMap<u8, u8>,
 }
@@ -219,7 +224,12 @@ impl Device {
                 state.cycle_ran = true;
             }
             // The trailing post-completion dump still carries the last phase.
-            state.course_selected || state.cycle_ran
+            if state.course_selected || state.cycle_ran {
+                state.last_phase = Some(label);
+                true
+            } else {
+                false
+            }
         };
         if publish {
             self.core.publish_property("status", label.into());
@@ -228,10 +238,16 @@ impl Device {
 
     fn process_status(&self, buf: &[u8]) {
         // 0xEC carries [previous, current]; 0xEB only the current record.
-        let Some(&active) = records(buf).last() else {
+        let recs = records(buf);
+        let Some(&active) = recs.last() else {
             return;
         };
         if active.len() <= SESSION_OFFSET {
+            return;
+        }
+        // Idle check-in: the module periodically re-sends its retained idle record as an 0xEC
+        // whose previous and current records match with no course selected.
+        if recs.len() == 2 && recs[0] == recs[1] && active[COURSE_OFFSET] == 0 {
             return;
         }
         let course = active[COURSE_OFFSET];
@@ -262,6 +278,7 @@ impl Device {
         if !power_on {
             state.cycle_ran = false;
             state.completed = false;
+            state.last_phase = None;
             drop(state);
             self.publish_off();
             return;
@@ -275,6 +292,11 @@ impl Device {
             state.cycle_ran = false;
             state.completed = true;
         }
+        if completed || course == 0 {
+            state.last_phase = None;
+        }
+        let running = course != 0 && (state.cycle_ran || session & LOCK_FLAG != 0);
+        let last_phase = state.last_phase;
         if !rinse {
             state.rinse_base.insert(course, rinse_count);
         }
@@ -289,6 +311,8 @@ impl Device {
             "Complete"
         } else if active[0] != PHASE_OFF {
             named(STATUS, active[0]).unwrap_or("Running")
+        } else if running {
+            last_phase.unwrap_or("Running")
         } else {
             "Selecting"
         };
@@ -523,7 +547,9 @@ impl DeviceHandler for Device {
     fn id(&self) -> &str {
         &self.core.id
     }
-    fn start(&self) {}
+    fn start(&self) {
+        self.core.send(STATUS_REQUEST);
+    }
     fn drop_device(&self) {
         self.core.drop_device();
     }
@@ -666,6 +692,37 @@ mod tests {
         dev.set_property("power", "OFF");
         assert_eq!(thinq.outbox().len(), 1);
         assert_eq!(hex_encode(&thinq.outbox()[0]), SEND_POWER_OFF);
+    }
+
+    #[test]
+    fn start_requests_a_status_snapshot() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        DeviceHandler::start(dev.as_ref());
+        assert_eq!(thinq.outbox().len(), 1);
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA12F0ED1121010000001804131400005ABB"
+        );
+    }
+
+    #[test]
+    fn ec_record_keeps_dump_phase_instead_of_reverting_to_selecting() {
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(EC_SPEED_WASH_RUNNING));
+        thinq.emit_data(&hex_decode(CD_WASHING));
+        thinq.emit_data(&hex_decode(EC_SPEED_WASH_RUNNING));
+        expect(&ha, "status", "Washing");
+    }
+
+    #[test]
+    fn identical_record_idle_checkin_does_not_wake_an_off_washer() {
+        const EC_IDLE_CHECKIN: &str = "AA6033EC002B0000000E00000000000000000000010000003F000000109000000000260400000000000000400000000000002B0000000E00000000000000000000010000003F0000001090000000002604000000000000004000000000007ABB";
+        let (ha, thinq, _) = make();
+        thinq.emit_data(&hex_decode(EB_RETAINED_IDLE));
+        thinq.emit_data(&hex_decode(EC_IDLE_CHECKIN));
+        expect(&ha, "power", "OFF");
+        expect(&ha, "status", "Off");
     }
 
     #[test]

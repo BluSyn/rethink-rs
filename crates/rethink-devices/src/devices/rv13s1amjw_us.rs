@@ -34,6 +34,9 @@ const PHASE_OFF: u8 = 0x00;
 
 const POWER_ON: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x01];
 const POWER_OFF: &[u8] = &[0xf0, 0x24, 0x01, 0x01, 0x00];
+const STATUS_REQUEST: &[u8] = &[
+    0xf0, 0xed, 0x11, 0x21, 0x01, 0x00, 0x00, 0x00, 0x18, 0x04, 0x13, 0x14, 0x00, 0x00,
+];
 
 const STATUS: &[(u8, &str)] = &[
     (0x00, "Off"),
@@ -281,7 +284,9 @@ impl DeviceHandler for Device {
     fn id(&self) -> &str {
         &self.core.id
     }
-    fn start(&self) {}
+    fn start(&self) {
+        self.core.send(STATUS_REQUEST);
+    }
     fn drop_device(&self) {
         self.core.drop_device();
     }
@@ -402,6 +407,18 @@ mod tests {
         expect(&ha, "course", "None");
         expect(&ha, "dry_level", "None");
         expect(&ha, "temp", "None");
+    }
+
+    #[test]
+    fn start_requests_a_status_snapshot() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        DeviceHandler::start(dev.as_ref());
+        assert_eq!(thinq.outbox().len(), 1);
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA12F0ED1121010000001804131400005ABB"
+        );
     }
 
     #[test]
