@@ -123,7 +123,8 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `BDH_D30007_US` | DLHC5502V | Read-only course, dry level, eco hybrid, and the newer error table. |
 | `RH10V9_CH` | Unknown heat-pump dryer | Read-only phase, live remaining minutes, and course. |
 | `RH16_T_KR` | RH16VT | Course start with reserve hours, and the ten captured download courses. |
-| `RC90U2_WW`, `RC90V9_WW`, `RC90V9_AUS`, `RH90V9_WW` | RC9DN9029, RC91V9EV2Q, DVH9-09B, and RC10V9AV2W. The last three are aliases. The same `RC90U2_WW` id on ThinQ1 is `rc90u2_ww_t1`. | Course, dry level, eco hybrid, power, and pause, on both the AABB handler and the ThinQ1 adapter. `RH90V9_WW` adds Cotton+ and Tub Clean and drops its old extra entities. |
+| `RC90U2_WW`, `RC90V9_WW`, `RC90V9_AUS` | RC9DN9029, RC91V9EV2Q, and DVH9-09B. The last two are aliases. The same `RC90U2_WW` id on ThinQ1 is `rc90u2_ww_t1`. | Course, dry level, eco hybrid, self cleaning, power, and pause, on both the AABB handler and the ThinQ1 adapter. |
+| `RH90V9_WW` | RC10V9AV2W | The `RC90U2_WW` handler with Cotton+ and Tub Clean added; withdraws the earlier handler's extra entities. |
 | `SDH_GVX5_6211` | RHX5009NHB | Course and options. Power on also wakes the dryer. |
 
 ### WashTowers

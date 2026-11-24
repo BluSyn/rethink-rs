@@ -1,12 +1,11 @@
 //! RC90U2_WW — EU heat-pump dryer (RC9DN9029).
 //!
 //! 25-byte class `0x30` records, same AABB dialect as the US dryers. Also
-//! serves RC90V9_WW, RC90V9_AUS and RH90V9_WW (RC10V9AV2W, which adds the
-//! Cotton+ and Tub Clean courses), and the ThinQ1 module through
-//! `rc90u2_ww_t1`. `auto_ack` stays off, matching the upstream handler.
-//! Bytes 17-18 (not in the spec) are the Wh used by the current cycle,
-//! retained after it. The entities RH90V9_WW had under its earlier handler
-//! of its own are withdrawn for that model.
+//! serves RC90V9_WW and RC90V9_AUS, and the ThinQ1 module through
+//! `rc90u2_ww_t1`. `RH90V9_WW` (RC10V9AV2W) has its own module with its two
+//! extra courses so this handler does not offer them. `auto_ack` stays off,
+//! matching the upstream handler. Bytes 17-18 (not in the spec) are the Wh
+//! used by the current cycle, retained after it.
 //!
 //! Writes, mapped live on two more units: power on (`F0 2A`) and off (`F0 24 01`), Pause/Resume
 //! (`F0 24 04`, the panel's Start/Pause toggle; `F0 24 05` is acked with a beep and ignored) and
@@ -17,7 +16,7 @@
 //! The selects mirror the panel only when the appliance's own value changes, and a reconnect
 //! keeps them.
 //!
-//! Port of upstream PRs #240 and #271.
+//! Port of upstream PR #240 and master `8e3db5d`.
 
 use crate::device_trait::DeviceHandler;
 use crate::devices::washer_ctrl::request_status;
@@ -46,8 +45,10 @@ const STATE_PAUSED: u8 = 3;
 const OPT1_RESERVATION: u8 = 0x01;
 const OPT1_ANTI_CREASE: u8 = 0x02;
 const OPT1_CHILD_LOCK: u8 = 0x10;
-// The spec's SelfCleaning (0x20), DampDryBeep (0x40) and HandIron (0x80) belong to the family-wide
-// value table: none of them is on this model's panel, or was ever seen set on three units.
+/// Condenser self cleaning, also shown by a light on the panel.
+const OPT1_SELF_CLEANING: u8 = 0x20;
+// The spec's DampDryBeep (0x40) and HandIron (0x80) belong to the family-wide value table:
+// neither is on this model's panel, or was ever seen set on three units.
 
 /// Option2 bit 0, RemoteStart. The appliance also holds it while a cycle runs and drops it in pause.
 const OPT2_REMOTE_START: u8 = 0x01;
@@ -66,8 +67,7 @@ const STATES: &[(u8, &str)] = &[
     (100, "Delayed"),
 ];
 
-/// Base courses in the order the RC90U2 dial walks them, RH90V9_WW's two extra ones, then the
-/// downloaded ones.
+/// Base courses in the order the RC90U2 dial walks them, then the downloaded ones.
 const COURSES: &[(u8, &str)] = &[
     (0x07, "Cotton"),
     (0x06, "Mixed Fabric"),
@@ -82,8 +82,6 @@ const COURSES: &[(u8, &str)] = &[
     (0x0a, "Delicate"),
     (0x0b, "Wool"),
     (0x08, "Sports Wear"),
-    (0x19, "Cotton+"),   // RH90V9_WW
-    (0x13, "Tub Clean"), // RH90V9_WW, the Drum Care button
     (0x65, "Baby Wear"),
     (0x66, "Gym Clothes"),
     (0x67, "Blanket"),
@@ -140,21 +138,6 @@ const NO_YES: [&str; 2] = ["No", "Yes"];
 const TOMBSTONES: &[(&str, &str)] = &[
     ("damp_dry_beep", "binary_sensor"),
     ("hand_iron", "binary_sensor"),
-];
-
-/// RH90V9_WW had a handler of its own: the components of it that this one does not have.
-const RH90V9_WW_TOMBSTONES: &[(&str, &str)] = &[
-    ("cycle", "sensor"),
-    ("reservation", "sensor"),
-    ("pause", "button"),
-    ("ping", "button"),
-    ("run_state", "sensor"),
-    ("process_state", "sensor"),
-    ("run_completed", "binary_sensor"),
-    ("cycle_start_time", "sensor"),
-    ("cycle_end_time", "sensor"),
-    ("cycle_duration", "sensor"),
-    ("downloaded_cycle_id", "sensor"),
 ];
 
 /// What each base course takes in a remote start (ThinQ1 modelJSON TITAN2.0_D_WIFI_CZ, Course):
@@ -261,6 +244,7 @@ impl Selection {
 pub struct Device {
     core: Arc<AabbDeviceCore>,
     model_id: String,
+    extra_courses: &'static [(u8, &'static str)],
     timers: Arc<dyn Timers>,
     selection: Mutex<Selection>,
 }
@@ -272,20 +256,27 @@ impl Device {
         meta: Metadata,
         timers: Arc<dyn Timers>,
     ) -> Arc<Self> {
+        Self::with_variant(ha, thinq, meta, timers, &[], TOMBSTONES)
+    }
+
+    pub(crate) fn with_variant(
+        ha: Arc<dyn HaConnection>,
+        thinq: Arc<dyn Thinq2Device>,
+        meta: Metadata,
+        timers: Arc<dyn Timers>,
+        extra_courses: &'static [(u8, &'static str)],
+        tombstones: &[(&str, &str)],
+    ) -> Arc<Self> {
         let core = AabbDeviceCore::new(ha, thinq.clone());
         let this = Arc::new(Self {
             core: core.clone(),
             model_id: meta.model_id.clone(),
+            extra_courses,
             timers,
             selection: Mutex::new(Selection::default()),
         });
         let mut config = default_config(&meta, Some(json!({"name": "LG Dryer"})));
-        config.components = components();
-        let tombstones = if meta.model_id == "RH90V9_WW" {
-            RH90V9_WW_TOMBSTONES
-        } else {
-            TOMBSTONES
-        };
+        config.components = components(extra_courses);
         for &(key, platform) in tombstones {
             config
                 .components
@@ -299,6 +290,18 @@ impl Device {
             }
         }));
         this
+    }
+
+    fn named_course(&self, code: u8) -> Option<&'static str> {
+        named(COURSES, code).or_else(|| named(self.extra_courses, code))
+    }
+
+    fn label_course(&self, value: &str) -> Option<&'static str> {
+        label(COURSES, value).or_else(|| label(self.extra_courses, value))
+    }
+
+    fn code_course(&self, name: &str) -> Option<u8> {
+        code(COURSES, name).or_else(|| code(self.extra_courses, name))
     }
 
     fn process_aabb(&self, buf: &[u8]) {
@@ -353,12 +356,16 @@ impl Device {
         );
         self.core
             .publish_on_off("child_lock", option1 & OPT1_CHILD_LOCK != 0);
+        self.core
+            .publish_on_off("self_cleaning", option1 & OPT1_SELF_CLEANING != 0);
 
         if is_off {
             return;
         }
         let panel = Seen {
-            course: named(COURSES, rec[20]).or_else(|| named(COURSES, rec[5])),
+            course: self
+                .named_course(rec[20])
+                .or_else(|| self.named_course(rec[5])),
             dry_level: named(DRY_LEVELS, rec[7]),
             eco_hybrid: named(ECO_HYBRID, rec[8]),
             anti_crease: Some(option1 & OPT1_ANTI_CREASE != 0),
@@ -388,7 +395,10 @@ impl Device {
     fn start_selected(&self) {
         let (cmd, cycle_running) = {
             let mut selection = self.selection.lock();
-            let Some(cmd) = start_command(&selection.remote) else {
+            let Some(cmd) = self
+                .code_course(selection.remote.course)
+                .and_then(|c| start_command(c, &selection.remote))
+            else {
                 tracing::info!(
                     model = %self.model_id,
                     id = %self.core.id,
@@ -415,8 +425,10 @@ impl Device {
 }
 
 /// Downloaded courses are not started remotely: how `F0 26` carries them is unverified.
-fn start_command(remote: &Remote) -> Option<[u8; START_COURSE_LEN]> {
-    let course = code(COURSES, remote.course).filter(|&c| c < FIRST_SMART_COURSE)?;
+fn start_command(course: u8, remote: &Remote) -> Option<[u8; START_COURSE_LEN]> {
+    if course >= FIRST_SMART_COURSE {
+        return None;
+    }
     let options = COURSE_OPTIONS.iter().find(|(c, ..)| *c == course);
     let mut cmd = [0u8; START_COURSE_LEN];
     cmd[0] = 0xf0;
@@ -496,8 +508,15 @@ fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
     table.iter().map(|(_, name)| *name).collect()
 }
 
-fn components() -> std::collections::HashMap<String, serde_json::Value> {
+fn components(
+    extra_courses: &'static [(u8, &'static str)],
+) -> std::collections::HashMap<String, serde_json::Value> {
     let phase_options = ["Detecting", "Drying", "Cooling", "Anti-crease", "End"];
+    let course_options: Vec<&str> = COURSES
+        .iter()
+        .chain(extra_courses)
+        .map(|(_, name)| *name)
+        .collect();
     [
         (
             "power".into(),
@@ -590,7 +609,7 @@ fn components() -> std::collections::HashMap<String, serde_json::Value> {
                 "command_topic": "$this/course/set",
                 "name": "Course",
                 "icon": "mdi:pin-outline",
-                "options": labels(COURSES),
+                "options": course_options,
             }),
         ),
         (
@@ -728,6 +747,16 @@ fn components() -> std::collections::HashMap<String, serde_json::Value> {
                 "entity_category": "diagnostic",
             }),
         ),
+        (
+            "self_cleaning".into(),
+            json!({
+                "platform": "binary_sensor",
+                "unique_id": "$deviceid-self_cleaning",
+                "state_topic": "$this/self_cleaning",
+                "name": "Self cleaning",
+                "icon": "mdi:broom",
+            }),
+        ),
     ]
     .into_iter()
     .collect()
@@ -775,7 +804,7 @@ impl DeviceHandler for Device {
         let remote = &mut selection.remote;
         match prop {
             "course" => {
-                if let Some(course) = label(COURSES, value) {
+                if let Some(course) = self.label_course(value) {
                     remote.course = course;
                 }
             }
@@ -889,7 +918,7 @@ mod tests {
         let d = crate::t2_factory("RH90V9_WW").unwrap();
         assert!(std::ptr::fn_addr_eq(a, b));
         assert!(std::ptr::fn_addr_eq(a, c));
-        assert!(std::ptr::fn_addr_eq(a, d));
+        assert!(!std::ptr::fn_addr_eq(a, d));
     }
 
     #[test]
@@ -1325,6 +1354,7 @@ mod tests {
         assert_eq!(prop(&ha, "dry_level"), "Extra".into());
         assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(156));
         assert_eq!(prop(&ha, "energy"), PropertyValue::Int(174));
+        assert_eq!(prop(&ha, "self_cleaning"), "OFF".into());
 
         thinq.emit_data(&hex_decode(
             "AA3C30EC00190200030300070004010400000000000500043F010000007100001902000203000700040105000000002005000444010000007100A8BB",
@@ -1332,6 +1362,7 @@ mod tests {
         assert_eq!(prop(&ha, "phase"), "Cooling".into());
         assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(2));
         assert_eq!(prop(&ha, "energy"), PropertyValue::Int(1092));
+        assert_eq!(prop(&ha, "self_cleaning"), "ON".into());
 
         thinq.emit_data(&hex_decode(
             "AA3C30EC00190200010300070004010500000000200500044801000000710000190400010300070004010700000000000400044902000000710058BB",
@@ -1342,6 +1373,7 @@ mod tests {
             PropertyValue::Int(1097),
             "retained after the cycle"
         );
+        assert_eq!(prop(&ha, "self_cleaning"), "OFF".into());
 
         thinq.emit_data(&hex_decode(
             "AA3C30EC001901000000000000000000000000000004000000000000007100001901000000000000000000000000001004700000000000007100F5BB",
@@ -1349,150 +1381,13 @@ mod tests {
         assert_eq!(prop(&ha, "child_lock"), "ON".into());
     }
 
-    // RH90V9_WW (RC10V9AV2W) sends the same records; captures from a bridged unit.
-    // Reply to the cloud's F0ED request: on, no course yet.
-    const RH90_EB_READY: &str =
-        "AA2130EB0019010000000000000000000000000000080000000000000073002EBB";
-    // Knob: Delicate -> Sports Wear, no dry level, Eco, 0:50.
-    const RH90_SPORTS_WEAR: &str = "AA3C30EC001901003000000A0000010200000000000800000000000000730000190100320000080000010200000000000820000000000000730093BB";
-    // Knob: Rack Dry -> the Downloaded Course position, Shoes/Fabric Doll on base course Rack Dry, 3:00.
-    const RH90_DOWNLOADED_SHOES: &str = "AA3C30EC001901030000000C00000102000000000008000000000000007300001901030000000C0000010200000000000800000000730000730096BB";
-    // Knob: Cotton -> Cotton+, Cupboard, Eco, 2:45.
-    const RH90_COTTON_PLUS: &str = "AA3C30EC001901022D00000700030302000000000008000000000000007300001901022D00001900030102000000000008000000000000007300EDBB";
-    // Drum Care button: Rack Dry -> Tub Clean, no dry level, Time, 3:00.
-    const RH90_TUB_CLEAN: &str = "AA3C30EC001901030000000C000001020000000008080000000000000073000019010300000013000003030000000008080000000000000073003FBB";
-    // Delay End: reserve 3 h and the Reservation bit.
-    const RH90_DELAY_END_ON: &str = "AA3C30EC0019010300000013000003030000000000080000000000000073000019010300000013000003030300030001080000000000000073003EBB";
-    // Start: Ready -> Running, drying phase, initial time filled in (3:00).
-    const RH90_START: &str = "AA3C30EC001901030000001300000303000000000008000000000000007300001902030003001300000303000000000008500000010000007300ECBB";
-    // Running -> Paused, then power off.
-    const RH90_PAUSE: &str = "AA3C30EC0019020300030013000003030000000000085000000100000073000019030300030013000003030000000008080000000200000073009DBB";
-    const RH90_POWER_OFF: &str = "AA3C30EC0019030300030013000003030000000008080000000200000073000019000000000000000000000000000000080000000300000073000CBB";
-
     #[test]
-    fn rh90v9_knob_delay_end_start_pause_and_power_off() {
-        let (ha, thinq, _dev) = make("RH90V9_WW");
-        thinq.emit_data(&hex_decode(RH90_EB_READY));
-        assert_eq!(prop(&ha, "power"), "ON".into());
-        assert_eq!(prop(&ha, "status"), "Standby".into());
-        // No course yet: the course select keeps its default.
-        assert_eq!(prop(&ha, "course"), "Cotton".into());
-
-        thinq.emit_data(&hex_decode(RH90_SPORTS_WEAR));
-        assert_eq!(prop(&ha, "course"), "Sports Wear".into());
-        assert_eq!(prop(&ha, "dry_level"), "Not selected".into());
-        assert_eq!(prop(&ha, "eco_hybrid"), "Eco".into());
-        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(50));
-
-        thinq.emit_data(&hex_decode(RH90_DOWNLOADED_SHOES));
-        assert_eq!(prop(&ha, "course"), "Shoes/Fabric Doll".into());
-        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(180));
-
-        thinq.emit_data(&hex_decode(RH90_COTTON_PLUS));
-        assert_eq!(prop(&ha, "course"), "Cotton+".into());
-        assert_eq!(prop(&ha, "dry_level"), "Cupboard".into());
-        assert_eq!(prop(&ha, "eco_hybrid"), "Eco".into());
-        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(165));
-
-        thinq.emit_data(&hex_decode(RH90_TUB_CLEAN));
-        assert_eq!(prop(&ha, "course"), "Tub Clean".into());
-        assert_eq!(prop(&ha, "dry_level"), "Not selected".into());
-        assert_eq!(prop(&ha, "eco_hybrid"), "Turbo".into());
-        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(180));
-
-        thinq.emit_data(&hex_decode(RH90_DELAY_END_ON));
-        assert_eq!(prop(&ha, "delay"), "ON".into());
-        assert_eq!(prop(&ha, "reserve_time"), PropertyValue::Int(180));
-        assert_eq!(prop(&ha, "anti_crease"), "No".into());
-
-        thinq.emit_data(&hex_decode(RH90_START));
-        assert_eq!(prop(&ha, "status"), "Drying".into());
-        assert_eq!(prop(&ha, "phase"), "Drying".into());
-        assert_eq!(prop(&ha, "remaining_time"), PropertyValue::Int(180));
-        assert_eq!(prop(&ha, "initial_time"), PropertyValue::Int(180));
-        assert_eq!(prop(&ha, "delay"), "OFF".into());
-
-        thinq.emit_data(&hex_decode(RH90_PAUSE));
-        assert_eq!(prop(&ha, "status"), "Paused".into());
-        assert_eq!(prop(&ha, "phase"), "Drying".into());
-        assert_eq!(prop(&ha, "error"), "OFF".into());
-
-        thinq.emit_data(&hex_decode(RH90_POWER_OFF));
-        assert_eq!(prop(&ha, "power"), "OFF".into());
-        assert_eq!(prop(&ha, "status"), "Off".into());
-        // The selects are also what Start selected cycle sends.
-        assert_eq!(prop(&ha, "course"), "Tub Clean".into());
-    }
-
-    /// Sorted (key, platform) of the components that are only a platform.
-    fn tombstones(model: &str) -> Vec<(String, String)> {
-        let (ha, _thinq, _dev) = make(model);
+    fn rc90u2_course_options_exclude_rh90v9_courses() {
+        let (ha, _thinq, _dev) = make("RC90U2_WW");
         let components = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
-        let mut found: Vec<_> = components
-            .iter()
-            .filter(|(_, c)| c.as_object().is_some_and(|o| o.len() == 1))
-            .map(|(key, c)| (key.clone(), c["platform"].as_str().unwrap().to_string()))
-            .collect();
-        found.sort();
-        found
-    }
-
-    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-        let mut pairs: Vec<_> = list
-            .iter()
-            .map(|(key, platform)| (key.to_string(), platform.to_string()))
-            .collect();
-        pairs.sort();
-        pairs
-    }
-
-    #[test]
-    fn rh90v9_ww_withdraws_the_entities_of_its_earlier_handler() {
-        // The rh90v9_ww handler's components that this one does not have.
-        assert_eq!(
-            tombstones("RH90V9_WW"),
-            pairs(&[
-                ("cycle", "sensor"),
-                ("reservation", "sensor"),
-                ("pause", "button"),
-                ("ping", "button"),
-                ("run_state", "sensor"),
-                ("process_state", "sensor"),
-                ("run_completed", "binary_sensor"),
-                ("cycle_start_time", "sensor"),
-                ("cycle_end_time", "sensor"),
-                ("cycle_duration", "sensor"),
-                ("downloaded_cycle_id", "sensor"),
-            ])
-        );
-        // Only for that model.
-        for model in ["RC90U2_WW", "RC90V9_WW", "RC90V9_AUS"] {
-            assert_eq!(
-                tombstones(model),
-                pairs(&[
-                    ("damp_dry_beep", "binary_sensor"),
-                    ("hand_iron", "binary_sensor")
-                ]),
-                "{model}"
-            );
-        }
-        // The keys both handlers have stay real entities.
-        let (ha, _thinq, _dev) = make("RH90V9_WW");
-        let components = ha.device(DEVICE_ID).unwrap().config.unwrap().components;
-        for key in [
-            "power",
-            "remote_start",
-            "dry_level",
-            "eco_hybrid",
-            "anti_crease",
-            "start",
-            "remaining_time",
-            "initial_time",
-            "error",
-            "error_message",
-        ] {
-            assert!(components[key].get("unique_id").is_some(), "{key}");
-        }
+        let courses = components["course"]["options"].as_array().unwrap();
+        assert!(!courses.contains(&json!("Cotton+")));
+        assert!(!courses.contains(&json!("Tub Clean")));
     }
 
     fn with_error(frame: &str, code: u8) -> Vec<u8> {
