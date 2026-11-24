@@ -114,6 +114,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F3P3CYK2_` | WM4200HBA | Status and course. Only power-off is writable. |
 | `F24VDD` | Unknown | Course, spin, temperature, rinse, and reserve. Start and resume send the captured template. |
 | `FAFXU25006` | WM5800HVA | Read-only 72-byte status. |
+| `FAFXU22007` | WM6700HBA | 51-byte enveloped status, door/completion events, ezDispense telemetry, and serialized `F0 E5` / `F0 24` controls. |
 | `T1789EFH_F`, `T1872EFHU_F` | WT7300CW, and WT7800CV for the alias | Course and options from the marker-led record. Stale `0xE2` snapshots are ignored. |
 | `T17A1EFHU_F` | WT7305CV / WT7305CW | Course, delay, extra rinses, pause, and power off. Smart-course defaults come from this model's modelJSON. |
 | `TLVE5BB` | WT21BWV6 | Read-only 50-byte status. |
@@ -136,6 +137,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `RV13D5JSD_D_US` | DLEX4200B | Read-only status except a power-off button. Completion stays latched through power-off. |
 | `BDH_D30007_US` | DLHC5502V | Read-only course, dry level, eco hybrid, and the newer error table. |
 | `BDH_HI2103_EU` | RH18U8AVCW | 42-byte status with EU courses, downloaded cycles, staged settings, and `F0 E5` power/pause/resume/start/download controls. |
+| `BDVG_FX0003_US` | DLEX6700B | 42-byte enveloped status, door/power/completion events, and serialized `F0 E5` course, bundle, and settings controls. |
 | `RH10V9_CH` | Unknown heat-pump dryer | Read-only phase, live remaining minutes, and course. |
 | `RH16_T_KR` | RH16VT | Course start with reserve hours, and the ten captured download courses. |
 | `RC90U2_WW`, `RC90V9_WW`, `RC90V9_AUS` | RC9DN9029, RC91V9EV2Q, and DVH9-09B. The last two are aliases. The same `RC90U2_WW` id on ThinQ1 is `rc90u2_ww_t1`. | Course, dry level, eco hybrid, self cleaning, power, and pause, on both the AABB handler and the ThinQ1 adapter. |
@@ -194,8 +196,6 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | ThinQ modelId | Sold as | Named by |
 | --- | --- | --- |
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
-| `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
-| `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
 
 Unlisted appliances can still be used in **bridge mode** (no HA translation). For new devices or gaps, contribute **upstream**, not here.

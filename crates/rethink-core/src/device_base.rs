@@ -239,6 +239,7 @@ struct WriteQueueShared {
     core: Arc<AabbDeviceCore>,
     model: Arc<dyn WriteModel>,
     timeout: Duration,
+    block_on_timeout: bool,
     state: Mutex<WriteState>,
     timer_wake: Condvar,
     /// The thread sending one of our writes. The send hooks it triggers report that same write.
@@ -249,18 +250,37 @@ struct WriteQueueShared {
 /// is still being applied with result 0x13 (busy). The LG cloud's writes while bridged are tracked
 /// like ours (see [`Thinq2Device::on_send_packet`]), and ours go out once every write sent has been
 /// answered. Replies carry no sequence number, so each is taken to answer the oldest write of its
-/// type. When no answer comes within the timeout (restarted by each write sent), the queue blocks
-/// for good: upstream's strict write tracking.
+/// type. When no answer comes within the timeout (restarted by each write sent), [`Self::new`]
+/// blocks the queue for good (strict tracking), while [`Self::new_resuming`] expires the awaited
+/// writes and resumes sending queued writes.
 pub struct AabbWriteQueue {
     shared: Arc<WriteQueueShared>,
 }
 
 impl AabbWriteQueue {
     pub fn new(core: Arc<AabbDeviceCore>, model: Arc<dyn WriteModel>, timeout: Duration) -> Self {
+        Self::with_mode(core, model, timeout, true)
+    }
+
+    pub fn new_resuming(
+        core: Arc<AabbDeviceCore>,
+        model: Arc<dyn WriteModel>,
+        timeout: Duration,
+    ) -> Self {
+        Self::with_mode(core, model, timeout, false)
+    }
+
+    fn with_mode(
+        core: Arc<AabbDeviceCore>,
+        model: Arc<dyn WriteModel>,
+        timeout: Duration,
+        block_on_timeout: bool,
+    ) -> Self {
         let shared = Arc::new(WriteQueueShared {
             core: core.clone(),
             model,
             timeout,
+            block_on_timeout,
             state: Mutex::default(),
             timer_wake: Condvar::new(),
             own_sender: Mutex::new(None),
@@ -341,35 +361,7 @@ impl AabbWriteQueue {
     /// Send the next due write, unless one is still unanswered. Call after every frame, so a write
     /// built then sees what the previous one changed.
     pub fn next_write(&self) {
-        let frame = {
-            let mut st = self.shared.state.lock();
-            if st.blocked || st.stopped || !st.awaiting.is_empty() {
-                return;
-            }
-            let mut frame = None;
-            while frame.is_none() {
-                let Some(write) = st.queue.pop_front() else {
-                    break;
-                };
-                frame = (write.build)();
-            }
-            let Some(frame) = frame else {
-                return;
-            };
-            if let Some(write_type) = self.shared.model.write_type(&frame) {
-                let write = AwaitedWrite {
-                    write_type,
-                    own: true,
-                    inner: frame.clone(),
-                };
-                self.shared.track(&mut st, write);
-            }
-            frame
-        };
-        // Sent unlocked: a bridged write may be reporting itself to the queue meanwhile.
-        *self.shared.own_sender.lock() = Some(thread::current().id());
-        self.shared.core.send(&frame);
-        *self.shared.own_sender.lock() = None;
+        self.shared.send_next();
     }
 
     /// Drop every pending write and stop the timer (`retire`/`drop_device`).
@@ -425,26 +417,76 @@ impl WriteQueueShared {
         }
     }
 
-    /// Runs while writes are awaited.
-    fn run_timer(&self) {
-        let mut st = self.state.lock();
-        while let Some(deadline) = st.deadline {
-            let now = Instant::now();
-            if now >= deadline {
-                let expired = std::mem::take(&mut st.awaiting);
-                st.deadline = None;
-                st.blocked = true;
-                st.queue.clear();
-                self.model.write_timed_out(&expired);
-                break;
+    fn send_next(self: &Arc<Self>) {
+        let frame = {
+            let mut st = self.state.lock();
+            if st.blocked || st.stopped || !st.awaiting.is_empty() {
+                return;
             }
-            st = self
-                .timer_wake
-                .wait_timeout(st, deadline - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            let mut frame = None;
+            while frame.is_none() {
+                let Some(write) = st.queue.pop_front() else {
+                    break;
+                };
+                frame = (write.build)();
+            }
+            let Some(frame) = frame else {
+                return;
+            };
+            if let Some(write_type) = self.model.write_type(&frame) {
+                let write = AwaitedWrite {
+                    write_type,
+                    own: true,
+                    inner: frame.clone(),
+                };
+                self.track(&mut st, write);
+            }
+            frame
+        };
+        // Sent unlocked: a bridged write may be reporting itself to the queue meanwhile.
+        *self.own_sender.lock() = Some(thread::current().id());
+        self.core.send(&frame);
+        *self.own_sender.lock() = None;
+    }
+
+    /// Runs while writes are awaited.
+    fn run_timer(self: &Arc<Self>) {
+        loop {
+            let mut resume = false;
+            {
+                let mut st = self.state.lock();
+                let Some(deadline) = st.deadline else {
+                    st.timer_running = false;
+                    return;
+                };
+                let now = Instant::now();
+                if now >= deadline {
+                    let expired = std::mem::take(&mut st.awaiting);
+                    st.deadline = None;
+                    if self.block_on_timeout {
+                        st.blocked = true;
+                        st.queue.clear();
+                        self.model.write_timed_out(&expired);
+                        st.timer_running = false;
+                        return;
+                    }
+                    self.model.write_timed_out(&expired);
+                    if st.stopped || st.queue.is_empty() {
+                        st.timer_running = false;
+                        return;
+                    }
+                    resume = true;
+                } else {
+                    let _ = self
+                        .timer_wake
+                        .wait_timeout(st, deadline - now)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
+            }
+            if resume {
+                self.send_next();
+            }
         }
-        st.timer_running = false;
     }
 }
 
