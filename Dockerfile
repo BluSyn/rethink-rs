@@ -46,8 +46,9 @@ RUN set -eux; \
     printf 'stub\n' > html/.keep
 
 # Compile transitive deps + dummy workspace crates into this layer's target/.
-# On source-only rebuilds this step is fully cached.
-RUN cargo build --release \
+# On source-only rebuilds this step is fully cached. Suppress warnings on the
+# dummy stubs (which intentionally reference none of their dependencies).
+RUN cargo build --release --config 'build.warnings="allow"' \
       -p rethink-cloud -p rethink-setup -p rethink-tools \
     && rm -f target/release/rethink-cloud \
              target/release/rethink-setup \

@@ -22,7 +22,6 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 rustls = { workspace = true }
-tokio-rustls = { workspace = true }
 # Device-facing HTTPS/MQTTS need legacy CBC-SHA / TLS1.0 for RTK_RTL8711am (PR#131).
 # rustls deliberately omits those suites; OpenSSL matches the Node device_tls profile.
 openssl = "0.10"
@@ -30,7 +29,6 @@ tokio-openssl = "0.6"
 rumqttc = { workspace = true }
 # Asks the Home Assistant Supervisor for its MQTT service in add-on mode.
 reqwest = { workspace = true }
-clap = { workspace = true }
 include_dir = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

@@ -31,7 +31,6 @@ path = "src/bin/thinq_control.rs"
 
 [dependencies]
 rethink-util = { workspace = true }
-rethink-core = { workspace = true }
 rethink-bridge = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
