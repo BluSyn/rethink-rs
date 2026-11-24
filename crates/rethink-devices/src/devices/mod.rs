@@ -114,6 +114,8 @@ register_devices! {
         f3s1cwkb__ => { "F3S1CWKB__" },
         f3s1cwk__ => { "F3S1CWK__" },
         rv13s1amjw_us => { "RV13S1AMJW_US" },
+        fakpk21021 => { "FAKPK21021" },
+        bdh_d39301_kr => { "BDH_D39301_KR" },
         dhum_056905_ww => { "DHUM_056905_WW" },
         dhum_231006_ww => { "DHUM_231006_WW" },
         hum_056905_ww => { "HUM_056905_WW" },

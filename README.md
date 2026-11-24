@@ -153,6 +153,8 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F3S1CWK__` | WKGX201HWA washer half | Class `0x33` 45-byte status, downloaded course, cycle energy, wash-completed latch, and power on/off buttons. |
 | `RV13S1AMJW_US` | WKEX200HBA dryer half | Course, dry level, and a power switch. Not an RV13B6 alias. |
 | `W3S1CVK2EVS_D_US` | WKGX201HWA dryer half | Class `0x34` `RV13D5JSD_D_US` layout with power on/off buttons, control lock, remote start, downloaded course, and cycle energy; omits Damp Dry Signal. |
+| `FAKPK21021` | Korean WashTower washer half | Extended `AA FF 33` (`0xEB`/`0xEC`) status, door/lock/error sensors, validated course draft selects, and `F0 24`/`F0 26`/`F0 2A`/`F0 E5` controls. |
+| `BDH_D39301_KR` | Korean WashTower dryer half | Extended `AA FF 34` (`0xEB`/`0xEC`) status, error/lock sensors, validated course draft selects, and `F0 24`/`F0 26`/`F0 2A`/`F0 E5` controls. |
 
 ### Dishwashers
 
@@ -191,12 +193,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 
 ### Not yet supported
 
-These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https://github.com/anszom/rethink) and are not in this registry. Upstream master `8e3db5d4bf7733b5278b072edafac820cbb077bf` (fetched 2026-11-24) does not add any further device module beyond the ids above. The open-PR search `repo:anszom/rethink is:pr is:open` returned 100 that day. A product name already covered by a row above is not repeated here.
-
-| ThinQ modelId | Sold as | Named by |
-| --- | --- | --- |
-| `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
-| `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
+As of upstream master `8e3db5d4bf7733b5278b072edafac820cbb077bf` (fetched 2026-11-24) and the open-PR search `repo:anszom/rethink is:pr is:open` (100 PRs that day) on [anszom/rethink](https://github.com/anszom/rethink), every ThinQ `modelId` named by upstream master or open pull requests is registered in the tables above.
 
 Unlisted appliances can still be used in **bridge mode** (no HA translation). For new devices or gaps, contribute **upstream**, not here.
 
