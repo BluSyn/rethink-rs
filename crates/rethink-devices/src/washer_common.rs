@@ -166,6 +166,11 @@ pub const SMART_COURSES: &[(u8, &str)] = &[
     (0x3e, "Single Garment"),
     (0x3f, "Colour Protection"),
     (0x40, "Noise Minimize"),
+    (0x42, "Quick Wash + Dry"),
+    (0x43, "Dry 30"),
+    (0x44, "Dry 60"),
+    (0x45, "Turbo Dry"),
+    (0x46, "Shirt Dry"),
     (0x47, "Baby Care"),
     (0x48, "Hygiene"),
     (0x49, "Small Load"),
@@ -183,7 +188,10 @@ pub const SMART_COURSES: &[(u8, &str)] = &[
     (0x71, "Quick Tub Clean"),
     (0x79, "Drain"),
     (0x7a, "Spin"),
+    (0x81, "Duvet"),
+    (0x82, "Sports Wear"),
     (0x84, "Silent Wash"),
+    (0x85, "Steam Refresh"),
     (0x86, "MicroPlastic Care"),
 ];
 

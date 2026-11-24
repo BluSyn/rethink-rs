@@ -106,7 +106,7 @@ struct State {
 }
 
 #[derive(Default)]
-struct Ezdispense {
+pub(crate) struct Ezdispense {
     state: Mutex<State>,
 }
 

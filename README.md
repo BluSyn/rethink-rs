@@ -94,7 +94,8 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
 | `F_V__F___W.B__ECON` | CV9014WC2 washer/dryer | Staged course (spin, temperature, rinse, dry, delay) then start. |
 | `Y_V8_F___W.B_2QEUK` | W4WR70E61 washer/dryer | Wash and dry fields, plus the wash-cycle counter. |
-| `Y_VB_Y___W.B32QEUK` | F14R76BSTA and F4W1175YW | The Y_V8 record plus ezDispense doses, the drawer, and both tank-low alerts. |
+| `Y_VB_Y___W.B32QEUK` | F14R76BSTA and F4W1175YW | The Y_V8 record plus ezDispense doses (settable for `run_programme`), the drawer, and both tank-low alerts. |
+| `Y_VB_F___W.B32QEUK` | F4DR711S2BA washer/dryer | The `Y_VB_Y___W.B32QEUK` handler plus drying mode, panel course defaults, detergent-empty alert, and tub / drying air temperatures. |
 | `V_V__F___W.B_2QEUK` | W4X1085NWH washer/dryer | Power, pause, and run programme. It does not resume a pause. |
 | `F3L2CYU__` | WM3900HBA | Read-only power, status, and course. |
 | `F3L7CYK5W_US_WIFI` | Unknown | Read-only status, course, child lock, rinse, initial time, and tub-clean count. |

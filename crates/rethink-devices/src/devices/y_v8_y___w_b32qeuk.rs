@@ -126,6 +126,11 @@ pub(crate) trait Extension: Send + Sync + 'static {
         &[]
     }
 
+    /// Replaces the entire base course table when a sibling renames panel courses.
+    fn courses_override(&self) -> Option<&'static [(u8, &'static str)]> {
+        None
+    }
+
     /// Adds, replaces or tombstones discovery components.
     fn components(&self, _components: &mut Map<String, Value>) {}
 
@@ -208,23 +213,39 @@ impl Device {
         *self.pending.lock()
     }
 
+    pub(crate) fn set_pending(&self, f: impl FnOnce(&mut Pending)) {
+        f(&mut self.pending.lock());
+    }
+
     pub(crate) fn drop_pending_course(&self) {
         self.pending.lock().course = None;
     }
 
-    fn courses(&self) -> impl Iterator<Item = &'static (u8, &'static str)> {
-        COURSES.iter().chain(self.ext.extra_courses())
+    pub(crate) fn preview_programme_command(&self) -> [u8; 18] {
+        self.programme_command()
+    }
+
+    fn courses(&self) -> Vec<&'static (u8, &'static str)> {
+        if let Some(table) = self.ext.courses_override() {
+            table.iter().collect()
+        } else {
+            COURSES.iter().chain(self.ext.extra_courses()).collect()
+        }
     }
 
     fn course_name(&self, code: u8) -> &'static str {
         self.courses()
+            .into_iter()
             .find(|(c, _)| *c == code)
             .map(|(_, n)| *n)
             .unwrap_or("None")
     }
 
     fn course_code(&self, name: &str) -> Option<u8> {
-        self.courses().find(|(_, n)| *n == name).map(|(c, _)| *c)
+        self.courses()
+            .into_iter()
+            .find(|(_, n)| *n == name)
+            .map(|(c, _)| *c)
     }
 
     fn process_state(&self, s: &[u8]) {
@@ -534,11 +555,15 @@ fn labels(table: &'static [(u8, &'static str)]) -> Vec<&'static str> {
 }
 
 fn components(ext: &dyn Extension) -> std::collections::HashMap<String, Value> {
-    let course_names: Vec<&str> = COURSES
-        .iter()
-        .chain(ext.extra_courses())
-        .map(|(_, n)| *n)
-        .collect();
+    let course_names: Vec<&str> = if let Some(table) = ext.courses_override() {
+        table.iter().map(|(_, n)| *n).collect()
+    } else {
+        COURSES
+            .iter()
+            .chain(ext.extra_courses())
+            .map(|(_, n)| *n)
+            .collect()
+    };
     let mut c = Map::new();
     let add = |c: &mut Map<String, Value>, k: &str, v: Value| {
         c.insert(k.into(), v);
