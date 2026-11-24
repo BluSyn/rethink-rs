@@ -135,6 +135,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `RV13D4ASJW_D_US` | DLEX4000W | Course, Time Dry, and AI. Writes need Remote Start. |
 | `RV13D5JSD_D_US` | DLEX4200B | Read-only status except a power-off button. Completion stays latched through power-off. |
 | `BDH_D30007_US` | DLHC5502V | Read-only course, dry level, eco hybrid, and the newer error table. |
+| `BDH_HI2103_EU` | RH18U8AVCW | 42-byte status with EU courses, downloaded cycles, staged settings, and `F0 E5` power/pause/resume/start/download controls. |
 | `RH10V9_CH` | Unknown heat-pump dryer | Read-only phase, live remaining minutes, and course. |
 | `RH16_T_KR` | RH16VT | Course start with reserve hours, and the ten captured download courses. |
 | `RC90U2_WW`, `RC90V9_WW`, `RC90V9_AUS` | RC9DN9029, RC91V9EV2Q, and DVH9-09B. The last two are aliases. The same `RC90U2_WW` id on ThinQ1 is `rc90u2_ww_t1`. | Course, dry level, eco hybrid, self cleaning, power, and pause, on both the AABB handler and the ThinQ1 adapter. |
@@ -193,7 +194,6 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | ThinQ modelId | Sold as | Named by |
 | --- | --- | --- |
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
-| `BDH_HI2103_EU` | RH18U8AVCW | Open PR #315 |
 | `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |

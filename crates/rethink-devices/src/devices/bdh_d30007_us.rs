@@ -56,7 +56,7 @@ fn be16(rec: &[u8], off: usize) -> i64 {
 fn named(v: Option<&'static str>) -> rethink_core::ha::PropertyValue {
     v.unwrap_or("None").into()
 }
-fn state_name(c: u8) -> Option<&'static str> {
+pub(crate) fn state_name(c: u8) -> Option<&'static str> {
     Some(match c {
         0 => "Off",
         1 => "Standby",
@@ -145,7 +145,7 @@ fn eco_name(c: u8) -> Option<&'static str> {
         _ => None,
     }
 }
-fn error_name(c: u8) -> Option<&'static str> {
+pub(crate) fn error_name(c: u8) -> Option<&'static str> {
     Some(match c {
         0 => "OK",
         1 => "Temperature sensor error (tE1)",
@@ -192,7 +192,7 @@ fn buzzer_name(c: u8) -> Option<&'static str> {
     match c { 0 => Some("Off"), 1 => Some("1"), 2 => Some("2"), 3 => Some("3"), 4 => Some("4"), _ => None }
 }
 
-const STATE_OPTS: &[&str] = &[
+pub(crate) const STATE_OPTS: &[&str] = &[
     "Off", "Standby", "Drying", "Paused", "End", "Error", "Smart Diagnosis", "Cooling",
     "Wrinkle care", "Delayed", "Detecting", "Steam", "Clothing recognition", "Condenser clean",
     "Bedding care", "Refreshing", "Allergy care", "Condenser care", "Dry ready", "Laundry care",
@@ -229,7 +229,7 @@ const COURSE_OPTS: &[&str] = &[
 const DOWNLOAD_OPTS: &[&str] = &["Not selected", "Wrinkle Prevention", "Rack Dry"];
 const DRY_LEVEL_OPTS: &[&str] = &["Not selected", "Damp", "Less", "Normal", "More", "Very"];
 const ECO_OPTS: &[&str] = &["Not selected", "Eco", "Normal", "Turbo"];
-const ERROR_OPTS: &[&str] = &[
+pub(crate) const ERROR_OPTS: &[&str] = &[
     "OK",
     "Temperature sensor error (tE1)",
     "Temperature sensor error (tE2)",

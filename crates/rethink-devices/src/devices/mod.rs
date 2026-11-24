@@ -137,6 +137,7 @@ register_devices! {
         wmvef1337f => { "WMVEF1337F" },
         fafxu25006 => { "FAFXU25006" },
         bdh_d30007_us => { "BDH_D30007_US" },
+        bdh_hi2103_eu => { "BDH_HI2103_EU" },
         mi2u7b => { "MI2U7B" },
         wlsi_633_ => { "WLSI_633_" },
         wlrel6323s => { "WLREL6323S" },
