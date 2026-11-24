@@ -173,7 +173,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 
 ### Not yet supported
 
-These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https://github.com/anszom/rethink) and are not in this registry. Upstream master `4e6028125cda6bdd8b18cb233841e1a5d0381bce` (fetched 2026-11-17) does not add any further device module beyond the ids above. The open-PR search `repo:anszom/rethink is:pr is:open` returned 100 that day. A product name already covered by a row above is not repeated here.
+These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https://github.com/anszom/rethink) and are not in this registry. Upstream master `8e3db5d4bf7733b5278b072edafac820cbb077bf` (fetched 2026-11-24) does not add any further device module beyond the ids above. The open-PR search `repo:anszom/rethink is:pr is:open` returned 100 that day. A product name already covered by a row above is not repeated here.
 
 | ThinQ modelId | Sold as | Named by |
 | --- | --- | --- |
@@ -196,6 +196,7 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `RV13U7JS9W_D_US_WIFI` | DLEX7800VE | Open PR #329 |
 | `T1872EFHU_F` | WT7800CV | Open PR #329 |
 | `TLXA5CFPH` | Unknown | Open PR #342 |
+| `VCCHL2QEUK` | WHX9016TLC washer/dryer | Open PR #344 |
 | `VIC2_799_US_FACTORY` | A WM3500CW variant. Not the ThinQ1 WM3500CW already registered. | Open PR #336 |
 | `W3S1CVK2EVS_D_US` | WKGX201HWA dryer half | Open PR #300 |
 | `WLSEL6333F` | LSEL6333F | Open PRs #304 and #329 |
