@@ -52,6 +52,8 @@ const COURSES: &[(u8, &str)] = &[
     (0x04, "Turbo"),
     (0x05, "Normal"),
     (0x06, "Rinse"),
+    // From D3210's modeljson; seen live on its panel.
+    (0x07, "Refresh"),
     (0x08, "Express"),
     (0x09, "Machine Clean"),
 ];
@@ -526,5 +528,6 @@ mod tests {
     #[test]
     fn registry_resolves() {
         assert!(crate::registry::t2_factory("D30").is_some());
+        assert!(crate::registry::t2_factory("D3210").is_some());
     }
 }

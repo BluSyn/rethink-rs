@@ -665,4 +665,20 @@ mod tests {
         thinq.emit_data(&hex_decode(EC_HEAVY_DUTY));
         assert!(thinq.sent().iter().all(|m| m.cmd != "ack"));
     }
+
+    #[test]
+    fn t1872efhu_f_remaining_time_from_real_captures() {
+        let meta = Metadata::new("T1872EFHU_F", "T1872EFHU_F", "2.10.93");
+        let ha = MockHaConnection::new();
+        let thinq = MockThinq2Device::new(ID, meta.clone());
+        let _dev = Device::new(ha.clone(), thinq.clone(), meta);
+        thinq.emit_data(&hex_decode(
+            "AA2120EB0019030100003B0800030104000000000410000000010000006400E2BB",
+        ));
+        expect(&ha, "remaining_time", "60");
+        thinq.emit_data(&hex_decode(
+            "AA3C20EC0019030100003B0800030104000000000410000000010000006400001905003B003A0800030104000000000414000000030000006400A0BB",
+        ));
+        expect(&ha, "remaining_time", "59");
+    }
 }

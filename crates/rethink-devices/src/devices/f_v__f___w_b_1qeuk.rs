@@ -9,11 +9,42 @@ use crate::washer_common::{course_name, drying_mode, fy_base_components, install
 use rethink_core::device_base::{
     default_config, process_common_status, process_enveloped_status, AabbDeviceCore,
 };
-use rethink_core::{HaConnection, Metadata, Thinq2Device};
+use rethink_core::{hex_decode, HaConnection, Metadata, Thinq2Device};
 use serde_json::json;
 use std::sync::Arc;
 
 const RECORD_LEN: usize = 39;
+
+// SmartCourse entries from modelJSON (ControlWifi.WMDownload, opcode F0 25):
+// F0 25 03 15 <course> <soil> <spin> <temp> <rinse> <dry> 00 00 <load> <opts> 00 00 <smartCourse> 00 00 00
+const DOWNLOAD_COURSES: &[(u8, &str, &str)] = &[
+    (0x47, "Baby Care", "F025031501030706020000000050000047000000"),
+    (0x4a, "Lingerie", "F02503152003050201000000000000004A000000"),
+    (0x4d, "Cold Wash", "F02503150103FF0101000000000000004D000000"),
+    (0x64, "Rinse + Spin", "F02503150E03FF00010000000000000064000000"),
+    (0x34, "Kids Wear", "F025031501030906010000000040000034000000"),
+    (0x36, "Swimming Wear", "F02503151B030202010000000000000036000000"),
+    (0x37, "Rainy Season", "F02503150103FF04010000000000000037000000"),
+    (0x39, "Jeans", "F02503152003FF02010000000000000039000000"),
+    (0x3b, "Sweat Stain", "F02503150103FF0401000000000000003B000000"),
+    (0x3c, "Deodorization", "F02503150D00000000000000038000003C000000"),
+    (0x3f, "Colour Protection", "F02503152003050201000000000000003F000000"),
+    (0x65, "Lightly Soiled Items", "F02503151B030202010000000000000065000000"),
+    (0x66, "Minimize Detergent Residue", "F02503150103FF04020000000000000066000000"),
+    (0x6a, "Refresh", "F02503150D00000000000000038000006A000000"),
+    (0x6b, "Sleeve Hems and Collars", "F02503150103070601000000004000006B000000"),
+    (0x6c, "Juice and Food Stains", "F02503150103070401000000004000006C000000"),
+    (0x71, "Quick Tub Clean", "F025031530030201000000000000000071000000"),
+    (0x79, "Drain", "F025031517000100000000000000000079000000"),
+    (0x7a, "Spin", "F02503151700FF0000000000000000007A000000"),
+    (0x43, "Dry 30", "F025031518000000000300000000000043000000"),
+    (0x44, "Dry 60", "F025031518000000000400000000000044000000"),
+    (0x45, "Turbo Dry", "F025031518000000000200000000000045000000"),
+    (0x46, "Shirt Dry", "F025031518000000000A00000000000046000000"),
+    (0x42, "Quick Wash + Dry", "F025031524030703010300000000000042000000"),
+    (0x81, "Duvet", "F025031505030701010000000000000081000000"),
+    (0x82, "Sportswear", "F025031508030504010000000000000082000000"),
+];
 
 pub struct Device {
     core: Arc<AabbDeviceCore>,
@@ -42,12 +73,14 @@ impl Device {
 
         let mut base = default_config(&meta, Some(json!({"name": "LG Washer"})));
         install_components(&mut base, fy_base_components(crate::washer_common::FY_REFRESH));
+        let dl_options: Vec<&str> = DOWNLOAD_COURSES.iter().map(|(_, n, _)| *n).collect();
         install_components(
             &mut base,
             [
                 ("drying_mode", json!({"platform":"sensor","unique_id":"$deviceid-drying-mode","state_topic":"$this/drying_mode","name":"Drying mode","icon":"mdi:tumble-dryer"})),
                 ("cycles", json!({"platform":"sensor","unique_id":"$deviceid-cycles","state_topic":"$this/cycles","name":"Cycle count","icon":"mdi:counter"})),
                 ("energy", json!({"platform":"sensor","unique_id":"$deviceid-energy","state_topic":"$this/energy","name":"Energy","icon":"mdi:lightning-bolt","device_class":"energy","state_class":"total_increasing","unit_of_measurement":"Wh"})),
+                ("downloaded_course", json!({"platform":"select","unique_id":"$deviceid-downloaded_course","state_topic":"$this/downloaded_course","command_topic":"$this/downloaded_course/set","name":"Downloaded cycle","icon":"mdi:cloud-download-outline","options":dl_options})),
             ],
         );
         core.set_config(base);
@@ -84,6 +117,7 @@ impl Device {
         let drying_mode_b = buf[13];
         let lock_status = buf[17];
         let cycles = buf[23] as i64;
+        let downloaded_course = buf[25];
         let energy = buf[30] as i64 * 256 + buf[31] as i64;
 
         self.core.publish_on_off("power", status > 0);
@@ -100,6 +134,15 @@ impl Device {
             drying_mode(drying_mode_b as u32).unwrap_or("None").into(),
         );
         self.core.publish_property("cycles", cycles.into());
+        if downloaded_course != 0 {
+            let dl_name = DOWNLOAD_COURSES
+                .iter()
+                .find(|(c, _, _)| *c == downloaded_course)
+                .map(|(_, n, _)| *n)
+                .unwrap_or("None");
+            self.core
+                .publish_property("downloaded_course", dl_name.into());
+        }
         self.core.publish_on_off("remote_start", lock_status & 2 != 0);
         self.core.publish_on_off("door_lock", lock_status & 0x40 == 0);
         self.core
@@ -110,6 +153,13 @@ impl Device {
     }
 
     pub fn set_property(&self, prop: &str, mqtt_value: &str) {
+        if prop == "downloaded_course" {
+            if let Some((_, _, payload)) = DOWNLOAD_COURSES.iter().find(|(_, n, _)| *n == mqtt_value)
+            {
+                self.core.send(&hex_decode(payload));
+            }
+            return;
+        }
         set_power_start_pause(&self.core, prop, mqtt_value);
     }
 }
@@ -209,6 +259,17 @@ mod tests {
     }
 
     #[test]
+    fn write_downloaded_course_drain_emits_f025() {
+        let (_, thinq, dev) = make();
+        thinq.reset_recorder();
+        dev.set_property("downloaded_course", "Drain");
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA18F025031517000100000000000000000079000000D5BB"
+        );
+    }
+
+    #[test]
     fn initial_state_decodes_status_time_and_error() {
         let ha = decode(SAMPLE_INITIAL);
         assert_eq!(prop(&ha, "power").as_deref(), Some("ON"));
@@ -219,6 +280,7 @@ mod tests {
         assert_eq!(prop(&ha, "initial_time").as_deref(), Some("0"));
         assert_eq!(prop(&ha, "drying_mode").as_deref(), Some("Off"));
         assert_eq!(prop(&ha, "cycles").as_deref(), Some("54"));
+        assert_eq!(prop(&ha, "downloaded_course").as_deref(), Some("Rinse + Spin"));
         assert_eq!(prop(&ha, "energy").as_deref(), Some("0"));
         assert_eq!(prop(&ha, "remote_start").as_deref(), Some("OFF"));
         assert_eq!(prop(&ha, "door_lock").as_deref(), Some("ON"));

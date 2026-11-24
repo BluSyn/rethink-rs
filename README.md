@@ -67,7 +67,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `2REF11EIDG__4` | LRFXC2606S / LRFXS3106S | Setpoints, Ice Plus, Sabbath, Smart Learner, filter life, and water use. |
 | `2REF11EICT__4` | LRYXC2606S | The EIDG controls, plus Craft Ice and the ice-maker states. Sabbath schedule is left out. |
 | `2REF11EBIVPC4` | Unknown | Celsius setpoints in this model's raw units, door, express freeze, and Shabbat. |
-| `2REF11EII__M2` | LMXS28626S | Setpoints from the model-JSON maps. This handler does not ack the appliance. |
+| `2REF11EII__M2`, `2REF12EII_N_2` | LMXS28626S, and GC-L228FTL1 for the alias | Setpoints from the model-JSON maps (with `2REF12EII_N_2`'s own Celsius/Fahrenheit tables). This handler does not ack the appliance. |
 | `2REF12EII_P_2` | GML844 slim multi-door | Fridge and freezer setpoints with this model's own formulas. |
 | `2REFT1DIC4P_U` | GF-V700BSLC | Setpoints, express freeze, and Craft Ice. |
 | `2REFTBDII4P_U` | GF-L500MBL | Setpoints. A temperature write also sets the unit byte. |
@@ -89,7 +89,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F_V__Y___W.A__QEUK` | WV9-1409W | Course at its own offset. Start sends one `F0 26` with the settings held in HA. |
 | `G2V7_Y___W.B_2QEUK` | F2NX50S9TKC | Course, temperature, spin, and power, start, and pause. |
 | `VCDWL2QEUK` | F4X7511TWS | Read-only course and status. Power is off only when the status byte is 0. |
-| `F_V__F___W.B_1QEUK`, `F_VA_F___W.B__QEUK` | FV1413H2B / FV1413H2BA. The second id is an alias. | Course, spin, temperature, dry mode, energy, and power/start/pause. |
+| `F_V__F___W.B_1QEUK`, `F_VA_F___W.B__QEUK`, `F_V7_F___W.B__QEUK` | FV1413H2B / FV1413H2BA, and CV5012PC4A for the third id. The last two ids are aliases. | Course, spin, temperature, dry mode, downloaded cycle, energy, and power/start/pause. |
 | `F_V__F___W.B__QEUK` | CV9011EC4 washer/dryer | The `F_V__F___W.B_1QEUK` handler with enveloped `0x20` status and `Cotton+` at code `0x04`. |
 | `F_VB_F___W.B_2QEUK` | CV74J7S2QA washer/dryer | Course plus eco hybrid, prewash, and steam. Power, start, and pause. |
 | `F_V__F___W.B__ECON` | CV9014WC2 washer/dryer | Staged course (spin, temperature, rinse, dry, delay) then start. |
@@ -105,7 +105,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `F3P3CYK2_` | WM4200HBA | Status and course. Only power-off is writable. |
 | `F24VDD` | Unknown | Course, spin, temperature, rinse, and reserve. Start and resume send the captured template. |
 | `FAFXU25006` | WM5800HVA | Read-only 72-byte status. |
-| `T1789EFH_F` | WT7300CW top-loader | Course and options from the marker-led record. Stale `0xE2` snapshots are ignored. |
+| `T1789EFH_F`, `T1872EFHU_F` | WT7300CW, and WT7800CV for the alias | Course and options from the marker-led record. Stale `0xE2` snapshots are ignored. |
 | `T17A1EFHU_F` | WT7305CV / WT7305CW | Course, delay, extra rinses, pause, and power off. Smart-course defaults come from this model's modelJSON. |
 | `TLVE5BB` | WT21BWV6 | Read-only 50-byte status. |
 | `MI2U7B` | SideKick pedestal washer | Course, state, and drawer. Writes wait for a fresh powered-on report. |
@@ -118,7 +118,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 
 | ThinQ modelId | Sold as | This handler |
 | --- | --- | --- |
-| `RV13U6AM8W_D_US_WIFI` | DLE7300WE / DLG7301WE | Course (the old cycle topic is withdrawn), dry level, temperature, and error. Start is rebuilt from the last record. |
+| `RV13U6AM8W_D_US_WIFI`, `RV13U7JS9W_D_US_WIFI` | DLE7300WE / DLG7301WE, and DLEX7800VE for the alias | Course (the old cycle topic is withdrawn), dry level, temperature, and error. Start is rebuilt from the last record. |
 | `RV13B6BSD_D_US_WIFI` | DLEX3900B | Read-only course, dry level, temperature, and error. |
 | `RV13B6ES_D_US_WIFI` | Unknown | Read-only, plus signal, more/less time, and load-item count. |
 | `RV13D4ASJW_D_US` | DLEX4000W | Course, Time Dry, and AI. Writes need Remote Start. |
@@ -147,7 +147,7 @@ An alias is the same handler, not a second implementation. Where one alias drops
 | `N02` | LDPH7972S | The N17 settings plus Time Indicator, Dry Boost, and Night Dry. Loading a download cycle is not implemented. |
 | `D0211`, `D2211` | DB365TXS / DBC435TSL, and XD3A25MB for the alias | Read-only. Course and options publish only while running. |
 | `D2201` | XD3A15MB | The D0211 record plus rinse, softening, and flags. A smart course is stored, not started. |
-| `D30` | LDT54788D | Read-only course and options, including in Ready and Pause. |
+| `D30`, `D3210` | LDT54788D, and LDP6810SS for the alias | Read-only course and options, including in Ready and Pause. |
 
 ### Kitchen
 
@@ -180,21 +180,16 @@ These ThinQ `modelId`s are named by open pull requests on [anszom/rethink](https
 | `2REF11EICDX_2` | LHFS28XBS | Open PR #304 |
 | `2REF11EID___2` | LFXC22526S (ThinQ1) | Open PR #320 |
 | `2REF12EICD__2` | Unknown fridge | Open PR #273 |
-| `2REF12EII_N_2` | GC-L228FTL1 | Open PR #308 |
 | `2REF12EJDD__2` | LRFDS3006D | Open PR #337 |
 | `2RES1VE41PFA2` | Unknown side-by-side | Open PR #298 |
 | `2RES1VE61PFA2` | GC-L257SLP | Open PR #324 |
 | `BDH_D39301_KR` | Korean WashTower dryer half | Open PR #117 |
 | `BDH_HI2103_EU` | RH18U8AVCW | Open PR #315 |
 | `BDVG_FX0003_US` | DLEX6700B | Open PR #204 |
-| `D3210` | LDP6810SS | Open PR #329 |
 | `F3S1CWK__` | WKGX201HWA washer half | Open PR #300 |
 | `FAFXU22007` | WM6700HBA | Open PR #204 |
 | `FAKPK21021` | Korean WashTower washer half | Open PR #117 |
-| `F_V7_F___W.B__QEUK` | CV5012PC4A | Open PR #308 |
 | `RV13B6AM_D_US_WIFI` | DLE3500W | Open PRs #326 and #336 |
-| `RV13U7JS9W_D_US_WIFI` | DLEX7800VE | Open PR #329 |
-| `T1872EFHU_F` | WT7800CV | Open PR #329 |
 | `TLXA5CFPH` | Unknown | Open PR #342 |
 | `VCCHL2QEUK` | WHX9016TLC washer/dryer | Open PR #344 |
 | `VIC2_799_US_FACTORY` | A WM3500CW variant. Not the ThinQ1 WM3500CW already registered. | Open PR #336 |

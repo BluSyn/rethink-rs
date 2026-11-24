@@ -76,7 +76,53 @@ const FREEZER_C: &[(u8, i64)] = &[
     (13, -21),
 ];
 
-fn tables(unit: TemperatureUnit) -> (&'static [(u8, i64)], &'static [(u8, i64)]) {
+// 2REF12EII_N_2 uses the same 9-byte status / 41-byte F017 command layout,
+// with native 1..7 (6..0 °C) and 1..9 (-16..-24 °C) Celsius steps.
+const FRIDGE_C_2REF12EII_N_2: &[(u8, i64)] = &[
+    (1, 6),
+    (2, 5),
+    (3, 4),
+    (4, 3),
+    (5, 2),
+    (6, 1),
+    (7, 0),
+];
+const FREEZER_C_2REF12EII_N_2: &[(u8, i64)] = &[
+    (1, -16),
+    (2, -17),
+    (3, -18),
+    (4, -19),
+    (5, -20),
+    (6, -21),
+    (7, -22),
+    (8, -23),
+    (9, -24),
+];
+const FREEZER_F_2REF12EII_N_2: &[(u8, i64)] = &[
+    (1, 7),
+    (2, 6),
+    (3, 5),
+    (4, 4),
+    (5, 3),
+    (6, 2),
+    (7, 1),
+    (8, 0),
+    (9, -1),
+    (10, -2),
+    (11, -3),
+    (12, -7),
+    (13, -12),
+    (14, -15),
+    (15, -17),
+];
+
+fn tables(model_id: &str, unit: TemperatureUnit) -> (&'static [(u8, i64)], &'static [(u8, i64)]) {
+    if model_id == "2REF12EII_N_2" {
+        return match unit {
+            TemperatureUnit::F => (FRIDGE_F, FREEZER_F_2REF12EII_N_2),
+            TemperatureUnit::C => (FRIDGE_C_2REF12EII_N_2, FREEZER_C_2REF12EII_N_2),
+        };
+    }
     match unit {
         TemperatureUnit::F => (FRIDGE_F, FREEZER_F),
         TemperatureUnit::C => (FRIDGE_C, FREEZER_C),
@@ -294,7 +340,7 @@ impl Device {
             }
             *current = Some(unit);
         }
-        let (fridge, freezer) = tables(unit);
+        let (fridge, freezer) = tables(&self.meta.model_id, unit);
         let (fridge_min, fridge_max) = range_ends(fridge);
         let (freezer_min, freezer_max) = range_ends(freezer);
         let uom = match unit {
@@ -341,7 +387,7 @@ impl Device {
             TemperatureUnit::F
         };
         self.set_temperature_unit(unit);
-        let (fridge, freezer) = tables(unit);
+        let (fridge, freezer) = tables(&self.meta.model_id, unit);
         self.core.publish_property(
             "fridge_setpoint",
             int_or_none(lookup(fridge, status_get(&status, "fridgeSetpoint"))),
@@ -395,7 +441,7 @@ impl DeviceHandler for Device {
     }
     fn set_property(&self, prop: &str, value: &str) {
         let unit = self.unit.lock().unwrap_or(TemperatureUnit::F);
-        let (fridge, freezer) = tables(unit);
+        let (fridge, freezer) = tables(&self.meta.model_id, unit);
         let mut fields: Vec<(&'static str, u8)> = Vec::new();
         match prop {
             "fridge_setpoint" | "freezer_setpoint" => {
@@ -859,5 +905,39 @@ mod tests {
     #[test]
     fn factory_registers_the_model() {
         assert!(crate::registry::t2_factory("2REF11EII__M2").is_some());
+        assert!(crate::registry::t2_factory("2REF12EII_N_2").is_some());
+    }
+
+    #[test]
+    fn ref12eii_n_2_uses_its_own_celsius_tables() {
+        let meta = Metadata::new("2REF12EII_N_2", "2REF12EII_N_2", "clip_hna_v1.9.230");
+        let ha = MockHaConnection::new();
+        let thinq = MockThinq2Device::new(ID, meta.clone());
+        let dev = Device::new(ha.clone(), thinq.clone(), meta);
+
+        // Captured initial status from a live 2REF12EII_N_2 unit (BR, °C):
+        // fridge=5 (2°C), freezer=3 (-18°C), express=1 (OFF), freshAir=2 (Auto),
+        // smartGrid=2 (Seasonal), waterFilter=3 months, doors=0, tempUnit=1 (C).
+        emit(&thinq, "AA0F10EB02050301020203000192BB");
+
+        let dev_info = ha.device(ID).unwrap();
+        let comps = &dev_info.config.as_ref().unwrap().components;
+        assert_eq!(comps["fridge_setpoint"]["unit_of_measurement"], "°C");
+        assert_eq!(comps["fridge_setpoint"]["min"], 0);
+        assert_eq!(comps["fridge_setpoint"]["max"], 6);
+        assert_eq!(comps["freezer_setpoint"]["unit_of_measurement"], "°C");
+        assert_eq!(comps["freezer_setpoint"]["min"], -24);
+        assert_eq!(comps["freezer_setpoint"]["max"], -16);
+
+        assert_eq!(prop(&ha, "fridge_setpoint").as_deref(), Some("2"));
+        assert_eq!(prop(&ha, "freezer_setpoint").as_deref(), Some("-18"));
+        assert_eq!(prop(&ha, "water_filter_months").as_deref(), Some("3"));
+
+        thinq.reset_recorder();
+        dev.set_property("fridge_setpoint", "4");
+        assert_eq!(
+            hex_encode(&thinq.outbox()[0]),
+            "AA2FF017FF03FFFFFFFFFFFF01FFFFFFFFFFFFFFFFFFFFFFFF000000FFFF00FFFFFFFF00FFFFFFFFFFFFFFFFFF97BB"
+        );
     }
 }
